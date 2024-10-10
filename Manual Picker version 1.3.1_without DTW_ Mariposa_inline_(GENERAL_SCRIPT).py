@@ -1063,7 +1063,7 @@ def on_click(event):
         return  # Click outside the plot limits, do nothing
     
         
-    elif mode[0] == 'Remove Picks' and event.inaxes:
+    elif mode[0] == 'Delete Picks' and event.inaxes:
         x, y = event.xdata, event.ydata
         remove_points.append((x, y))
         # Highlight the selected point for removal
@@ -1221,8 +1221,9 @@ def on_mouse_move(event):
 
 def remove_picks_between_points(points):
     
-    """Removes picks between two points for the current shot.
-
+    """
+    Removes picks between two points for the current shot.
+    
     """
 
     global shot_no, final_picks_dict
@@ -1242,38 +1243,6 @@ def remove_picks_between_points(points):
 
     print(f"Removed picks between x-values: {min_x:.2f} and {max_x:.2f} for shot {shot_no}")
     update_plot_with_picks()
-
-
-def find_nearest_point(x, y):
-    global clicked_points, shot_no
-    if not clicked_points[shot_no]:
-        return (None, float('inf'))
-
-    distances = np.array([np.hypot(x - px, y - py)
-                         for px, py in clicked_points[shot_no]])
-    closest_idx = np.argmin(distances)
-    return clicked_points[shot_no][closest_idx], distances[closest_idx]
-
-
-
-def update_highlighted_point():
-    """Update the plot to highlight the nearest point in delete mode."""
-    ax.set_autoscale_on(False)  # Turn off autoscale
-
-    ax.scatter(np.array([highlighted_point[0]]), np.array(
-        [highlighted_point[1]]), marker='o', color='yellow', s=120)
-
-    update_mode_text()
-
-
-def update_highlighted_pick():
-    """Update the plot to highlight the nearest pick in remove mode."""
-    ax.set_autoscale_on(False)  # Turn off autoscale
-
-    ax.scatter(np.array([highlighted_point[0]]), np.array(
-        [highlighted_point[1]]), marker='x', color='yellow', s=120)
-
-    update_mode_text()
    
 
 
@@ -1282,15 +1251,10 @@ def update_plot():
     global shot_no
     ax.clear()
 
-
     wiggle(seismic_data[shot_no, :no_of_samples_to_plot, :],filtered_seismic_data[shot_no, :no_of_samples_to_plot, :] , gain=gain_factor[0], ax =ax)
 
-
     ax.grid(True)
-    
     update_mode_text()
-    
-
     fig.canvas.draw()
 
 
@@ -1318,10 +1282,10 @@ def on_key(event):
         mode[0] = 'Manual Pick'
         fig.canvas.draw()  # Update the canvas to reflect the mode change
 
-    elif event.key == 'r':
+    elif event.key == 'd':
         # Store the current zoom state before entering remove mode
         previous_zoom_state = ax.get_xlim(), ax.get_ylim()
-        mode[0] = 'Remove Picks'
+        mode[0] = 'Delete Picks'
         fig.canvas.draw()
 
     elif event.key == 'h':
