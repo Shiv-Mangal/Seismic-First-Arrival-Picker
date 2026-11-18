@@ -643,8 +643,10 @@ if _HAVE_QT:
             dl.setContentsMargins(2, 2, 2, 2)
             ctl = QHBoxLayout()
             ds = self._display_changed
-            self.sp_gain = self._dspin(0.1, 50, 0.5, 2, slot=ds, track=True)
-            self.sp_gain.setValue(self._gain)
+            import pick_tools as _ptl                  # v12: shared gain control (slider, -/+, typed, Ctrl+wheel)
+            self.sp_gain = _ptl.GainControl(self._gain, 0.1, 200.0)
+            self.sp_gain.valueChanged.connect(lambda *_: ds())
+            self.sp_gain.attach_wheel(self.canvas_data)
             self.sp_clip = self._dspin(0.1, 5, 0.1, 2, ' traces', slot=ds, track=True)
             self.sp_clip.setValue(self._clip)
             n_ms = self.raw.shape[1] * self.dt * 1e3
@@ -652,9 +654,10 @@ if _HAVE_QT:
             self.sp_win.setValue(min(self._win_ms, n_ms))
             self.sp_step = self._ispin(1, max(1, self.raw.shape[2]), slot=ds)
             self.sp_step.setValue(max(1, int(np.ceil(self.raw.shape[2] / 200))))
-            for label, w in (('Gain', self.sp_gain), ('Clip', self.sp_clip),
+            for label, w in (('', self.sp_gain), ('Clip', self.sp_clip),
                              ('Window', self.sp_win), ('Every Nth trace', self.sp_step)):
-                ctl.addWidget(QLabel(label))
+                if label:
+                    ctl.addWidget(QLabel(label))
                 ctl.addWidget(w)
             ctl.addStretch(1)
             dl.addLayout(ctl)

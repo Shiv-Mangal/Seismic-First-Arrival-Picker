@@ -925,8 +925,10 @@ if _HAVE_QT:
             self.cb_disp.addItem('Variable density', 'image')
             self.cb_disp.currentIndexChanged.connect(self._display_changed)
             ds = self._display_changed
-            self.sp_gain = self._dspin(0.1, 50.0, 0.5, 2, slot=ds, track=True)
-            self.sp_gain.setValue(self._wiggle_gain)
+            import pick_tools as _ptl                  # v12: shared gain control (slider, -/+, typed, Ctrl+wheel)
+            self.sp_gain = _ptl.GainControl(self._wiggle_gain, 0.1, 200.0)
+            self.sp_gain.valueChanged.connect(lambda *_: ds())
+            self.sp_gain.attach_wheel(self.canvas_data)
             self.sp_clip = self._dspin(0.1, 5.0, 0.1, 2, ' traces', slot=ds, track=True)
             self.sp_clip.setValue(self._wiggle_clip)
             n_ms = (self.preview.shape[0] / self.fs * 1e3) if self.preview is not None else 1000
@@ -935,10 +937,11 @@ if _HAVE_QT:
             ntr = self.preview.shape[1] if self.preview is not None else 1
             self.sp_step = self._ispin(1, max(1, ntr), slot=ds)
             self.sp_step.setValue(max(1, int(np.ceil(ntr / 200))))   # <= ~200 wiggles by default
-            for label, w in (('Display', self.cb_disp), ('Gain', self.sp_gain),
+            for label, w in (('Display', self.cb_disp), ('', self.sp_gain),
                              ('Clip', self.sp_clip), ('Window', self.sp_win),
                              ('Every Nth trace', self.sp_step)):
-                ctl.addWidget(QLabel(label))
+                if label:
+                    ctl.addWidget(QLabel(label))
                 ctl.addWidget(w)
             ctl.addStretch(1)
             dl.addLayout(ctl)

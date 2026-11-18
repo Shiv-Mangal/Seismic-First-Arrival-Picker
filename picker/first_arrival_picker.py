@@ -135,6 +135,8 @@ try:
     _here = os.path.dirname(os.path.abspath(__file__))
 except NameError:                     # running cells in Spyder/IPython
     _here = os.getcwd()
+if not globals().get('_SCRIPT_PATH'):  # v12: File > Import re-runs the processing cells from here
+    _SCRIPT_PATH = _this_script_path()
 if _here not in sys.path:
     sys.path.insert(0, _here)
 import data_importer as dimp
@@ -189,32 +191,40 @@ else:
                                picks_source=EXISTING_PICKS_FILE or '')
 
 # ---- everything downstream uses these (same names as before) ----
-full_filenames = SURVEY.files
-shot_gather_array = SURVEY.data
-DATA_QUANTITY = SURVEY.quantity
-dt = SURVEY.dt
-file_path_pkl = SURVEY.pkl_path
-file_path_sgt = SURVEY.sgt_path
-reciprocity_report_directory = os.path.dirname(os.path.abspath(file_path_pkl))
-os.makedirs(reciprocity_report_directory, exist_ok=True)
-LOAD_EXISTING_PICKS = SURVEY.load_existing_picks
-recv_df_from_segy = SURVEY.recv_df()          # utmx, utmy, elevation, local_x, local_y, position
-shot_df_from_segy = SURVEY.shot_df()          # + file, offline_m, position, delay_ms
-try:
-    print(f"Import record saved: {SURVEY.save_record()}")
-except Exception as _e:
-    print(f"Could not save the import record: {_e}")
+def _adopt_survey(sv):
+    """Set the script's data/geometry/output names from an imported Survey (v12: also File > Import)."""
+    global SURVEY, full_filenames, shot_gather_array, DATA_QUANTITY, dt, file_path_pkl, file_path_sgt
+    global reciprocity_report_directory, LOAD_EXISTING_PICKS, recv_df_from_segy, shot_df_from_segy
+    SURVEY = sv
+    full_filenames = SURVEY.files
+    shot_gather_array = SURVEY.data
+    DATA_QUANTITY = SURVEY.quantity
+    dt = SURVEY.dt
+    file_path_pkl = SURVEY.pkl_path
+    file_path_sgt = SURVEY.sgt_path
+    reciprocity_report_directory = os.path.dirname(os.path.abspath(file_path_pkl))
+    os.makedirs(reciprocity_report_directory, exist_ok=True)
+    LOAD_EXISTING_PICKS = SURVEY.load_existing_picks
+    recv_df_from_segy = SURVEY.recv_df()          # utmx, utmy, elevation, local_x, local_y, position
+    shot_df_from_segy = SURVEY.shot_df()          # + file, offline_m, position, delay_ms
+    try:
+        print(f"Import record saved: {SURVEY.save_record()}")
+    except Exception as _e:
+        print(f"Could not save the import record: {_e}")
 
-print("Loaded file names and paths:", [os.path.basename(f) for f in full_filenames])
-print(SURVEY.summary())
-for _w in SURVEY.warnings:
-    print("  NOTE:", _w)
-if SURVEY.picks_source:
-    print(f"Continuing picks from: {SURVEY.picks_source}")
-print(f"Picks file : {file_path_pkl}")
-print(f"SGT file   : {file_path_sgt}")
-print(f'Total shots: {len(shot_gather_array)}')
-print(f'Active nodes: {shot_gather_array.shape[2]}, samples: {shot_gather_array.shape[1]}')
+    print("Loaded file names and paths:", [os.path.basename(f) for f in full_filenames])
+    print(SURVEY.summary())
+    for _w in SURVEY.warnings:
+        print("  NOTE:", _w)
+    if SURVEY.picks_source:
+        print(f"Continuing picks from: {SURVEY.picks_source}")
+    print(f"Picks file : {file_path_pkl}")
+    print(f"SGT file   : {file_path_sgt}")
+    print(f'Total shots: {len(shot_gather_array)}')
+    print(f'Active nodes: {shot_gather_array.shape[2]}, samples: {shot_gather_array.shape[1]}')
+
+
+_adopt_survey(SURVEY)
 if not USE_IMPORT_DIALOG:                     # the dialog already showed the topography
     dimp.plot_geometry(SURVEY)
     plt.show()
@@ -1174,11 +1184,21 @@ def _samples_per_ms():
     return RESAMPLE_FACTOR / (dt * 1e3)
 
 
+def _plot_trace_indices(n_traces=None, nth=None):
+    """Trace indices the canvas plots (v12): ranges such as 1-20, 50-60, then every Nth."""
+    n = len(recv_pos) if n_traces is None else int(n_traces)
+    d = dict(DISPLAY)
+    if nth is not None:
+        d['every_nth'] = nth
+    pos = recv_pos if len(recv_pos) == n else None
+    return ptl.selected_trace_indices(d, n, pos)
+
+
 def _display_window():
     """(xlim, ylim) of the display window, in canvas units (receiver position, sample)."""
     spm = _samples_per_ms()
-    x0 = DISPLAY['first_x'] if DISPLAY['first_x'] is not None else recv_pos[0]
-    x1 = DISPLAY['last_x'] if DISPLAY['last_x'] is not None else recv_pos[-1]
+    _sel = ptl.selected_trace_indices(dict(DISPLAY, every_nth=1), len(recv_pos), recv_pos)
+    x0, x1 = float(np.min(np.asarray(recv_pos)[_sel])), float(np.max(np.asarray(recv_pos)[_sel]))
     t0 = DISPLAY['t_start_ms'] * spm
     t1 = (DISPLAY['t_end_ms'] * spm) if DISPLAY['t_end_ms'] else no_of_samples_to_plot
     return (x0 - 0.5, x1 + 0.5), (min(t1, no_of_samples_to_plot), t0)
@@ -1437,8 +1457,9 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
 
         def build_data_artists(data, gain, key, polarity, visible=True):
             """Render one dataset's traces + fill; store in _artist_cache[key]."""
-            x_indices = x[::skipt]
-            traces = data[:, ::skipt] * polarity / maxvals[key.split('_')[0]] * gain * skipt * dx
+            sel = _plot_trace_indices(data.shape[1], skipt)      # v12: trace ranges + every Nth
+            x_indices = x[sel]
+            traces = data[:, sel] * polarity / maxvals[key.split('_')[0]] * gain * skipt * dx
             if CLIP_FRACTION is not None:
                 lim = CLIP_FRACTION * skipt * abs(dx)
                 traces = np.clip(traces, -lim, lim)
@@ -1534,6 +1555,11 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
             ax.grid(True, alpha=0.3, linestyle='--', linewidth=1.0)
             ax.set_xlabel('Receiver position (m)', fontsize='x-large', labelpad=8,
                           fontweight='bold', fontfamily='sans-serif')
+            try:                      # v12: label left, clear of the gain slider on narrow screens
+                ax.xaxis.get_label().set_horizontalalignment('left')
+                ax.xaxis.get_label().set_x(0.0)
+            except Exception:
+                pass
             spm = _samples_per_ms()
             if DISPLAY.get('time_axis', 'ms') == 'ms':        # labels in ms, picks stay in samples
                 ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f'{v / spm:g}'))
@@ -2534,6 +2560,33 @@ def apply_display_settings(settings):
         update_plot_with_picks()
 
 
+def _quick_traces(text, units='trace'):
+    """Plot only these traces ('' = all), keep everything else (v12)."""
+    st = dict(DISPLAY)
+    st.update(clip=CLIP_FRACTION, trace_norm=DISPLAY_TRACE_NORM, trace_ranges=text,
+              range_units=units, first_x=None, last_x=None)
+    apply_display_settings(st)
+
+
+def _ask_trace_ranges():
+    from PyQt5.QtWidgets import QInputDialog
+    n = len(recv_pos)
+    while True:
+        txt, ok = QInputDialog.getText(
+            fig.canvas.manager.window if fig is not None else None, 'Traces to plot',
+            f'Trace numbers 1 to {n}, e.g.  1-100   or   1-20, 50-60\n(empty = all traces)',
+            text=DISPLAY.get('trace_ranges') or '')
+        if not ok:
+            return
+        try:
+            ptl.parse_trace_ranges(txt, n, recv_pos, 'trace')
+        except ValueError as e:
+            QMessageBox.warning(None, 'Traces to plot', str(e))
+            continue
+        _quick_traces(txt.strip())
+        return
+
+
 def open_display_settings():
     t_max = seismic_data.shape[1] / _samples_per_ms()
     cur = dict(DISPLAY)
@@ -2543,9 +2596,35 @@ def open_display_settings():
         cur['t_end_ms'] = no_of_samples_to_plot / _samples_per_ms()
     dlg = ptl.DisplaySettingsDialog(cur, t_max, float(np.min(recv_pos)), float(np.max(recv_pos)),
                                     on_apply=apply_display_settings,
-                                    parent=fig.canvas.manager.window if fig is not None else None)
+                                    parent=fig.canvas.manager.window if fig is not None else None,
+                                    positions=np.asarray(recv_pos, dtype=float),     # v12
+                                    gain=gain_factor[0], on_gain=set_canvas_gain,
+                                    gain_range=(GAIN_MIN, GAIN_MAX))
     _keep_dialog(dlg)
     dlg.exec_()
+
+
+def set_canvas_gain(g):
+    """Set the canvas gain (through the slider, so the zoom is kept) (v12)."""
+    g = float(np.clip(g, GAIN_MIN, GAIN_MAX))
+    if gain_slider is not None and fig is not None and plt.fignum_exists(fig.number):
+        if abs(10 ** gain_slider.val - g) > 1e-9:
+            gain_slider.set_val(float(np.log10(g)))
+    else:
+        gain_factor[0] = g
+
+
+def _gain_menu_step(direction):
+    finalize_and_process_picks()
+    step_gain(direction)
+
+
+def _gain_menu_set(value=None):
+    finalize_and_process_picks()
+    if value is None:
+        adjust_gain()
+    else:
+        set_canvas_gain(value)
 
 
 def show_shortcuts():
@@ -2578,6 +2657,155 @@ def _save_picks_menu():
     print("Picks saved.")
 
 
+# ---------------------------------------------------------------------
+# File menu (v12): import new data from inside the picker
+# ---------------------------------------------------------------------
+_PICKER_CELLS = ('\n# %% Data Normalizer', '\n#%% ==== End of the picking session')
+
+
+def _picker_cells_source():
+    """Source of the cells from the data normalizer to the picker start (re-run after an import)."""
+    path = globals().get('_SCRIPT_PATH') or _this_script_path()
+    if not path or not os.path.isfile(path):
+        from PyQt5.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            None, 'Where is first_arrival_picker.py? (needed to re-run processing after the import)',
+            os.getcwd(), 'Python (*.py)')
+        if not path:
+            return None, None
+    src = open(path, encoding='utf-8').read().replace('\r\n', '\n')
+    a, b = src.find(_PICKER_CELLS[0]), src.find(_PICKER_CELLS[1])
+    if a < 0 or b < 0:
+        QMessageBox.critical(None, 'Import', f'{os.path.basename(path)} does not look like the picker '
+                                             f'script (processing cells not found).')
+        return None, None
+    globals()['_SCRIPT_PATH'] = path
+    return path, src[a:b]
+
+
+def _close_picker_windows():
+    """Close the canvas and its non-modal windows before a new data set is loaded."""
+    global geometry_window, recip_window
+    for w in (geometry_window, recip_window):
+        try:
+            if w is not None:
+                w.close()
+        except Exception:
+            pass
+    geometry_window = recip_window = None
+    try:
+        if fig is not None and plt.fignum_exists(fig.number):
+            plt.close(fig)
+    except Exception:
+        pass
+
+
+def _save_session_before_import():
+    """Finish and save the picks of the current session. Returns False to stop."""
+    try:
+        if fig is not None and plt.fignum_exists(fig.number) and shot_no is not None:
+            finalize_and_process_picks()
+            save_picks(file_path_pkl)
+        return True
+    except Exception as e:
+        r = QMessageBox.question(None, 'Picks not saved',
+                                 f'The current picks could not be saved:\n{e}\n\nContinue anyway?')
+        return r == QMessageBox.Yes
+
+
+def _start_imported_session(sv):
+    """Make sv the data set and re-run preprocessing, filtering and the picker cells."""
+    path, code = _picker_cells_source()
+    if code is None:
+        return False
+    if not _save_session_before_import():
+        return False
+    _close_picker_windows()
+    _adopt_survey(sv)
+    print(f"Import done ({sv.line}, {sv.quantity}): running preprocessing, filtering and the picker ...")
+
+    def run():
+        try:
+            exec(compile(code, path, 'exec'), globals())
+        except SystemExit:
+            pass
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(None, 'Import', f'The new data could not be prepared:\n{e}')
+    if IMPORT_RUN_DEFERRED[0]:
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(0, run)          # let the menu click return first
+    else:
+        run()
+    return True
+
+
+IMPORT_RUN_DEFERRED = [True]           # tests set False to run the cells at once
+
+
+def import_new_data():
+    """File > Import SEG-Y data...: the import window; on OK the picker restarts on the new data (v12)."""
+    try:
+        start = os.path.dirname(os.path.abspath(full_filenames[0])) if full_filenames else ''
+    except Exception:
+        start = ''
+    parent = None
+    try:
+        parent = fig.canvas.manager.window if fig is not None and plt.fignum_exists(fig.number) else None
+    except Exception:
+        pass
+    sv = dimp.open_import_dialog(parent=parent, start_folder=start,
+                                 pattern=search_string_for_segy_files or '*')
+    if sv is None:
+        print("Import cancelled: the current data stay loaded.")
+        return False
+    return _start_imported_session(sv)
+
+
+def import_from_record(path=None):
+    """File > Repeat an import (record .json): same files, data type, geometry and outputs (v12)."""
+    if path is None:
+        from PyQt5.QtWidgets import QFileDialog
+        start = reciprocity_report_directory if os.path.isdir(str(reciprocity_report_directory)) else ''
+        path, _ = QFileDialog.getOpenFileName(None, 'Import record', start,
+                                              'Import record (*_import.json *.json)')
+    if not path:
+        return False
+    try:
+        rec = dimp.load_record(path)
+        sv = dimp.import_files(rec['files'], rec['quantity'], progress=_print_import_progress,
+                               geometry=rec['geometry'], pkl_path=rec.get('pkl') or None,
+                               sgt_path=rec.get('sgt') or None,
+                               use_header_delay=rec.get('use_header_delay', True),
+                               load_existing_picks=True,
+                               picks_source=rec['pkl'] if rec.get('pkl') and os.path.isfile(rec['pkl'])
+                               else (rec.get('picks_source') or ''))
+    except Exception as e:
+        QMessageBox.critical(None, 'Import record', f'Could not repeat the import:\n{e}')
+        return False
+    return _start_imported_session(sv)
+
+
+def save_canvas_image(path=None):
+    """File > Save canvas image... (Ctrl+S on the canvas saves a PNG next to the picks)."""
+    if path is None:
+        from PyQt5.QtWidgets import QFileDialog
+        start = os.path.join(reciprocity_report_directory, f'shot_{(shot_no or 0) + 1}_plot.png')
+        path, _ = QFileDialog.getSaveFileName(None, 'Save canvas image', start,
+                                              'PNG (*.png);;PDF (*.pdf);;SVG (*.svg)')
+    if path:
+        fig.savefig(path, dpi=300, bbox_inches='tight', pad_inches=0.2)
+        print(f"Canvas saved to: {path}")
+    return path
+
+
+def close_picker():
+    if _save_session_before_import():
+        _close_picker_windows()
+        print("Picker closed; picks saved. Run the cells below the picker to export the SGT file.")
+
+
 def install_app_menus(fig):
     """Add menus and a tools toolbar to the picker's Qt window (no-op on other backends)."""
     global _quantity_actions
@@ -2589,7 +2817,22 @@ def install_app_menus(fig):
         print(f"Menus not available on this backend ({e}); use the keys and canvas buttons.")
         return
     mb.clear()
-    win.setWindowTitle('First-arrival picker')
+    try:
+        win.setWindowTitle(f'First-arrival picker - {SURVEY.line} ({DATA_QUANTITY})')
+    except Exception:
+        win.setWindowTitle('First-arrival picker')
+
+    from PyQt5.QtGui import QKeySequence
+    m_file = mb.addMenu('&File')                       # v12
+    a = m_file.addAction('Import SEG-Y data...', import_new_data)
+    a.setShortcut(QKeySequence('Ctrl+O'))
+    a.setToolTip('Open the import window; the picks of this session are saved first')
+    m_file.addAction('Repeat an import (import record .json)...', import_from_record)
+    m_file.addSeparator()
+    m_file.addAction('Save picks  (s)', _run_from_menu(_save_picks_menu))
+    m_file.addAction('Save canvas image...', save_canvas_image)
+    m_file.addSeparator()
+    m_file.addAction('Close picker (saves picks)', close_picker)
 
     m_data = mb.addMenu('&Data')
     m_data.addAction('Survey geometry / topography...', open_geometry_window)
@@ -2620,9 +2863,21 @@ def install_app_menus(fig):
     m_auto.addAction('STA/LTA (settings + preview)...', open_autopick_stalta)
     m_auto.addAction('Undo last auto-pick', undo_last_autopick)
 
-    m_view = mb.addMenu('&View')
-    m_view.addAction('Display settings (time axis, window, traces, fill)...', open_display_settings)
-    m_view.addAction('Go to the display window (h)', lambda: (reset_to_full_view()))
+    m_view = mb.addMenu('&Traces, axes && gain')        # v12: was View
+    a = m_view.addAction('Plotted traces, time axis and gain...', open_display_settings)
+    a.setShortcut(QKeySequence('Ctrl+D'))
+    m_view.addAction('Plot all traces', lambda: _quick_traces(''))
+    m_view.addAction('Plot trace ranges (e.g. 1-20, 50-60)...', _ask_trace_ranges)
+    m_view.addSeparator()
+    m_g = m_view.addMenu('Gain')
+    m_g.addAction('Increase gain  (× 1.25)', lambda: _gain_menu_step(+1))
+    m_g.addAction('Decrease gain  (÷ 1.25)', lambda: _gain_menu_step(-1))
+    m_g.addAction('Set gain...  (g)', lambda: _gain_menu_set())
+    m_g.addSeparator()
+    for _gv in (1, 3.5, 10, 30):
+        m_g.addAction(f'Gain ×{_gv:g}', lambda _c=False, v=_gv: _gain_menu_set(v))
+    m_view.addSeparator()
+    m_view.addAction('Go to the plotted window (h)', lambda: (reset_to_full_view()))
     m_qc = mb.addMenu('&QC')
     m_qc.addAction('Reciprocity and pick QC...', open_reciprocity_window)
 
@@ -2637,11 +2892,12 @@ def install_app_menus(fig):
     tools.setText('Tools \u25be')
     tools.setPopupMode(QToolButton.InstantPopup)
     menu = QMenu(tools)
-    for title, func in (('Survey geometry / topography...', open_geometry_window),
+    for title, func in (('Import SEG-Y data...', import_new_data),
+                        ('Survey geometry / topography...', open_geometry_window),
                         ('Preprocessing...', _run_from_menu(open_preprocessing_ui)),
                         ('Filter designer...', _run_from_menu(open_filter_designer_ui)),
                         ('Reciprocity and pick QC...', open_reciprocity_window),
-                        ('Display settings...', open_display_settings),
+                        ('Plotted traces, time axis and gain...', open_display_settings),
                         ('Void picks on a trace...', _run_from_menu(open_void_picks_ui)),
                         ('Undo last void', _run_from_menu(undo_last_void)),
                         ('Shortcuts...', show_shortcuts)):
@@ -2649,8 +2905,9 @@ def install_app_menus(fig):
     tools.setMenu(menu)
     tb.addWidget(tools)
     tb.addSeparator()
+    tb.addAction('\U0001F4C2 Import', import_new_data)       # v12
     tb.addAction('\u26f0 Geometry', open_geometry_window)
-    tb.addAction('\u25a4 Display', open_display_settings)
+    tb.addAction('\u25a4 Traces / axes / gain', open_display_settings)
     tb.addAction('\u2699 Preprocessing', _run_from_menu(open_preprocessing_ui))
     tb.addAction('\u224b Filter', _run_from_menu(open_filter_designer_ui))
     tb.addAction('\u21c4 Reciprocity && pick QC', open_reciprocity_window)

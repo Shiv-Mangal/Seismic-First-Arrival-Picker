@@ -568,9 +568,11 @@ if _HAVE_QT:
 
         def __init__(self, params, get_data, n_shots, shot_x, recv_x, current_shot=0,
                      available_quantities=('acceleration',), existing_picks=None,
-                     on_apply=None, preview_ms=300.0, parent=None):
+                     on_apply=None, preview_ms=300.0, parent=None, gain=1.5):
             super().__init__(parent)
             self.setWindowTitle('Automatic picking: STA/LTA')
+            self._gain0 = float(gain)              # v12: preview wiggle gain (Gain control on the tab)
+            self._wp = None
             self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
             self.p = (params or AutoPickParams()).copy()
             self.get_data = get_data
@@ -794,6 +796,15 @@ if _HAVE_QT:
                 cv = FigureCanvas(fig)
                 l.addWidget(NavigationToolbar(cv, w))
                 l.addWidget(cv, 1)
+                if key == 'shot':                   # v12: gain for the preview wiggles
+                    import pick_tools as _ptl
+                    row = QHBoxLayout()
+                    self.gain_ctl = _ptl.GainControl(self._gain0, 0.1, 200.0)
+                    self.gain_ctl.valueChanged.connect(self._gain_changed)
+                    self.gain_ctl.attach_wheel(cv)
+                    row.addWidget(self.gain_ctl, 1)
+                    row.addStretch(1)
+                    l.addLayout(row)
                 if key == 'trace':
                     row = QHBoxLayout()
                     row.addWidget(QLabel('Receiver position'))
@@ -951,7 +962,9 @@ if _HAVE_QT:
             step = max(1, int(round(1e-3 / dt)) // 2)            # display at ~0.5 ms
             wp = WigglePanel(ax)
             wp.prepare(data[:ns:step], 1.0 / (dt * step), self.recv_x, 1, oversample=1)
-            wp.draw(1.5, 1.0, f'Shot {self.shot + 1}: {self.p.quantity}, '
+            self._wp = wp
+            g = self.gain_ctl.value() if hasattr(self, 'gain_ctl') else self._gain0
+            wp.draw(g, 1.0, f'Shot {self.shot + 1}: {self.p.quantity}, '
                               f'{"filtered" if self.p.use_filtered else "original"}')
             r = self.result
             x = self.recv_x
@@ -972,6 +985,17 @@ if _HAVE_QT:
             ax.set_ylim(self.preview_ms, 0)
             ax.legend(loc='lower right', fontsize='small')
             ax.set_xlabel('Receiver position (m)  -  click a trace to see it in "One trace"')
+            self.canv['shot'].draw_idle()
+
+        def _gain_changed(self, g):
+            """Only rescale the wiggles (no re-pick); the zoom stays."""
+            if self._wp is None or self._wp.lc is None:
+                return
+            ax = self._wp.ax
+            lims = ax.get_xlim(), ax.get_ylim()
+            self._wp.draw(float(g), 1.0)
+            ax.set_xlim(lims[0])
+            ax.set_ylim(lims[1])
             self.canv['shot'].draw_idle()
 
         def _shot_click(self, ev):

@@ -32,7 +32,7 @@ import json
 import time
 import fnmatch
 import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 import numpy as np
 
@@ -227,12 +227,182 @@ def band_energy(f, a, bands=None):
     return np.array(out)
 
 
+# ---------------- spectrum views (v12): see past the sensor resonance ----------------
+@dataclass
+class SpectrumView:
+    """
+    How the spectra panels show amplitude (v12).
+
+    mode = 'raw'       : as recorded (the sensor response included)
+           'corrected' : divided by the sensor amplitude response |H(f)| (water level
+                         `water` x max|H| so nothing blows up where |H| is tiny)
+           'relative'  : each shot divided by the average of all shots, frequency by
+                         frequency. Anything common to every shot (sensor response,
+                         coupling, recording chain) cancels; what is left is how each
+                         shot differs from the survey (0 dB = average).
+    sensor = 'accelerometer' : 2nd-order resonance, flat below f0, peak 1/(2 zeta) at f0
+             'geophone'      : velocity geophone, natural frequency geo_fn, damping geo_zeta
+             'file'          : response file, two columns: frequency (Hz), amplitude
+    exclude : leave ex_lo..ex_hi Hz out when scaling (peak normalisation, dB reference,
+              energy shares); the band is still drawn, shaded.
+    """
+    mode: str = 'raw'
+    sensor: str = 'accelerometer'
+    f0: float = 200.0
+    zeta: float = 0.02
+    geo_fn: float = 4.5
+    geo_zeta: float = 0.7
+    resp_file: str = ''
+    water: float = 0.01
+    exclude: bool = False
+    ex_lo: float = 180.0
+    ex_hi: float = 225.0
+
+    def copy(self):
+        return SpectrumView(**asdict(self))
+
+    def describe(self):
+        if self.mode == 'corrected':
+            s = {'accelerometer': f'accelerometer resonance f0 {self.f0:g} Hz, damping {self.zeta:.3g}',
+                 'geophone': f'geophone {self.geo_fn:g} Hz, damping {self.geo_zeta:.3g}',
+                 'file': f'response file {os.path.basename(self.resp_file) or "(none)"}'}[self.sensor]
+            txt = f'corrected for the sensor response ({s})'
+        elif self.mode == 'relative':
+            txt = 'relative to the survey average'
+        else:
+            txt = 'raw (sensor response included)'
+        if self.exclude:
+            txt += f'; {self.ex_lo:g}–{self.ex_hi:g} Hz left out of the scaling'
+        return txt
+
+
+SPECTRUM_VIEW = SpectrumView()          # last settings, shared by the import and geometry windows
+
+
+def response_accelerometer(f, f0, zeta):
+    """|H| of a 2nd-order sensor (accelerometer) with resonance f0, damping zeta; |H(0)| = 1."""
+    r = np.asarray(f, float) / float(f0)
+    return 1.0 / np.sqrt((1 - r ** 2) ** 2 + (2 * zeta * r) ** 2)
+
+
+def response_geophone(f, fn, zeta):
+    """|H| of a velocity geophone (natural frequency fn, damping zeta); 1 well above fn."""
+    r = np.asarray(f, float) / float(fn)
+    return r ** 2 / np.sqrt((1 - r ** 2) ** 2 + (2 * zeta * r) ** 2)
+
+
+def read_response_file(path, f):
+    """Amplitude response from a text/CSV file (columns: frequency Hz, amplitude [, phase]),
+    interpolated (in log amplitude) onto f. Raises ValueError for unusable files."""
+    import re as _re
+    rows = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            parts = [p for p in _re.split(r'[,\s;]+', line.strip()) if p]
+            try:
+                vals = [float(p) for p in parts[:2]]
+            except ValueError:
+                continue                                    # header / comment
+            if len(vals) == 2:
+                rows.append(vals)
+    if len(rows) < 2:
+        raise ValueError(f'{os.path.basename(path)}: need at least two rows of "frequency, amplitude".')
+    a = np.array(sorted(rows))
+    if np.any(a[:, 1] <= 0):
+        raise ValueError(f'{os.path.basename(path)}: amplitudes must be positive.')
+    return np.exp(np.interp(np.asarray(f, float), a[:, 0], np.log(a[:, 1])))
+
+
+def sensor_response(f, view):
+    if view.sensor == 'geophone':
+        return response_geophone(f, view.geo_fn, view.geo_zeta)
+    if view.sensor == 'file':
+        if not view.resp_file:
+            raise ValueError('Choose a response file.')
+        return read_response_file(view.resp_file, f)
+    return response_accelerometer(f, view.f0, view.zeta)
+
+
+def estimate_resonance(f, a, fmin=20.0):
+    """
+    Strongest peak above fmin and its half-power (-3 dB) width -> f0, damping zeta = width/(2 f0),
+    Q, prominence over the median spectrum (dB), and a band f0 +- 3 widths to leave out.
+    """
+    f = np.asarray(f, float)
+    a = np.asarray(a, float)
+    m = f >= fmin
+    if m.sum() < 5 or not np.any(a[m] > 0):
+        raise ValueError('Spectrum too short to find a peak.')
+    idx = np.flatnonzero(m)
+    i = idx[np.argmax(a[m])]
+    pk = a[i]
+    half = pk / np.sqrt(2)
+
+    def cross(j, step):
+        while 0 < j < len(a) - 1 and a[j] > half:
+            j += step
+        k = j - step                                         # last point above half power
+        if a[k] == a[j]:
+            return f[j]
+        return f[j] + (half - a[j]) * (f[k] - f[j]) / (a[k] - a[j])
+    f1, f2 = cross(i, -1), cross(i, +1)
+    df = max(f2 - f1, f[1] - f[0])
+    # parabolic refinement of the peak frequency
+    f0 = f[i]
+    if 0 < i < len(a) - 1:
+        y0, y1, y2 = np.log(np.maximum(a[i - 1:i + 2], 1e-30))
+        den = y0 - 2 * y1 + y2
+        if den < 0:
+            f0 = f[i] + 0.5 * (y0 - y2) / den * (f[1] - f[0])
+    zeta = float(np.clip(df / (2 * f0), 0.002, 0.7))
+    prom = 20 * np.log10(pk / max(np.median(a[m]), 1e-30))
+    return dict(f0=float(f0), zeta=zeta, Q=float(f0 / df), width=float(df), prominence_db=float(prom),
+                ex_lo=float(max(0.0, f0 - 3 * df)), ex_hi=float(f0 + 3 * df))
+
+
+def apply_spectrum_view(f, spectra, view=None):
+    """Spectra (n, nf) seen through `view`. Returns (S, note)."""
+    S = np.array(spectra, float)
+    view = view or SpectrumView()
+    if view.mode == 'corrected':
+        H = np.abs(sensor_response(f, view))
+        H = np.maximum(H, view.water * (H.max() or 1.0))
+        return S / H[None, :], ''
+    if view.mode == 'relative':
+        avg = S.mean(axis=0)
+        floor = 1e-6 * (avg.max() or 1.0)
+        return S / np.maximum(avg, floor)[None, :], ''
+    return S, ''
+
+
+def _scaling_mask(f, view):
+    m = f > 0
+    if view is not None and view.exclude and view.ex_hi > view.ex_lo:
+        m &= ~((f >= view.ex_lo) & (f <= view.ex_hi))
+    return m
+
+
+def spectrum_peak_hint(f, avg):
+    """'Sharp peak at 203 Hz ...' when one narrow line dominates (v12), else ''."""
+    try:
+        r = estimate_resonance(f, avg)
+    except ValueError:
+        return ''
+    if r['prominence_db'] >= 20 and r['Q'] >= 5:
+        return (f"Sharp peak at {r['f0']:.0f} Hz (Q {r['Q']:.0f}, {r['prominence_db']:.0f} dB above the "
+                f"median): if this is the sensor resonance, use 'Corrected for the sensor' or leave "
+                f"{r['ex_lo']:.0f}–{r['ex_hi']:.0f} Hz out of the scaling.")
+    return ''
+
+
 def draw_spectra(ax_s, ax_b, f, spectra, labels, highlight=(), db=True, logf=False, normalize=True,
-                 fmax=None):
+                 fmax=None, view=None):
     """
     Amplitude spectra of several shots + their average (top) and the share of energy
     per frequency band (bottom). spectra: list of arrays (one per shot, same f);
     highlight: indices drawn in colour with a legend; the rest light grey.
+    view: SpectrumView (v12) - raw, corrected for the sensor response, or relative to the
+    survey average; optionally a band left out of the scaling. Returns a note ('' or a hint).
     """
     import matplotlib
     ax_s.clear()
@@ -241,12 +411,24 @@ def draw_spectra(ax_s, ax_b, f, spectra, labels, highlight=(), db=True, logf=Fal
         for a in (ax_s, ax_b):
             a.text(0.5, 0.5, 'Read files to see their spectra', ha='center', va='center',
                    transform=a.transAxes, color='0.5')
-        return
-    S = np.array(spectra, float)
-    if normalize:
-        S = S / np.maximum(S.max(axis=1, keepdims=True), 1e-30)
+        return ''
+    view = view or SpectrumView()
+    f = np.asarray(f, float)
+    raw_avg = np.array(spectra, float).mean(axis=0)
+    try:
+        S, _ = apply_spectrum_view(f, spectra, view)
+        err = ''
+    except (ValueError, OSError) as e:
+        S, err = np.array(spectra, float), f'Sensor response not applied: {e}'
+        view = SpectrumView(**dict(asdict(view), mode='raw'))
+    relative = view.mode == 'relative'
+    sm = _scaling_mask(f, view)                       # frequencies used for scaling
+    if not sm.any():
+        sm = f > 0
+    if normalize and not relative:
+        S = S / np.maximum(S[:, sm].max(axis=1, keepdims=True), 1e-30)
     avg = S.mean(axis=0)
-    ref = avg.max() or 1.0
+    ref = 1.0 if relative else (avg[sm].max() or 1.0)
     conv = (lambda a: 20 * np.log10(np.maximum(a / ref, 1e-6))) if db else (lambda a: a / ref)
     m = f > 0
     hl = [i for i in highlight if 0 <= i < len(S)]
@@ -257,25 +439,53 @@ def draw_spectra(ax_s, ax_b, f, spectra, labels, highlight=(), db=True, logf=Fal
     for n, i in enumerate(hl[:10]):
         ax_s.plot(f[m], conv(S[i])[m], color=cols(n % 10), lw=1.3, zorder=2, label=labels[i])
     ax_s.plot(f[m], conv(avg)[m], color='k', lw=2.4, zorder=3, label=f'Average of {len(S)} shots')
+    if view.exclude and view.ex_hi > view.ex_lo:
+        ax_s.axvspan(view.ex_lo, view.ex_hi, color='#f9e79f', alpha=0.5, zorder=0,
+                     label=f'{view.ex_lo:g}–{view.ex_hi:g} Hz: not used for scaling')
     if logf:
         ax_s.set_xscale('log')
     ax_s.set_xlim(f[m][0] if logf else 0, fmax or f.max())
-    if db:
-        ax_s.set_ylim(-60, 3)
-        ax_s.set_ylabel('Amplitude (dB re average peak)')
+    shown = m & (f <= (fmax or f.max()))
+    if relative:
+        if db:
+            vals = conv(S)[:, shown & sm]
+            lim = float(np.clip(np.nanpercentile(np.abs(vals), 99) * 1.15, 3, 60)) if vals.size else 20
+            ax_s.set_ylim(-lim, lim)
+            ax_s.axhline(0, color='k', lw=0.8, ls='--')
+            ax_s.set_ylabel('Shot / survey average (dB)')
+        else:
+            vals = conv(S)[:, shown & sm]
+            hi = float(np.nanpercentile(vals, 99) * 1.15) if vals.size else 2
+            ax_s.set_ylim(0, max(1.5, hi))
+            ax_s.axhline(1, color='k', lw=0.8, ls='--')
+            ax_s.set_ylabel('Shot / survey average')
+    elif db:
+        ax_s.set_ylim(-60, 6 if view.exclude else 3)
+        ax_s.set_ylabel('Amplitude (dB re average peak' + (', band left out' if view.exclude else '') + ')')
     else:
+        ax_s.set_ylim(0, 1.15)
         ax_s.set_ylabel('Amplitude (relative)')
     ax_s.set_xlabel('Frequency (Hz)')
     ax_s.grid(alpha=0.3, which='both')
     ax_s.legend(fontsize='x-small', loc='upper right', ncol=2 if len(hl) > 4 else 1)
-    ax_s.set_title('Amplitude spectrum (each shot: mean over its traces)'
-                   + ('; each shot scaled to its own peak' if normalize else ''), fontsize='medium')
-    # band energy
+    title = {'raw': 'Amplitude spectrum (each shot: mean over its traces)',
+             'corrected': 'Amplitude spectrum corrected for the sensor response',
+             'relative': 'Each shot relative to the survey average (common sensor response cancels)'}[view.mode]
+    if normalize and not relative:
+        title += '; each shot scaled to its own peak'
+    ax_s.set_title(title, fontsize='medium')
+    # band energy: of what is plotted (relative view: of the shots as recorded)
+    E = np.array(spectra, float) if relative else S
+    Eavg = E.mean(axis=0)
     nyq = f.max()
     bands = [(lo, hi) for lo, hi in SPECTRUM_BANDS if lo < nyq]
-    names = [f'{lo:g}\u2013{(hi if hi is not None and hi < nyq else nyq):g}' for lo, hi in bands]
-    rows = [('Average', band_energy(f, avg, bands), 'k')]
-    rows += [(labels[i], band_energy(f, S[i], bands), cols(n % 10)) for n, i in enumerate(hl[:6])]
+    names = [f'{lo:g}–{(hi if hi is not None and hi < nyq else nyq):g}' for lo, hi in bands]
+    w_e = sm.astype(float)                             # left-out band carries no energy
+
+    def be(a):
+        return band_energy(f, a * w_e, bands)
+    rows = [('Average', be(Eavg), 'k')]
+    rows += [(labels[i], be(E[i]), cols(n % 10)) for n, i in enumerate(hl[:6])]
     x = np.arange(len(bands))
     w = 0.8 / len(rows)
     for k, (lab, e, c) in enumerate(rows):
@@ -287,7 +497,26 @@ def draw_spectra(ax_s, ax_b, f, spectra, labels, highlight=(), db=True, logf=Fal
     ax_b.grid(alpha=0.3, axis='y')
     if len(rows) > 1:
         ax_b.legend(fontsize='x-small', loc='upper right')
-    ax_b.set_title('Energy per frequency band', fontsize='medium')
+    sub = {'raw': '', 'corrected': ' (sensor response removed)', 'relative': ' (as recorded)'}[view.mode]
+    if view.exclude:
+        sub += f' without {view.ex_lo:g}–{view.ex_hi:g} Hz'
+    ax_b.set_title('Energy per frequency band' + sub, fontsize='medium')
+    if err:
+        return err
+    if view.mode == 'corrected':
+        try:
+            H = np.abs(sensor_response(f, view))
+            sel = (f <= (fmax or f.max())) & (f > 0)
+            Hc = np.maximum(H, view.water * H.max())[sel]
+            gmax = float(np.median(H[sel]) / Hc.min())          # boost relative to the flat band
+        except Exception:
+            gmax = 1.0
+        if gmax > 2:
+            where = 'above the resonance' if view.sensor == 'accelerometer' else 'where the sensor is weak'
+            return (f'Note: the correction boosts {where} by up to x{gmax:.0f} ({20 * np.log10(gmax):.0f} dB) '
+                    f'relative to the flat band, so noise there is boosted too.')
+        return ''
+    return spectrum_peak_hint(f, raw_avg) if view.mode == 'raw' and not view.exclude else ''
 
 
 def read_shot(path):
@@ -943,6 +1172,209 @@ except ImportError:
 
 if _HAVE_QT:
 
+    class SpectrumControls(QWidget):
+        """
+        Controls of a spectra panel (v12), shared by the import and geometry windows:
+
+          dB | Log frequency | Scale each shot to its peak | Up to ... Hz
+          Show: Raw / Corrected for the sensor / Relative to the survey average
+                Sensor: Accelerometer (f0, damping) | Geophone (fn, damping) | Response file
+                [Estimate from data]  (fits the strongest narrow peak: f0, damping, band)
+          [ ] Leave lo-hi Hz out of the scaling
+          hint line
+
+        on_change() is called after every change; get_avg() -> (f, average raw spectrum)
+        feeds Estimate from data. view() returns a SpectrumView.
+        """
+
+        MODES = (('Raw (as recorded)', 'raw'),
+                 ('Corrected for the sensor response', 'corrected'),
+                 ('Relative to the survey average', 'relative'))
+        SENSORS = (('Accelerometer (resonance f0, damping)', 'accelerometer'),
+                   ('Geophone (natural frequency, damping)', 'geophone'),
+                   ('Response file (frequency, amplitude)', 'file'))
+
+        def __init__(self, on_change=None, get_avg=None, show_norm=True, show_fmax=True, parent=None):
+            super().__init__(parent)
+            self.on_change, self.get_avg = on_change, get_avg
+            self._quiet = False
+            v = SPECTRUM_VIEW
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(3)
+            r1 = QHBoxLayout()
+            self.chk_db = QCheckBox('dB')
+            self.chk_db.setChecked(True)
+            self.chk_logf = QCheckBox('Log frequency')
+            self.chk_norm = QCheckBox('Scale each shot to its peak')
+            self.chk_norm.setChecked(True)
+            self.chk_norm.setVisible(show_norm)
+            self.sp_fmax = QDoubleSpinBox()
+            self.sp_fmax.setRange(0, 1e5)
+            self.sp_fmax.setDecimals(0)
+            self.sp_fmax.setSpecialValueText('Nyquist')
+            self.sp_fmax.setSuffix(' Hz')
+            for c in (self.chk_db, self.chk_logf, self.chk_norm):
+                c.toggled.connect(self._changed)
+                r1.addWidget(c)
+            self.sp_fmax.valueChanged.connect(self._changed)
+            self.lab_fmax = QLabel('Up to')
+            r1.addWidget(self.lab_fmax)
+            r1.addWidget(self.sp_fmax)
+            self.lab_fmax.setVisible(show_fmax)
+            self.sp_fmax.setVisible(show_fmax)
+            r1.addStretch(1)
+            lay.addLayout(r1)
+
+            r2 = QHBoxLayout()
+            r2.addWidget(QLabel('Show'))
+            self.cb_mode = QComboBox()
+            for lab, k in self.MODES:
+                self.cb_mode.addItem(lab, k)
+            self.cb_mode.setCurrentIndex([k for _, k in self.MODES].index(v.mode))
+            self.cb_mode.setToolTip(
+                'Raw: as recorded, the sensor response included.\n'
+                'Corrected: divided by the sensor amplitude response |H(f)|.\n'
+                'Relative: each shot / the average of all shots - whatever is common to every shot '
+                '(sensor, recording chain) cancels.')
+            self.cb_mode.currentIndexChanged.connect(self._changed)
+            r2.addWidget(self.cb_mode)
+            self.cb_sensor = QComboBox()
+            for lab, k in self.SENSORS:
+                self.cb_sensor.addItem(lab, k)
+            self.cb_sensor.setCurrentIndex([k for _, k in self.SENSORS].index(v.sensor))
+            self.cb_sensor.currentIndexChanged.connect(self._changed)
+            r2.addWidget(self.cb_sensor)
+            self.sp_f0 = self._d(1, 1e5, v.f0, ' Hz', 1, 1)
+            self.sp_zeta = self._d(0.001, 2, v.zeta, '', 3, 0.005)
+            self.sp_fn = self._d(0.1, 1e4, v.geo_fn, ' Hz', 1, 0.5)
+            self.sp_gz = self._d(0.01, 2, v.geo_zeta, '', 2, 0.05)
+            self.lab_f0, self.lab_z = QLabel('f0'), QLabel('damping')
+            self.lab_fn, self.lab_gz = QLabel('fn'), QLabel('damping')
+            for wdg in (self.lab_f0, self.sp_f0, self.lab_z, self.sp_zeta,
+                        self.lab_fn, self.sp_fn, self.lab_gz, self.sp_gz):
+                r2.addWidget(wdg)
+            self.btn_file = QPushButton('File...')
+            self.btn_file.clicked.connect(self._pick_file)
+            self.lab_file = QLabel(os.path.basename(v.resp_file) or '(no file)')
+            r2.addWidget(self.btn_file)
+            r2.addWidget(self.lab_file)
+            self.resp_file = v.resp_file
+            self.btn_est = QPushButton('Estimate from data')
+            self.btn_est.setToolTip('Find the strongest narrow peak in the average spectrum: f0, damping '
+                                    '(from its -3 dB width) and a band to leave out of the scaling.')
+            self.btn_est.clicked.connect(self.estimate)
+            r2.addWidget(self.btn_est)
+            r2.addStretch(1)
+            lay.addLayout(r2)
+
+            r3 = QHBoxLayout()
+            self.chk_ex = QCheckBox('Leave out of the scaling:')
+            self.chk_ex.setChecked(v.exclude)
+            self.chk_ex.setToolTip('Peak scaling, dB reference and energy shares ignore this band, so the '
+                                   'rest of the spectrum is not squashed by one strong peak.')
+            self.chk_ex.toggled.connect(self._changed)
+            self.sp_lo = self._d(0, 1e5, v.ex_lo, ' Hz', 0, 5)
+            self.sp_hi = self._d(0, 1e5, v.ex_hi, ' Hz', 0, 5)
+            r3.addWidget(self.chk_ex)
+            r3.addWidget(self.sp_lo)
+            r3.addWidget(QLabel('to'))
+            r3.addWidget(self.sp_hi)
+            r3.addStretch(1)
+            lay.addLayout(r3)
+            self.lab_hint = QLabel('')
+            self.lab_hint.setWordWrap(True)
+            self.lab_hint.setStyleSheet('color: #b9770e;')
+            lay.addWidget(self.lab_hint)
+            self._update_visibility()
+
+        def _d(self, lo, hi, val, suffix, dec, step):
+            w = QDoubleSpinBox()
+            w.setRange(lo, hi)
+            w.setDecimals(dec)
+            w.setSingleStep(step)
+            w.setValue(float(val))
+            w.setSuffix(suffix)
+            w.setKeyboardTracking(False)
+            w.valueChanged.connect(self._changed)
+            return w
+
+        def _update_visibility(self):
+            corr = self.cb_mode.currentData() == 'corrected'
+            sen = self.cb_sensor.currentData()
+            self.cb_sensor.setVisible(corr)
+            for wdg in (self.lab_f0, self.sp_f0, self.lab_z, self.sp_zeta):
+                wdg.setVisible(corr and sen == 'accelerometer')
+            for wdg in (self.lab_fn, self.sp_fn, self.lab_gz, self.sp_gz):
+                wdg.setVisible(corr and sen == 'geophone')
+            for wdg in (self.btn_file, self.lab_file):
+                wdg.setVisible(corr and sen == 'file')
+            self.btn_est.setVisible(self.get_avg is not None)
+            for wdg in (self.sp_lo, self.sp_hi):
+                wdg.setEnabled(self.chk_ex.isChecked())
+
+        def _changed(self, *args):
+            if self._quiet:
+                return
+            self._update_visibility()
+            global SPECTRUM_VIEW
+            SPECTRUM_VIEW = self.view()
+            if self.on_change is not None:
+                self.on_change()
+
+        def _pick_file(self):
+            p, _ = QFileDialog.getOpenFileName(self, 'Sensor amplitude response',
+                                               os.path.dirname(self.resp_file or ''),
+                                               'Response (*.txt *.csv *.dat);;All files (*)')
+            if p:
+                self.resp_file = p
+                self.lab_file.setText(os.path.basename(p))
+                self._changed()
+
+        def estimate(self):
+            """Fit the strongest narrow peak of the average spectrum; fill f0, damping and the band."""
+            if self.get_avg is None:
+                return None
+            got = self.get_avg()
+            if got is None:
+                self.lab_hint.setText('Read some shots first.')
+                return None
+            try:
+                r = estimate_resonance(*got)
+            except ValueError as e:
+                self.lab_hint.setText(str(e))
+                return None
+            self._quiet = True
+            try:
+                self.cb_sensor.setCurrentIndex(0)
+                self.sp_f0.setValue(round(r['f0'], 1))
+                self.sp_zeta.setValue(round(r['zeta'], 4))
+                self.sp_lo.setValue(round(r['ex_lo']))
+                self.sp_hi.setValue(round(r['ex_hi']))
+            finally:
+                self._quiet = False
+            self._changed()
+            self.lab_hint.setText(f"Estimated: peak {r['f0']:.1f} Hz, -3 dB width {r['width']:.1f} Hz "
+                                  f"(Q {r['Q']:.0f}, damping {r['zeta']:.4f}), {r['prominence_db']:.0f} dB "
+                                  f"above the median. Choose 'Corrected for the sensor response' or tick "
+                                  f"'Leave out' to use it.")
+            return r
+
+        def view(self):
+            return SpectrumView(mode=self.cb_mode.currentData(), sensor=self.cb_sensor.currentData(),
+                                f0=self.sp_f0.value(), zeta=self.sp_zeta.value(),
+                                geo_fn=self.sp_fn.value(), geo_zeta=self.sp_gz.value(),
+                                resp_file=self.resp_file, exclude=self.chk_ex.isChecked(),
+                                ex_lo=min(self.sp_lo.value(), self.sp_hi.value()),
+                                ex_hi=max(self.sp_lo.value(), self.sp_hi.value()))
+
+        def show_note(self, note):
+            if note:
+                self.lab_hint.setText(note)
+            elif not self.lab_hint.text().startswith('Estimated'):
+                self.lab_hint.setText('')
+
+
     _COLS = ['#', 'File', 'Traces', 'Samples', 'dt (ms)', 'Delay (ms)', 'Source X', 'Source Y',
              'Elev (m)', 'Type (text hdr)', 'Status']
 
@@ -1413,25 +1845,10 @@ if _HAVE_QT:
             w = QWidget()
             l = QVBoxLayout(w)
             l.setContentsMargins(0, 0, 0, 0)
-            row = QHBoxLayout()
-            self.chk_db = QCheckBox('dB')
-            self.chk_db.setChecked(True)
-            self.chk_logf = QCheckBox('Log frequency')
-            self.chk_norm = QCheckBox('Scale each shot to its peak')
-            self.chk_norm.setChecked(True)
-            self.sp_fmax = QDoubleSpinBox()
-            self.sp_fmax.setRange(0, 1e5)
-            self.sp_fmax.setDecimals(0)
-            self.sp_fmax.setSpecialValueText('Nyquist')
-            self.sp_fmax.setSuffix(' Hz')
-            for c in (self.chk_db, self.chk_logf, self.chk_norm):
-                c.toggled.connect(lambda *_: self._draw_spectra())
-                row.addWidget(c)
-            self.sp_fmax.valueChanged.connect(lambda *_: self._draw_spectra())
-            row.addWidget(QLabel('Up to'))
-            row.addWidget(self.sp_fmax)
-            row.addStretch(1)
-            l.addLayout(row)
+            self.spec_ctl = SpectrumControls(on_change=self._draw_spectra, get_avg=self._avg_spectrum)
+            self.chk_db, self.chk_logf = self.spec_ctl.chk_db, self.spec_ctl.chk_logf      # v11 names
+            self.chk_norm, self.sp_fmax = self.spec_ctl.chk_norm, self.spec_ctl.sp_fmax
+            l.addWidget(self.spec_ctl)
             hint = QLabel('Select shots in the table (Ctrl / Shift for several) to compare them; '
                           'black = average of all shots read.')
             hint.setStyleSheet('color: #555;')
@@ -1444,6 +1861,13 @@ if _HAVE_QT:
             l.addWidget(NavigationToolbar(self.canvas_sp, w))
             l.addWidget(self.canvas_sp, 1)
             return w
+
+        def _avg_spectrum(self):
+            good = [r for r in self.records if r.ok and r.spec_a is not None]
+            if not good:
+                return None
+            f = good[0].spec_f
+            return f, np.mean([r.spec_a for r in good if len(r.spec_f) == len(f)], axis=0)
 
         def _draw_spectra(self):
             if not hasattr(self, 'rtabs') or self.rtabs.currentIndex() != 1:
@@ -1459,9 +1883,10 @@ if _HAVE_QT:
                 hl = [pos[i] for i in sel_rows if i in pos]
             else:
                 f, specs, labels, hl = np.array([0.0, 1.0]), [], [], []
-            draw_spectra(self.ax_sp, self.ax_band, f, specs, labels, hl, self.chk_db.isChecked(),
-                         self.chk_logf.isChecked(), self.chk_norm.isChecked(),
-                         self.sp_fmax.value() or None)
+            note = draw_spectra(self.ax_sp, self.ax_band, f, specs, labels, hl, self.chk_db.isChecked(),
+                                self.chk_logf.isChecked(), self.chk_norm.isChecked(),
+                                self.sp_fmax.value() or None, view=self.spec_ctl.view())
+            self.spec_ctl.show_note(note)
             self.canvas_sp.draw_idle()
 
         # ---------------- geometry ----------------
@@ -1832,17 +2257,14 @@ if _HAVE_QT:
             sw = QWidget()
             sl = QVBoxLayout(sw)
             sl.setContentsMargins(0, 0, 0, 0)
+            self.spec_ctl = SpectrumControls(on_change=self._draw_spectra, get_avg=self._avg_spectrum)
+            self.chk_db, self.chk_logf = self.spec_ctl.chk_db, self.spec_ctl.chk_logf
+            sl.addWidget(self.spec_ctl)
             row = QHBoxLayout()
-            self.chk_db = QCheckBox('dB')
-            self.chk_db.setChecked(True)
-            self.chk_logf = QCheckBox('Log frequency')
             self.ed_shots = QLineEdit()
             self.ed_shots.setPlaceholderText('shots to compare, e.g. 1, 5, 9-11 (the shot on the canvas is always shown)')
-            for c in (self.chk_db, self.chk_logf):
-                c.toggled.connect(lambda *_: self._draw_spectra())
             self.ed_shots.editingFinished.connect(self._draw_spectra)
-            row.addWidget(self.chk_db)
-            row.addWidget(self.chk_logf)
+            row.addWidget(QLabel('Compare shots'))
             row.addWidget(self.ed_shots, 1)
             sl.addLayout(row)
             self.fig_sp = Figure(dpi=dpi, constrained_layout=True)
@@ -1880,6 +2302,17 @@ if _HAVE_QT:
                 pass
             self.txt.setPlainText('\n'.join(lines))
 
+        def _shot_spectra(self):
+            sv = self.sv
+            if self._spec is None:
+                specs = [shot_spectrum(sv.data[i], sv.dt) for i in range(sv.n_shots)]
+                self._spec = (specs[0][0], [a for _, a in specs])
+            return self._spec
+
+        def _avg_spectrum(self):
+            f, specs = self._shot_spectra()
+            return f, np.mean(specs, axis=0)
+
         def _draw_spectra(self):
             if getattr(self, 'tabs_g', None) is None or self.tabs_g.currentIndex() != 2:
                 return
@@ -1901,9 +2334,11 @@ if _HAVE_QT:
                     pass
             if self._cur is not None and self._cur not in hl:
                 hl.insert(0, self._cur)
-            draw_spectra(self.ax_sp, self.ax_band, f, specs, [f'Shot {i + 1}' for i in range(len(specs))],
+            note = draw_spectra(self.ax_sp, self.ax_band, f, specs, [f'Shot {i + 1}' for i in range(len(specs))],
                          [i for i in hl if 0 <= i < len(specs)], self.chk_db.isChecked(),
-                         self.chk_logf.isChecked(), True)
+                         self.chk_logf.isChecked(), self.spec_ctl.chk_norm.isChecked(),
+                         self.spec_ctl.sp_fmax.value() or None, view=self.spec_ctl.view())
+            self.spec_ctl.show_note(note)
             self.canvas_sp.draw_idle()
 
         def update_state(self, current_shot=None, picked=()):
