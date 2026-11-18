@@ -521,300 +521,68 @@ if integrate_to_velocity.lower() == 'yes':
     norm_data_vel = np.array(norm_data_vel)
     
 
-#%% Filter chain: minimum-phase FIR / zero-phase FIR / IIR (Butterworth) + notch(es)
+#%% Filtering (filter_designer.py): minimum-phase FIR / zero-phase FIR / IIR + notch(es)
 """
-Combines Steve's v15 filter chain (separate high-cut and low-cut stages,
-squared min-phase taps, multiple notches, realized-response checks) with the
-spectrum QC from the earlier integrated filter (dB before/after, per-shot lines),
-and adds a choice of filter phase.
+All filter maths and the interactive designer now live in filter_designer.py,
+which must sit in the SAME FOLDER as this script.
 
-FILTER_TYPE
-  'minphase_fir'  Kaiser-window FIR -> minimum phase -> taps squared, one causal
-                  pass (Steve). Nothing arrives before the true onset; the peak
-                  is delayed slightly. Best choice for first-break picking.
-  'zerophase_fir' Linear-phase Kaiser FIR applied centred (its delay removed
-                  exactly), so no phase change and no delay. The wavelet becomes
-                  symmetric, so some energy appears BEFORE the true onset: picks
-                  made on this view can come out early.
-  'iir'           Butterworth (second-order sections).
-                  IIR_ZERO_PHASE = False -> causal, one pass (minimum phase).
-                  IIR_ZERO_PHASE = True  -> forward-backward (sosfiltfilt): zero
-                  phase, magnitude squared (effective order doubled, -6 dB at
-                  the cutoff instead of -3 dB).
-
-NOTCH_PHASE  'auto'   causal when the main filter is causal, zero-phase otherwise
-             'causal' lfilter (minimum phase)
-             'zero'   filtfilt (zero phase, notch depth doubled in dB)
-
-Notes
-  * firwin(..., width=...) uses a Kaiser window, so the transition bandwidth is honored.
-  * minimum_phase() returns ~sqrt(|H|) (half the dB attenuation); convolving the
-    taps with themselves restores the designed magnitude and stays minimum phase.
-  * High-pass FIRs need an odd number of taps; zero-phase FIRs also need an odd
-    number so the delay is a whole sample. Even values are bumped up by one.
-  * Works on 2D (n_samples, n_traces) or 3D (n_shots, n_samples, n_traces) arrays
-    along the time axis. Zero (padded / dead) traces stay zero.
+  * The settings below are the starting point (FILTER_PARAMS).
+  * In the picker, press 'f' (or 'Design filter...' in the shot dialog) to open
+    the designer: change anything, watch the response / impulse response /
+    current shot before-after update live, then OK re-filters every shot and
+    redraws the gather on the Filtered view.
+  * Presets can be saved/loaded as .json from the designer.
+  * Set OPEN_FILTER_DESIGNER_AT_START = True to design the filter here instead,
+    before the data is resampled.
 """
+import importlib
+try:
+    _here = os.path.dirname(os.path.abspath(__file__))
+except NameError:                     # running cells in Spyder/IPython
+    _here = os.getcwd()
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+import filter_designer as fdz
+importlib.reload(fdz)                 # pick up edits to filter_designer.py without restarting
 
+fs = 1000                             # Hz (sampling rate of norm_data)
 
-# ---------------------------------------------------------------------
-# Design helpers
-# ---------------------------------------------------------------------
-def _odd(n, label):
-    n = int(n)
-    if n % 2 == 0:
-        print(f"  NOTE: {label}: {n} taps -> {n + 1} (needs an odd number)")
-        n += 1
-    return n
+FILTER_PARAMS = fdz.FilterParams(
+    filter_type='minphase_fir',       # 'minphase_fir' | 'zerophase_fir' | 'iir'
+    iir_zero_phase=False,             # IIR only: True = forward-backward (zero phase)
 
+    lowcut_on=True,  lowcut_hz=10.0,  lowcut_transition_hz=20.0,  lowcut_taps=131,  lowcut_order=4,
+    highcut_on=True, highcut_hz=80.0, highcut_transition_hz=40.0, highcut_taps=51,  highcut_order=4,
 
-def _design_fir_linear(fs, cutoff, width, ntaps, highpass):
-    nyq = 0.5 * fs
-    return firwin(ntaps, cutoff / nyq, width=width / nyq, pass_zero=not highpass)
+    notch_on=True,
+    notches=[[199.0, 8.0]],           # [[freq Hz, Q], ...]
+    notch_phase='auto',               # 'auto' | 'causal' | 'zero'
+)
+FILTER_PRESET_FILE = None             # e.g. 'my_filter.json' to start from a saved preset
 
+plot_filter_response = 'yes'          # realized response + impulse response
+plot_spectrum = 'yes'                 # average spectrum before vs after (all shots)
+OPEN_FILTER_DESIGNER_AT_START = False
 
-def _design_fir_minphase(fs, cutoff, width, ntaps, highpass):
-    taps = _design_fir_linear(fs, cutoff, width, ntaps, highpass)
-    # 'hilbert' rather than 'homomorphic': the log of a near-zero response at
-    # DC/Nyquist makes homomorphic numerically unstable.
-    taps = minimum_phase(taps, method='hilbert')
-    # minimum_phase returns sqrt(|H|); squaring restores the designed magnitude.
-    return np.convolve(taps, taps)
+if FILTER_PRESET_FILE:
+    FILTER_PARAMS = fdz.FilterParams.load_json(FILTER_PRESET_FILE)
+    print(f"Loaded filter preset {FILTER_PRESET_FILE}")
 
+if OPEN_FILTER_DESIGNER_AT_START:
+    _p = fdz.open_filter_designer(FILTER_PARAMS, fs, preview=norm_data[0], x=recv_pos_index,
+                                  shot_label='Shot 1')
+    if _p is not None:
+        FILTER_PARAMS = _p
 
-def _apply_fir_zero_phase(data, taps, axis):
-    """Apply an odd-length linear-phase FIR with its (N-1)/2 delay removed."""
-    d = (len(taps) - 1) // 2
-    pad = [(0, 0)] * data.ndim
-    pad[axis] = (0, d)
-    y = lfilter(taps, 1, np.pad(data, pad), axis=axis)
-    return np.take(y, np.arange(d, d + data.shape[axis]), axis=axis)
-
-
-def build_filter_chain(fs):
-    """
-    Build the list of filter stages from the parameters below.
-    Each stage: dict(label, apply=f(data, axis), response=f(freqs) -> |H|, cutoff).
-    """
-    ftype = FILTER_TYPE.lower()
-    if ftype not in ('minphase_fir', 'zerophase_fir', 'iir'):
-        raise ValueError("FILTER_TYPE must be 'minphase_fir', 'zerophase_fir' or 'iir'.")
-    nyq = 0.5 * fs
-    stages = []
-
-    def fir_stage(label, cutoff, width, ntaps, highpass):
-        ntaps = _odd(ntaps, label) if (highpass or ftype == 'zerophase_fir') else int(ntaps)
-        if ftype == 'minphase_fir':
-            taps = _design_fir_minphase(fs, cutoff, width, ntaps, highpass)
-            apply = lambda d, ax, b=taps: lfilter(b, 1, d, axis=ax)
-            phase = 'min-phase FIR'
-        else:
-            taps = _design_fir_linear(fs, cutoff, width, ntaps, highpass)
-            apply = lambda d, ax, b=taps: _apply_fir_zero_phase(d, b, ax)
-            phase = 'zero-phase FIR'
-        resp = lambda f, b=taps: np.abs(freqz(b, 1, worN=f, fs=fs)[1])
-        stages.append(dict(label=f'{label} {phase}: {cutoff} Hz, transition {width} Hz, '
-                                 f'{ntaps} taps', apply=apply, response=resp, cutoff=cutoff))
-
-    def iir_stage(label, cutoff, order, btype):
-        sos = butter(int(order), cutoff, btype=btype, fs=fs, output='sos')
-        if IIR_ZERO_PHASE:
-            apply = lambda d, ax, s=sos: sosfiltfilt(s, d, axis=ax)
-            resp = lambda f, s=sos: np.abs(sosfreqz(s, worN=f, fs=fs)[1]) ** 2
-            phase = 'zero-phase Butterworth (filtfilt)'
-        else:
-            apply = lambda d, ax, s=sos: sosfilt(s, d, axis=ax)
-            resp = lambda f, s=sos: np.abs(sosfreqz(s, worN=f, fs=fs)[1])
-            phase = 'causal Butterworth'
-        stages.append(dict(label=f'{label} {phase}: {cutoff} Hz, order {int(order)}',
-                           apply=apply, response=resp, cutoff=cutoff))
-
-    # ---- High-cut ----
-    if apply_highcut_filter.lower() == 'yes':
-        if not 0 < cutoff_high < nyq:
-            raise ValueError(f"cutoff_high = {cutoff_high} Hz must be between 0 and Nyquist ({nyq} Hz).")
-        if ftype == 'iir':
-            iir_stage('High-cut', cutoff_high, iir_order_high, 'lowpass')
-        else:
-            fir_stage('High-cut', cutoff_high, transition_bandwidth_high, num_taps_high, highpass=False)
-
-    # ---- Low-cut ----
-    if apply_lowcut_filter.lower() == 'yes':
-        if not 0 < cutoff_low < nyq:
-            raise ValueError(f"cutoff_low = {cutoff_low} Hz must be between 0 and Nyquist ({nyq} Hz).")
-        if ftype == 'iir':
-            iir_stage('Low-cut', cutoff_low, iir_order_low, 'highpass')
-        else:
-            fir_stage('Low-cut', cutoff_low, transition_bandwidth_low, num_taps_low, highpass=True)
-
-    # ---- Notch(es) ----
-    if apply_notch_filter.lower() == 'yes':
-        nf = np.atleast_1d(np.asarray(notch_freq, dtype=float))
-        nq = np.atleast_1d(np.asarray(notch_quality, dtype=float))
-        if nq.size == 1:
-            nq = np.full(nf.shape, nq[0])
-        if nq.size != nf.size:
-            raise ValueError("notch_quality must have one Q per notch_freq (or a single Q).")
-        mode = NOTCH_PHASE.lower()
-        if mode == 'auto':
-            causal_main = ftype == 'minphase_fir' or (ftype == 'iir' and not IIR_ZERO_PHASE)
-            mode = 'causal' if causal_main else 'zero'
-        if mode not in ('causal', 'zero'):
-            raise ValueError("NOTCH_PHASE must be 'auto', 'causal' or 'zero'.")
-        for f0, q in zip(nf, nq):
-            if not 0 < f0 < nyq:
-                print(f"WARNING: skipping {f0} Hz notch (outside 0-Nyquist)")
-                continue
-            b, a = iirnotch(f0, q, fs)
-            if mode == 'causal':
-                apply = lambda d, ax, b=b, a=a: lfilter(b, a, d, axis=ax)
-                resp = lambda f, b=b, a=a: np.abs(freqz(b, a, worN=f, fs=fs)[1])
-            else:
-                apply = lambda d, ax, b=b, a=a: filtfilt(b, a, d, axis=ax)
-                resp = lambda f, b=b, a=a: np.abs(freqz(b, a, worN=f, fs=fs)[1]) ** 2
-            stages.append(dict(label=f'Notch ({mode}): {f0:g} Hz, Q = {q:g}',
-                               apply=apply, response=resp, cutoff=f0))
-    return stages
-
-
-def apply_filter_chain(data, stages, time_axis=1):
-    """Apply every stage in order along time_axis."""
-    out = np.asarray(data, dtype=np.float64)
-    for st in stages:
-        print(f"Applying {st['label']}")
-        out = st['apply'](out, time_axis)
-    return out
-
-
-# ---------------------------------------------------------------------
-# QC plots
-# ---------------------------------------------------------------------
-def plot_filter_qc(stages, fs, n_impulse=1024):
-    """
-    Left: realized magnitude response (dB) of each stage and of the whole chain.
-    Right: impulse response of the whole chain around t = 0. A minimum-phase or
-    causal chain has nothing before t = 0; a zero-phase chain is symmetric.
-    """
-    if not stages:
-        print("No filter stages enabled.")
-        return
-    f = np.linspace(0, 0.5 * fs, 4096)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4.8), constrained_layout=True)
-    total = np.ones_like(f)
-    for st in stages:
-        h = st['response'](f)
-        total *= h
-        ax1.plot(f, 20 * np.log10(h + 1e-12), '--', lw=1, label=st['label'])
-        ax1.axvline(st['cutoff'], color='0.6', lw=0.8, ls=':')
-    ax1.plot(f, 20 * np.log10(total + 1e-12), 'k', lw=2, label='Whole chain')
-    ax1.set_xlim(0, 0.5 * fs)
-    ax1.set_ylim(-100, 5)
-    ax1.set_xlabel('Frequency (Hz)')
-    ax1.set_ylabel('Amplitude (dB)')
-    ax1.set_title(f'Realized response ({FILTER_TYPE})')
-    ax1.grid(alpha=0.3)
-    ax1.legend(fontsize='x-small', loc='lower left')
-
-    spike = np.zeros(n_impulse)
-    spike[n_impulse // 2] = 1.0
-    imp = spike
-    for st in stages:
-        imp = st['apply'](imp, 0)
-    t_ms = (np.arange(n_impulse) - n_impulse // 2) / fs * 1e3
-    energy_before = np.sum(imp[:n_impulse // 2] ** 2) / (np.sum(imp ** 2) + 1e-30) * 100
-    ax2.plot(t_ms, imp, 'k', lw=1)
-    ax2.axvline(0, color='r', lw=1, ls='--', label='t = 0 (true onset)')
-    ax2.set_xlim(-60, 120)
-    ax2.set_xlabel('Time relative to spike (ms)')
-    ax2.set_ylabel('Amplitude')
-    ax2.set_title(f'Impulse response: {energy_before:.1f}% of energy before t = 0')
-    ax2.grid(alpha=0.3)
-    ax2.legend(fontsize='small')
-    plt.show()
-
-
-def plot_spectrum_before_after(before, after, fs, db=True, show_per_shot=False,
-                               stages=None, title='Average amplitude spectrum: before vs after filtering'):
-    """
-    Overlay the average amplitude spectra of input and filtered data.
-    Accepts 2D (n_samples, n_traces) or 3D (n_shots, n_samples, n_traces).
-    Dead (all-zero) traces are left out of the average.
-    """
-    def spectra(d):
-        d = np.asarray(d, dtype=float)
-        if d.ndim == 2:
-            d = d[np.newaxis]
-        amp = np.abs(np.fft.rfft(d, axis=1))                 # (shots, freqs, traces)
-        live = ~np.all(d == 0, axis=1)                       # (shots, traces)
-        per_shot = np.array([amp[i][:, live[i]].mean(axis=1) if live[i].any()
-                             else np.zeros(amp.shape[1]) for i in range(len(d))])
-        return np.fft.rfftfreq(d.shape[1], 1.0 / fs), per_shot.mean(axis=0), per_shot
-
-    freqs, sb, pb = spectra(before)
-    _, sa, pa = spectra(after)
-    ref = max(sb.max(), sa.max()) + 1e-30                    # common reference: shows true attenuation
-
-    def scale(s):
-        return 20 * np.log10(s / ref + 1e-12) if db else s
-
-    fig, ax = plt.subplots(figsize=(11, 5), constrained_layout=True)
-    if show_per_shot:
-        for row in pb:
-            ax.plot(freqs, scale(row), color='tab:blue', alpha=0.12, lw=0.7)
-        for row in pa:
-            ax.plot(freqs, scale(row), color='tab:red', alpha=0.12, lw=0.7)
-    ax.plot(freqs, scale(sb), color='tab:blue', lw=2, label='Before filtering (average)')
-    ax.plot(freqs, scale(sa), color='tab:red', lw=2, label='After filtering (average)')
-    for st in (stages or []):
-        ax.axvline(st['cutoff'], color='k', ls='--', lw=1, alpha=0.6)
-    ax.set_xlim(0, 0.5 * fs)
-    if db:
-        ax.set_ylim(-100, 5)
-    ax.set_xlabel('Frequency (Hz)')
-    ax.set_ylabel('Amplitude (dB re. peak)' if db else 'Amplitude')
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-    ax.legend(loc='lower left', fontsize='small')
-    plt.show()
-
-
-# ---------------- Filter parameters ----------------
-fs = 1000                       # Hz (sampling rate of norm_data)
-FILTER_TYPE = 'minphase_fir'    # 'minphase_fir' | 'zerophase_fir' | 'iir'
-
-plot_spectrum = 'yes'           # average spectrum before vs after filtering
-spectrum_db = True              # dB (re. common peak) or linear
-spectrum_show_per_shot = True   # faint per-shot spectra behind the averages
-plot_filter_response = 'yes'    # realized response of each stage + impulse response
-
-apply_highcut_filter = 'yes'
-cutoff_high = 80                # Hz
-transition_bandwidth_high = 40  # Hz   (FIR types only)
-num_taps_high = 51              #      (FIR types only)
-iir_order_high = 4              #      (IIR only)
-
-apply_lowcut_filter = 'yes'
-cutoff_low = 10                 # Hz
-transition_bandwidth_low = 20   # Hz   (FIR types only)
-num_taps_low = 131              #      (FIR types only; must be odd)
-iir_order_low = 4               #      (IIR only)
-
-IIR_ZERO_PHASE = False          # IIR only: True = forward-backward (zero phase)
-
-apply_notch_filter = 'yes'
-notch_freq = [199]              # Hz; list for several notches, e.g. [60, 199]
-notch_quality = [8]             # one Q per notch (or a single value)
-NOTCH_PHASE = 'auto'            # 'auto' | 'causal' | 'zero'
-
-filter_stages = build_filter_chain(fs)
+filter_stages = fdz.build_filter_chain(FILTER_PARAMS, fs)
+print(f"Filter: {FILTER_PARAMS.summary()}")
 if plot_filter_response.lower() == 'yes':
-    plot_filter_qc(filter_stages, fs)
+    fdz.plot_filter_qc(filter_stages, fs, title=f'Realized response ({FILTER_PARAMS.summary()})')
 
-filtered_data = apply_filter_chain(norm_data, filter_stages, time_axis=1)
+filtered_data = fdz.apply_filter_chain(norm_data, filter_stages, time_axis=1)
 
 if plot_spectrum.lower() == 'yes':
-    plot_spectrum_before_after(norm_data, filtered_data, fs, db=spectrum_db,
-                               show_per_shot=spectrum_show_per_shot, stages=filter_stages)
+    fdz.plot_spectrum_before_after(norm_data, filtered_data, fs, stages=filter_stages)
 
 
 # filtered_data.shape
@@ -1135,6 +903,8 @@ reciprocity_guider_enabled = [True]  # Default enabled
 
 # Disable the default 's' key binding that opens the save figure dialog
 mpl.rcParams['keymap.save'] = ''  # Clear the 's' key binding
+# 'f' opens the filter designer, so remove it from matplotlib's fullscreen toggle
+mpl.rcParams['keymap.fullscreen'] = [k for k in mpl.rcParams['keymap.fullscreen'] if k != 'f']
 
 # Global variable to store the last zoom state (xlim, ylim)
 previous_zoom_state = None
@@ -1208,19 +978,41 @@ class InputDialog(QDialog):
         self.reciprocityCheckBox.setChecked(reciprocity_guider_enabled[0])
         layout.addWidget(self.reciprocityCheckBox)
 
+        # Filter designer
+        self.filterLabel = QLabel(f"Filter: {FILTER_PARAMS.summary()}")
+        self.filterLabel.setWordWrap(True)
+        layout.addWidget(self.filterLabel)
+        self.filterButton = QPushButton("Design filter...")
+        self.filterButton.clicked.connect(self.onDesignFilter)
+        layout.addWidget(self.filterButton)
+
         self.submitButton = QPushButton("Submit")
         self.submitButton.clicked.connect(self.onSubmit)
         layout.addWidget(self.submitButton)
 
         self.setLayout(layout)
 
+    def onDesignFilter(self):
+        # Preview on the shot typed in the box (if valid), otherwise the first shot
+        try:
+            preview_shot = int(self.lineEdit.text())
+            if not 0 <= preview_shot < len(norm_data):
+                raise ValueError
+        except ValueError:
+            preview_shot = 0
+        open_filter_designer_ui(preview_shot, parent=self)
+        self.filterLabel.setText(f"Filter: {FILTER_PARAMS.summary()}")
+
     def onSubmit(self):
         global shot_no, clicked_points, final_clicked_points, gain_factor, reciprocity_guider_enabled
         
         try:
-            shot_no = int(self.lineEdit.text())
-            if shot_no < 0:
-                raise ValueError("Shot number must be a positive integer.")
+            n_shots = len(seismic_data)
+            value = int(self.lineEdit.text())
+            if not 0 <= value < n_shots:
+                raise ValueError(f"Shot number must be between 0 and {n_shots - 1}: "
+                                 f"{n_shots} shot file(s) are loaded.")
+            shot_no = value
             self.accept()
 
             if f'clicked_points_for_shot_{shot_no}' in final_clicked_points:
@@ -1387,7 +1179,8 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
                           fontweight='bold', fontfamily='sans-serif')
             ax.set_ylabel('Time Sample (10th of ms)', fontsize='x-large', labelpad=8,
                           fontweight='bold', fontfamily='sans-serif')
-            ax.set_title(f'Shot No {shot_no + 1} at Receiver Position Index {shot_pos[shot_no]}',
+            ax.set_title(f'Shot No {shot_no + 1} at Receiver Position Index {shot_pos[shot_no]}'
+                         f'\nFiltered view: {FILTER_PARAMS.summary()}',
                          fontsize='x-large', pad=10, fontweight='bold', fontfamily='sans-serif')
 
             handles, labels_leg = ax.get_legend_handles_labels()
@@ -1765,6 +1558,56 @@ def initialize_plot():
     dialog = InputDialog()
     if dialog.exec_() == QDialog.Accepted:
         plot_shot()
+
+
+# ---------------------------------------------------------------------
+# Filter designer <-> picker
+# ---------------------------------------------------------------------
+def apply_new_filter(params):
+    """
+    Re-filter EVERY shot with new settings and refresh the picker.
+    Same pipeline as the cells above: norm_data (time-shifted, 1 kHz) -> filter
+    -> FFT resample by the same factor as norm_data_resamp.
+    """
+    global FILTER_PARAMS, filter_stages, filtered_data, filtered_data_resamp, filtered_seismic_data
+
+    t0 = time.time()
+    stages = fdz.build_filter_chain(params, fs)          # raises on invalid settings
+    new_filtered = fdz.apply_filter_chain(norm_data, stages, time_axis=1)
+    factor = norm_data_resamp.shape[1] // norm_data.shape[1]
+    new_resamp = (scipy.signal.resample(new_filtered, norm_data.shape[1] * factor, axis=1)
+                  if factor > 1 else new_filtered)
+
+    FILTER_PARAMS = params.copy()
+    filter_stages = stages
+    filtered_data = new_filtered
+    filtered_data_resamp = new_resamp
+    filtered_seismic_data = new_resamp
+    print(f"Re-filtered {len(norm_data)} shots in {time.time() - t0:.1f} s: {params.summary()}")
+
+    # Refresh the picker (if a shot is open) and switch to the Filtered view
+    if fig is not None and shot_no is not None and plt.fignum_exists(fig.number):
+        update_plot_with_picks()          # keeps zoom; rebuilds with the new filtered data
+        try:
+            radio_data.set_active(1)      # 'Filtered'
+        except Exception:
+            pass
+        update_mode_text()
+        fig.canvas.draw_idle()
+
+
+def open_filter_designer_ui(preview_shot=None, parent=None):
+    """Open the filter designer on preview_shot (default: the shot being picked)."""
+    if preview_shot is None:
+        preview_shot = shot_no if shot_no is not None else 0
+    dlg = fdz.FilterDesignerDialog(
+        FILTER_PARAMS, fs,
+        preview=norm_data[preview_shot],               # input to the filter (1 kHz, time-shifted)
+        x=recv_pos,
+        shot_label=f'Shot {preview_shot + 1}',
+        on_apply=apply_new_filter,
+        parent=parent)
+    dlg.exec_()
 
 def remove_picks_between_points(points):
     """Removes picks between two points for the current shot."""
@@ -2476,6 +2319,14 @@ def on_key(event):
         save_picks(file_path_pkl)
         new_shot()                  # loads a new shot (zoom will be reset by default)
         # Do NOT restore zoom – new shot should show full extent
+
+    # --- F key: open the filter designer (OK/Apply re-filters all shots) ---
+    elif event.key == 'f':
+        reset_cursor_and_toolbar()
+        finalize_and_process_picks()
+        open_filter_designer_ui()
+        restore_zoom()
+        print(f"Filter: {FILTER_PARAMS.summary()}")
 
     print(f"Mode switched to {mode[0]}")
     update_mode_text()
