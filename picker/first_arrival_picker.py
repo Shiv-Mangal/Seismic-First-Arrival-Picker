@@ -962,7 +962,7 @@ class InputDialog(QDialog):
         layout = QVBoxLayout()
 
         # Shot Number Section
-        self.label = QLabel("Enter the shot number (+ve integer) you want to pick:")
+        self.label = QLabel(f"Enter the shot number (1 to {len(seismic_data)}), as shown in the plot title:")
         layout.addWidget(self.label)
 
         self.lineEdit = QLineEdit()
@@ -1003,7 +1003,7 @@ class InputDialog(QDialog):
     def onDesignFilter(self):
         # Preview on the shot typed in the box (if valid), otherwise the first shot
         try:
-            preview_shot = int(self.lineEdit.text())
+            preview_shot = int(self.lineEdit.text()) - 1      # shot number (1-based) -> index
             if not 0 <= preview_shot < len(norm_data):
                 raise ValueError
         except ValueError:
@@ -1017,10 +1017,12 @@ class InputDialog(QDialog):
         try:
             n_shots = len(seismic_data)
             value = int(self.lineEdit.text())
-            if not 0 <= value < n_shots:
-                raise ValueError(f"Shot number must be between 0 and {n_shots - 1}: "
+            if not 1 <= value <= n_shots:
+                raise ValueError(f"Shot number must be between 1 and {n_shots}: "
                                  f"{n_shots} shot file(s) are loaded.")
-            shot_no = value
+            # The dialog takes the shot NUMBER shown in the plot title (1-based);
+            # internally (and in the pick file keys) the 0-based index is kept.
+            shot_no = value - 1
             self.accept()
 
             if f'clicked_points_for_shot_{shot_no}' in final_clicked_points:

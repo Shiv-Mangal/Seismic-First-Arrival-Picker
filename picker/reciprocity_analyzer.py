@@ -411,8 +411,8 @@ if _HAVE_QT:
                 f"{fmt(s['rms_residual_ms'])} ms<br>"
                 f"<span style='color:#c0392b;'>Flagged (median |Δt| &gt; {r.threshold_ms:g} ms): "
                 f"{flag_txt}</span>"
-                f"<br><span style='color:#555;'>Shot no. = number in the picker title; "
-                f"Index = number you type in the shot dialog. Only finalized picks count "
+                f"<br><span style='color:#555;'>Shot no. = number in the picker title and "
+                f"shot dialog; Index = internal 0-based index (pick-file keys). Only finalized picks count "
                 f"(pending drag picks are added when you switch mode/save).</span>")
 
         def _row_color(self, table, row, status):
@@ -486,20 +486,22 @@ if _HAVE_QT:
                 except Exception:
                     pass
                 self._cbar = None
-            M = r.matrix
+            M = np.abs(r.matrix)               # |Δt|: same value on both sides of the diagonal
             n = M.shape[0]
-            vals = np.abs(M[np.isfinite(M)])
+            vals = M[np.isfinite(M)]
             vmax = max(2 * r.threshold_ms, np.percentile(vals, 95) if vals.size else 1.0)
-            cmap = __import__('matplotlib').colormaps['RdBu_r'].copy()
+            cmap = __import__('matplotlib').colormaps['YlOrRd'].copy()
             cmap.set_bad('#e0e0e0')
-            im = ax.imshow(np.ma.masked_invalid(M), cmap=cmap, vmin=-vmax, vmax=vmax,
+            im = ax.imshow(np.ma.masked_invalid(M), cmap=cmap, vmin=0, vmax=vmax,
                            origin='upper', interpolation='nearest',
                            extent=[0.5, n + 0.5, n + 0.5, 0.5])
             self._cbar = self.fig.colorbar(im, ax=ax, shrink=0.85,
-                                           label='Δt = t(row→col) − t(col→row)  (ms)')
+                                           label='|Δt| = |t(A→B) − t(B→A)|  (ms)')
+            self._cbar.ax.axhline(r.threshold_ms, color='k', lw=1.5)   # threshold on the colour bar
             ax.set_xlabel('Shot no. (partner)')
             ax.set_ylabel('Shot no.')
-            ax.set_title('Signed reciprocity error (grey = no pair)')
+            ax.set_title(f'Absolute reciprocity error (grey = no pair; '
+                         f'black line on colour bar = {r.threshold_ms:g} ms)')
             step = max(1, n // 20)
             ticks = np.arange(1, n + 1, step)
             ax.set_xticks(ticks)
@@ -541,8 +543,8 @@ if _HAVE_QT:
                 return
             v = M[a, b]
             if np.isfinite(v):
-                self.lbl_pick.setText(f'Shot {a + 1} ↔ shot {b + 1}: Δt = t({a + 1}→{b + 1}) − '
-                                      f't({b + 1}→{a + 1}) = {v:+.2f} ms')
+                self.lbl_pick.setText(f'Shot {a + 1} ↔ shot {b + 1}: |Δt| = {abs(v):.2f} ms   '
+                                      f'(t({a + 1}→{b + 1}) − t({b + 1}→{a + 1}) = {v:+.2f} ms)')
             else:
                 self.lbl_pick.setText(f'Shot {a + 1} ↔ shot {b + 1}: no reciprocal pair')
             if event.dblclick and self.on_open_shot is not None:

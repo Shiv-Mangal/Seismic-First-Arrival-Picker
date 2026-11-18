@@ -40,10 +40,11 @@ FILTER_TYPES = {
 }
 
 TYPE_HELP = {
-    'minphase_fir': ("Causal: nothing arrives before the true onset, the peak is delayed "
-                     "slightly. Best for first-break picking."),
-    'zerophase_fir': ("No delay, but the wavelet is symmetric, so some energy appears BEFORE "
-                      "the true onset. Picks on this view can come out early."),
+    'minphase_fir': ("Causal: the onset stays put (within ~1-2 ms), but peaks and troughs "
+                     "move later by the filter delay (several ms, more with a steep low-cut). "
+                     "Pick the first departure, not the first peak/trough."),
+    'zerophase_fir': ("Peaks and troughs stay put, but the wavelet becomes symmetric: low-level "
+                      "energy appears BEFORE the true onset, so first-break picks come out early."),
     'iir': ("Butterworth. Causal (minimum phase) by default; tick zero-phase for a "
             "forward-backward pass (no delay, energy before the onset, -6 dB at cutoff)."),
 }
