@@ -58,6 +58,12 @@ class PreprocParams:
     lowcut_taps: int = 0                   # 0 = auto (kaiserord); or an odd integer
     lowcut_atten_db: float = 60.0          # stopband attenuation used for auto sizing
 
+    highcut_on: bool = True                # high-cut after EVERY differentiation
+    highcut_hz: float = 120.0              # -6 dB point
+    highcut_transition_hz: float = 40.0
+    highcut_taps: int = 0                  # 0 = auto (kaiserord); or an odd integer
+    highcut_atten_db: float = 60.0
+
     time_shift_on: bool = True
     delta_t_ms: float = -50.0              # negative = advance
 
@@ -109,6 +115,11 @@ class PreprocParams:
         if self.convert:
             lc = (f"low-cut {self.lowcut_hz:g} Hz after each integration" if self.lowcut_on
                   else 'NO low-cut after integration')
+            if _LEVEL[self.input_quantity] > 0:
+                lc += (f"; high-cut {self.highcut_hz:g} Hz after each differentiation"
+                       if self.highcut_on else '; NO high-cut after differentiation')
+            if _LEVEL[self.input_quantity] == 2:
+                lc = lc.split('; ', 1)[1]            # displacement input: nothing is integrated
             parts.append(f"converted to all quantities ({lc})")
         if self.time_shift_on:
             parts.append(f"shift {self.delta_t_ms:+g} ms")
@@ -166,6 +177,35 @@ def design_lowcut(fs, cutoff, transition, taps=0, atten_db=60.0):
     mp = minimum_phase(np.convolve(h, h), method='homomorphic')
     _FIR_CACHE[key] = (mp, n)
     return mp, n
+
+
+def design_highcut(fs, cutoff, transition, taps=0, atten_db=60.0):
+    """
+    Minimum-phase low-pass (high-cut) FIR, same construction as design_lowcut:
+    Kaiser-window linear-phase prototype h, then the minimum-phase factor of h*h
+    (homomorphic), which has exactly |H| and no energy before t = 0.
+    Used after differentiation, which boosts high frequencies by +6 dB/octave.
+    """
+    key = ('hc', float(fs), float(cutoff), float(transition), int(taps), float(atten_db))
+    if key in _FIR_CACHE:
+        return _FIR_CACHE[key]
+    nyq = 0.5 * fs
+    n_auto, beta = kaiserord(atten_db, transition / nyq)
+    n = int(n_auto) if not taps else int(taps)
+    if n % 2 == 0:
+        n += 1
+    h = firwin(n, cutoff, window=('kaiser', beta), pass_zero=True, fs=fs)
+    mp = minimum_phase(np.convolve(h, h), method='homomorphic')
+    _FIR_CACHE[key] = (mp, n)
+    return mp, n
+
+
+def _highcut(d, fs, p):
+    if not p.highcut_on:
+        return d
+    h, _ = design_highcut(fs, p.highcut_hz, p.highcut_transition_hz, p.highcut_taps,
+                          p.highcut_atten_db)
+    return lfilter(h, 1, d, axis=0)
 
 
 def _lowcut(d, fs, p):
@@ -243,10 +283,13 @@ def process_shot(raw, dt, p, keep_intermediate=False):
                 inter[q + '_raw'] = integ
             cur = _lowcut(integ, fs, p)
             stage[q] = cur
-        # down: differentiate
+        # down: differentiate (+ high-cut after each differentiation)
         cur = d
         for q in reversed(QUANTITIES[:lvl]):
-            cur = _differentiate(cur, dt)
+            diff = _differentiate(cur, dt)
+            if keep_intermediate:
+                inter[q + '_rawdiff'] = diff
+            cur = _highcut(diff, fs, p)
             stage[q] = cur
     out = {q: _finish(v, dt, p, killed) for q, v in stage.items()}
     if keep_intermediate:
@@ -263,12 +306,18 @@ def run_preprocessing(raw, dt, p, verbose=True):
     """
     raw = np.asarray(raw)
     outs = {q: np.zeros(raw.shape, dtype=np.float64) for q in p.outputs()}
-    if p.convert and p.lowcut_on:
+    if p.convert and p.lowcut_on and _LEVEL[p.input_quantity] < 2:
         _, n = design_lowcut(1.0 / dt, p.lowcut_hz, p.lowcut_transition_hz, p.lowcut_taps,
                              p.lowcut_atten_db)
         if verbose:
             print(f"Integration low-cut: {p.lowcut_hz:g} Hz, transition "
                   f"{p.lowcut_transition_hz:g} Hz, {n} taps, minimum phase")
+    if p.convert and p.highcut_on and _LEVEL[p.input_quantity] > 0:
+        _, n = design_highcut(1.0 / dt, p.highcut_hz, p.highcut_transition_hz, p.highcut_taps,
+                              p.highcut_atten_db)
+        if verbose:
+            print(f"Differentiation high-cut: {p.highcut_hz:g} Hz, transition "
+                  f"{p.highcut_transition_hz:g} Hz, {n} taps, minimum phase")
     for s in range(raw.shape[0]):
         p._current_kills = p.killed(s)
         res = process_shot(raw[s], dt, p)
@@ -300,8 +349,20 @@ def validate(p, dt, start=None):
         warnings.append("No low-cut after integration: low frequencies (drift) will be boosted "
                         "~6 dB/octave per integration.")
     if p.convert and _LEVEL[p.input_quantity] > 0:
-        warnings.append("Quantities below the input are made by differentiation, which boosts "
-                        "high frequencies; use the filter designer's high-cut on them.")
+        if p.highcut_on:
+            if not 0 < p.highcut_hz < nyq:
+                errors.append(f"High-cut {p.highcut_hz:g} Hz must be between 0 and Nyquist "
+                              f"({nyq:g} Hz).")
+            if p.highcut_transition_hz <= 0:
+                errors.append("High-cut transition width must be > 0.")
+            elif p.highcut_hz + 0.5 * p.highcut_transition_hz >= nyq:
+                warnings.append(f"High-cut transition reaches Nyquist ({nyq:g} Hz): the "
+                                f"highest frequencies are only partly suppressed.")
+            if p.lowcut_on and _LEVEL[p.input_quantity] < 2 and p.highcut_hz <= p.lowcut_hz:
+                errors.append("High-cut must be above the low-cut.")
+        else:
+            warnings.append("No high-cut after differentiation: high frequencies (noise) will be "
+                            "boosted ~6 dB/octave per differentiation.")
     if p.mute_on and p.mute_ms < 0:
         errors.append("Mute time must be >= 0.")
     if start is not None:
@@ -340,7 +401,8 @@ if _HAVE_QT:
 
     _COLORS = {'input': '0.4', 'acceleration': 'tab:green', 'velocity': 'tab:blue',
                'displacement': 'tab:purple', 'velocity_raw': 'tab:blue',
-               'displacement_raw': 'tab:purple'}
+               'displacement_raw': 'tab:purple', 'velocity_rawdiff': 'tab:blue',
+               'acceleration_rawdiff': 'tab:green'}
 
     class PreprocessDialog(QDialog):
         """
@@ -467,6 +529,26 @@ if _HAVE_QT:
             f.addRow(self.lbl_lc)
             left.addWidget(self.g_lc)
 
+            # ---- Differentiation high-cut ----
+            self.g_hc = QGroupBox('High-cut after each differentiation (minimum phase)')
+            self.g_hc.setCheckable(True)
+            self.g_hc.toggled.connect(self._changed)
+            f = QFormLayout(self.g_hc)
+            self.sp_hc = self._dspin(0.1, self.fs / 2 - 0.1, 1, 1, ' Hz')
+            self.sp_hctw = self._dspin(0.1, self.fs / 2, 1, 1, ' Hz')
+            self.sp_hctaps = self._ispin(0, 20001, 2)
+            self.sp_hctaps.setSpecialValueText('auto')
+            self.sp_hcatt = self._dspin(20, 120, 5, 0, ' dB')
+            f.addRow('Cutoff (-6 dB)', self.sp_hc)
+            f.addRow('Transition width', self.sp_hctw)
+            f.addRow('Taps', self.sp_hctaps)
+            f.addRow('Stopband (auto taps)', self.sp_hcatt)
+            self.lbl_hc = QLabel()
+            self.lbl_hc.setStyleSheet('color: #555;')
+            self.lbl_hc.setWordWrap(True)
+            f.addRow(self.lbl_hc)
+            left.addWidget(self.g_hc)
+
             # ---- Time shift / mute / normalize ----
             g = QGroupBox('Time shift, mute, normalization')
             f = QFormLayout(g)
@@ -552,7 +634,7 @@ if _HAVE_QT:
             sl.setContentsMargins(2, 2, 2, 2)
             sl.addWidget(NavigationToolbar(self.canvas_spec, spec_tab))
             sl.addWidget(self.canvas_spec, 1)
-            self.tabs.addTab(spec_tab, 'Spectra (before / after integration)')
+            self.tabs.addTab(spec_tab, 'Spectra (before / after integration or differentiation)')
 
             self.fig_data = Figure(dpi=dpi, constrained_layout=True)
             self.canvas_data = FigureCanvas(self.fig_data)
@@ -613,6 +695,11 @@ if _HAVE_QT:
             self.sp_lctw.setValue(p.lowcut_transition_hz)
             self.sp_lctaps.setValue(int(p.lowcut_taps))
             self.sp_lcatt.setValue(p.lowcut_atten_db)
+            self.g_hc.setChecked(p.highcut_on)
+            self.sp_hc.setValue(p.highcut_hz)
+            self.sp_hctw.setValue(p.highcut_transition_hz)
+            self.sp_hctaps.setValue(int(p.highcut_taps))
+            self.sp_hcatt.setValue(p.highcut_atten_db)
             self.chk_shift.setChecked(p.time_shift_on)
             self.sp_shift.setValue(p.delta_t_ms)
             self.chk_mute.setChecked(p.mute_on)
@@ -632,6 +719,11 @@ if _HAVE_QT:
             p.lowcut_transition_hz = self.sp_lctw.value()
             p.lowcut_taps = self.sp_lctaps.value()
             p.lowcut_atten_db = self.sp_lcatt.value()
+            p.highcut_on = self.g_hc.isChecked()
+            p.highcut_hz = self.sp_hc.value()
+            p.highcut_transition_hz = self.sp_hctw.value()
+            p.highcut_taps = self.sp_hctaps.value()
+            p.highcut_atten_db = self.sp_hcatt.value()
             p.time_shift_on = self.chk_shift.isChecked()
             p.delta_t_ms = self.sp_shift.value()
             p.mute_on = self.chk_mute.isChecked()
@@ -720,7 +812,10 @@ if _HAVE_QT:
 
         def _update_visibility(self):
             conv = self.chk_convert.isChecked()
-            self.g_lc.setEnabled(conv)
+            lvl = _LEVEL[self.cb_input.currentData()]
+            self.g_lc.setEnabled(conv and lvl < 2)      # something gets integrated
+            self.g_hc.setEnabled(conv and lvl > 0)      # something gets differentiated
+            self.sp_hcatt.setEnabled(self.sp_hctaps.value() == 0)
             self.sp_shift.setEnabled(self.chk_shift.isChecked())
             self.sp_mute.setEnabled(self.chk_mute.isChecked())
             self.sp_lcatt.setEnabled(self.sp_lctaps.value() == 0)
@@ -739,13 +834,20 @@ if _HAVE_QT:
             self.buttons.button(QDialogButtonBox.Apply).setEnabled(ok and self.on_apply is not None)
             if errors:
                 return
-            if p.convert and p.lowcut_on:
+            if p.convert and p.lowcut_on and _LEVEL[p.input_quantity] < 2:
                 _, n = design_lowcut(self.fs, p.lowcut_hz, p.lowcut_transition_hz,
                                      p.lowcut_taps, p.lowcut_atten_db)
                 self.lbl_lc.setText(f'{n} taps ({"auto" if not p.lowcut_taps else "fixed"}); '
                                     f'applied after every integration.')
             else:
                 self.lbl_lc.setText('')
+            if p.convert and p.highcut_on and _LEVEL[p.input_quantity] > 0:
+                _, n = design_highcut(self.fs, p.highcut_hz, p.highcut_transition_hz,
+                                      p.highcut_taps, p.highcut_atten_db)
+                self.lbl_hc.setText(f'{n} taps ({"auto" if not p.highcut_taps else "fixed"}); '
+                                    f'applied after every differentiation.')
+            else:
+                self.lbl_hc.setText('')
             p._current_kills = p.killed(self.shot)
             self._result, self._inter = process_shot(self.raw[self.shot], self.dt, p,
                                                      keep_intermediate=True)
@@ -764,8 +866,11 @@ if _HAVE_QT:
                 if q == p.input_quantity or q not in inter:
                     continue
                 if q + '_raw' in inter:
-                    curves.append((q + '_raw', f'{q.capitalize()}: integrated, NO low-cut', ':', 1.5))
+                    curves.append((q + '_raw', f'{q.capitalize()}: integrated, before its low-cut', ':', 1.5))
                     curves.append((q, f'{q.capitalize()}: integrated + low-cut', '-', 2))
+                elif q + '_rawdiff' in inter:
+                    curves.append((q + '_rawdiff', f'{q.capitalize()}: differentiated, before its high-cut', ':', 1.5))
+                    curves.append((q, f'{q.capitalize()}: differentiated + high-cut', '-', 2))
                 else:
                     curves.append((q, f'{q.capitalize()}: differentiated', '-', 2))
             for key, label, ls, lw in curves:
@@ -777,41 +882,61 @@ if _HAVE_QT:
                         color=_COLORS.get(key, 'k'), label=label)
             if p.convert and p.lowcut_on and any(k.endswith('_raw') for k in inter):
                 ax.axvline(p.lowcut_hz, color='r', ls='--', lw=1, label=f'low-cut {p.lowcut_hz:g} Hz')
+            if p.convert and p.highcut_on and any(k.endswith('_rawdiff') for k in inter):
+                ax.axvline(p.highcut_hz, color='tab:orange', ls='--', lw=1,
+                           label=f'high-cut {p.highcut_hz:g} Hz')
             ax.set_xscale('log')
             ax.set_xlim(max(0.5, 1.0 / (self.raw.shape[1] * self.dt)), self.fs / 2)
             ax.set_ylim(-80, 5)
             ax.set_xlabel('Frequency (Hz, log)')
             ax.set_ylabel('dB re. each curve\'s peak')
-            ax.set_title(f'Shot {self.shot + 1}: average spectrum before / after integration '
-                         f'(each integration adds +6 dB/octave toward low frequencies)',
+            ax.set_title(f'Shot {self.shot + 1}: average spectra\n(each integration boosts LOW '
+                         f'frequencies, each differentiation boosts HIGH ones, by 6 dB/octave)',
                          fontsize='medium')
             ax.grid(alpha=0.3, which='both')
             ax.legend(fontsize='small', loc='lower left')
 
             self.ax_lc.clear()
             self.ax_lcimp.clear()
-            if p.convert and p.lowcut_on:
+            lvl = _LEVEL[p.input_quantity]
+            filt = []
+            if p.convert and p.lowcut_on and lvl < 2:
                 h, n = design_lowcut(self.fs, p.lowcut_hz, p.lowcut_transition_hz,
                                      p.lowcut_taps, p.lowcut_atten_db)
-                w, H = freqz(h, 1, worN=4096, fs=self.fs)
-                self.ax_lc.plot(w, 20 * np.log10(np.abs(H) + 1e-12), 'k')
-                self.ax_lc.axvline(p.lowcut_hz, color='r', ls='--', lw=1)
-                self.ax_lc.set_xlim(0, min(self.fs / 2, 4 * p.lowcut_hz + p.lowcut_transition_hz))
+                filt.append(('low-cut', h, n, p.lowcut_hz, 'k'))
+            if p.convert and p.highcut_on and lvl > 0:
+                h, n = design_highcut(self.fs, p.highcut_hz, p.highcut_transition_hz,
+                                      p.highcut_taps, p.highcut_atten_db)
+                filt.append(('high-cut', h, n, p.highcut_hz, 'tab:orange'))
+            if filt:
+                tmax = 0
+                for name, h, n, fc, col in filt:
+                    w, H = freqz(h, 1, worN=4096, fs=self.fs)
+                    self.ax_lc.plot(w, 20 * np.log10(np.abs(H) + 1e-12), color=col,
+                                    label=f'{name} {fc:g} Hz ({n} taps)')
+                    self.ax_lc.axvline(fc, color=col, ls='--', lw=1)
+                    t = np.arange(len(h)) * self.dt * 1e3
+                    self.ax_lcimp.plot(t, h / (np.abs(h).max() + 1e-30), color=col, lw=1, label=name)
+                    tmax = max(tmax, t[-1])
+                if len(filt) == 1 and filt[0][0] == 'low-cut':
+                    self.ax_lc.set_xlim(0, min(self.fs / 2, 4 * p.lowcut_hz + p.lowcut_transition_hz))
+                else:
+                    self.ax_lc.set_xlim(0, self.fs / 2)
                 self.ax_lc.set_ylim(-100, 5)
-                self.ax_lc.set_title(f'Low-cut realized response ({n} taps)', fontsize='medium')
+                self.ax_lc.set_title('Realized filter response', fontsize='medium')
                 self.ax_lc.set_xlabel('Frequency (Hz)')
                 self.ax_lc.set_ylabel('dB')
                 self.ax_lc.grid(alpha=0.3)
-                t = np.arange(len(h)) * self.dt * 1e3
-                self.ax_lcimp.plot(t, h, 'k', lw=1)
+                self.ax_lc.legend(fontsize='small', loc='lower right')
                 self.ax_lcimp.axvline(0, color='r', ls='--', lw=1)
-                self.ax_lcimp.set_xlim(-5, min(t[-1], 150))
-                self.ax_lcimp.set_title('Low-cut impulse response (causal)', fontsize='medium')
+                self.ax_lcimp.set_xlim(-5, min(tmax, 150))
+                self.ax_lcimp.set_title('Impulse response (causal, normalized)', fontsize='medium')
                 self.ax_lcimp.set_xlabel('Time (ms)')
                 self.ax_lcimp.grid(alpha=0.3)
+                self.ax_lcimp.legend(fontsize='small', loc='upper right')
             else:
                 for a in (self.ax_lc, self.ax_lcimp):
-                    a.text(0.5, 0.5, 'No integration low-cut', ha='center', va='center',
+                    a.text(0.5, 0.5, 'No conversion filter in use', ha='center', va='center',
                            transform=a.transAxes)
             self.canvas_spec.draw_idle()
 

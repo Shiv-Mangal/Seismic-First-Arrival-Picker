@@ -1,0 +1,1331 @@
+"""
+data_importer.py - SEG-Y import for the first-arrival picker
+=============================================================
+
+Reads shot gathers (.segy / .sgy, any letter case) one file per shot, either a
+whole folder (optionally with sub-folders) or hand-picked files, and returns
+everything the picker needs:
+
+    * the data cube (n_shots, n_samples, n_traces), natural file order
+    * sample interval, record length and recording delay (from the headers)
+    * source / receiver coordinates and elevations (coordinate and elevation
+      scalars applied as in the SEG-Y standard)
+    * along-line distances and the picker's station positions
+      (shot_pos_index / recv_pos_index), from the headers or set by hand
+    * shots with missing traces placed on the right receivers
+      (matched by receiver coordinates, or padded at the end / at an index)
+    * the data type (acceleration / velocity / displacement), suggested from
+      the textual header and confirmed by the user
+    * automatic output names: <line>_<type>_picks.pkl, <line>_<type>_SGT.txt and
+      an import record <line>_<type>_import.json (for re-loading the same
+      import and for documenting it)
+
+The non-GUI part (find_segy_files, read_shot, import_survey, ...) is used both
+by the dialog and by the picker's script mode, so both give identical results.
+
+Author: Shiv (first-arrival picker); written with Claude.
+"""
+
+import os
+import re
+import json
+import time
+import fnmatch
+import datetime
+from dataclasses import dataclass, field
+
+import numpy as np
+
+SEGY_EXTENSIONS = ('.segy', '.sgy')
+QUANTITIES = ('acceleration', 'velocity', 'displacement')
+IMPORT_RECORD_VERSION = 1
+
+
+# =====================================================================
+# File discovery and naming
+# =====================================================================
+def natural_sort_key(s):
+    """'shot_2' before 'shot_10' (numbers compared as numbers)."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', str(s))]
+
+
+def is_segy(path):
+    return os.path.isfile(path) and path.lower().endswith(SEGY_EXTENSIONS)
+
+
+def find_segy_files(folder, recursive=False, pattern='*'):
+    """All .segy / .sgy files in `folder` whose name matches `pattern`
+    (shell wildcards, case-insensitive), in natural order."""
+    pattern = (pattern or '*').strip() or '*'
+    found = []
+    if not folder or not os.path.isdir(folder):
+        return found
+    walker = os.walk(folder) if recursive else [(folder, [], os.listdir(folder))]
+    for root, _dirs, names in walker:
+        for n in names:
+            full = os.path.join(root, n)
+            if n.lower().endswith(SEGY_EXTENSIONS) and fnmatch.fnmatch(n.lower(), pattern.lower()) \
+                    and os.path.isfile(full):
+                found.append(os.path.normpath(full))
+    found.sort(key=natural_sort_key)
+    return found
+
+
+def line_name_from_files(files):
+    """A short survey/line name: the common start of the file names
+    ('S_STACK_0101.00_0000.00', 'S_STACK_0101.00_1000.00' -> 'S_STACK_0101.00'),
+    or the folder name if the files have nothing in common."""
+    stems = [os.path.splitext(os.path.basename(f))[0] for f in files]
+    if not stems:
+        return 'survey'
+    pre = os.path.commonprefix(stems) if len(stems) > 1 else stems[0]
+    if len(stems) > 1:
+        # don't cut a number in half: drop a trailing partial digit run / separators
+        pre = re.sub(r'[\d.]*$', '', pre) if pre and pre[-1].isdigit() and \
+            any(s[len(pre):len(pre) + 1].isdigit() for s in stems) else pre
+        pre = pre.rstrip('_-. ')
+    if len(pre) < 3:
+        pre = os.path.basename(os.path.dirname(os.path.abspath(files[0]))) or 'survey'
+    pre = re.sub(r'[^\w.\-]+', '_', pre).strip('_')
+    return pre or 'survey'
+
+
+def output_names(files, quantity, out_dir=None):
+    """Default output paths: picks .pkl, SGT .txt, import record .json."""
+    line = line_name_from_files(files)
+    if out_dir is None:
+        base = os.path.dirname(os.path.abspath(files[0])) if files else os.getcwd()
+        out_dir = os.path.join(base, 'picks')
+    q = (quantity or 'data').lower()
+    stem = os.path.join(out_dir, f'{line}_{q}')
+    return dict(line=line, out_dir=out_dir, pkl=stem + '_picks.pkl', sgt=stem + '_SGT.txt',
+                record=stem + '_import.json')
+
+
+def picks_file_info(pkl_path):
+    """(n_picked_shots, message) for an existing pick file, or (0, '') if none."""
+    if not pkl_path or not os.path.isfile(pkl_path):
+        return 0, ''
+    try:
+        import pickle
+        with open(pkl_path, 'rb') as f:
+            d = pickle.load(f)
+        n = len(d.get('final_picks', {})) if isinstance(d, dict) else 0
+        meta = d.get('metadata', {}) if isinstance(d, dict) else {}
+        when = meta.get('saved', '')
+        return n, f'{n} picked shot(s) in the existing file' + (f' (saved {when})' if when else '')
+    except Exception as e:
+        return 0, f'existing file could not be read: {e}'
+
+
+# =====================================================================
+# Reading one shot
+# =====================================================================
+def _apply_scalar(values, scalar):
+    """SEG-Y scalar convention: >0 multiply, <0 divide, 0 = 1."""
+    v = np.asarray(values, dtype=np.float64)
+    scalar = int(scalar or 0)
+    if scalar > 0:
+        return v * scalar
+    if scalar < 0:
+        return v / abs(scalar)
+    return v
+
+
+def _decode_textual(raw):
+    if raw is None:
+        return ''
+    if isinstance(raw, str):
+        return raw
+    try:
+        txt = raw.decode('ascii')
+        if sum(c.isprintable() for c in txt) > 0.8 * max(1, len(txt)):
+            return txt
+    except Exception:
+        pass
+    try:
+        return raw.decode('cp500')                    # EBCDIC
+    except Exception:
+        return ''
+
+
+def guess_quantity(text):
+    """'acceleration' / 'velocity' / 'displacement' if the text names exactly one."""
+    t = (text or '').lower()
+    hits = [q for q, words in (('acceleration', ('acceleration', 'accel', 'm/s2', 'm/s^2')),
+                               ('velocity', ('velocity', 'geophone', 'm/s ')),
+                               ('displacement', ('displacement', 'displ')))
+            if any(w in t for w in words)]
+    return hits[0] if len(hits) == 1 else None
+
+
+@dataclass
+class ShotRecord:
+    path: str
+    name: str = ''
+    ok: bool = False
+    error: str = ''
+    data: object = None            # (n_samples, n_traces) float64
+    dt: float = float('nan')       # s
+    ns: int = 0
+    ntr: int = 0
+    delay_ms: float = 0.0          # delay recording time (first sample time)
+    sx: float = float('nan')
+    sy: float = float('nan')
+    selev: float = float('nan')
+    gx: object = None              # (n_traces,)
+    gy: object = None
+    gelev: object = None
+    ffid: int = 0
+    coord_scalar: int = 0
+    elev_scalar: int = 0
+    textual: str = ''
+    quantity_hint: str = None
+    read_s: float = 0.0
+
+    @property
+    def has_coords(self):
+        return (self.gx is not None and np.all(np.isfinite(self.gx)) and
+                np.ptp(self.gx) + np.ptp(self.gy) > 0)
+
+    @property
+    def has_elev(self):
+        return self.gelev is not None and np.any(self.gelev != 0)
+
+
+def read_shot(path):
+    """Read one SEG-Y shot gather with ObsPy. Never raises: errors go to .error."""
+    rec = ShotRecord(path=os.path.normpath(path), name=os.path.basename(path))
+    t0 = time.time()
+    try:
+        from obspy.io.segy.core import _read_segy
+        st = _read_segy(path)
+        if len(st.traces) == 0:
+            raise ValueError('no traces in file')
+        lens = {len(tr.data) for tr in st.traces}
+        ns = max(lens)
+        data = np.zeros((ns, len(st.traces)), dtype=np.float64)
+        for j, tr in enumerate(st.traces):
+            data[:len(tr.data), j] = tr.data
+        th0 = st.traces[0].stats.segy.trace_header
+        bh = st.stats.binary_file_header
+        us = int(getattr(th0, 'sample_interval_in_ms_for_this_trace', 0) or 0)
+        if us <= 0:
+            us = int(getattr(bh, 'sample_interval_in_microseconds', 0) or 0)
+        dt = us * 1e-6 if us > 0 else float(st.traces[0].stats.delta)
+        cs = int(getattr(th0, 'scalar_to_be_applied_to_all_coordinates', 0) or 0)
+        es = int(getattr(th0, 'scalar_to_be_applied_to_all_elevations_and_depths', 0) or 0)
+        H = [tr.stats.segy.trace_header for tr in st.traces]
+        gx = _apply_scalar([h.group_coordinate_x for h in H], cs)
+        gy = _apply_scalar([h.group_coordinate_y for h in H], cs)
+        ge = _apply_scalar([h.receiver_group_elevation for h in H], es)
+        rec.data, rec.dt, rec.ns, rec.ntr = data, dt, ns, data.shape[1]
+        rec.delay_ms = float(getattr(th0, 'delay_recording_time', 0) or 0)
+        rec.sx = float(_apply_scalar(th0.source_coordinate_x, cs))
+        rec.sy = float(_apply_scalar(th0.source_coordinate_y, cs))
+        rec.selev = float(_apply_scalar(th0.surface_elevation_at_source, es))
+        rec.gx, rec.gy, rec.gelev = gx, gy, ge
+        rec.ffid = int(getattr(th0, 'original_field_record_number', 0) or 0)
+        rec.coord_scalar, rec.elev_scalar = cs, es
+        rec.textual = _decode_textual(getattr(st.stats, 'textual_file_header', b''))
+        rec.quantity_hint = guess_quantity(rec.textual)
+        if len(lens) > 1:
+            rec.error = f'traces have different lengths {sorted(lens)}; short ones zero-padded'
+        rec.ok = True
+    except Exception as e:                                   # unreadable / not SEG-Y
+        rec.ok = False
+        rec.error = f'{type(e).__name__}: {e}'
+    rec.read_s = time.time() - t0
+    return rec
+
+
+# =====================================================================
+# Geometry
+# =====================================================================
+def along_line_distance(x, y):
+    """Cumulative distance along the receiver line (first receiver = 0)."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    if len(x) < 2:
+        return np.zeros(len(x))
+    return np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+
+
+def project_on_line(px, py, rx, ry, rdist):
+    """Signed along-line distance of points (px, py) on the receiver line:
+    nearest receiver + projection on the local line direction.
+    Returns (distance, perpendicular offset from the line, nearest receiver index)."""
+    px, py = np.atleast_1d(px).astype(float), np.atleast_1d(py).astype(float)
+    rx, ry = np.asarray(rx, float), np.asarray(ry, float)
+    n = len(rx)
+    d_out, off_out, k_out = [], [], []
+    for x0, y0 in zip(px, py):
+        k = int(np.argmin(np.hypot(rx - x0, ry - y0)))
+        a, b = max(k - 1, 0), min(k + 1, n - 1)
+        u = np.array([rx[b] - rx[a], ry[b] - ry[a]])
+        nu = np.hypot(*u)
+        u = u / nu if nu > 0 else np.array([1.0, 0.0])
+        v = np.array([x0 - rx[k], y0 - ry[k]])
+        d_out.append(rdist[k] + float(v @ u))
+        off_out.append(float(abs(v[0] * u[1] - v[1] * u[0])))
+        k_out.append(k)
+    return np.array(d_out), np.array(off_out), np.array(k_out)
+
+
+def nice_spacing(sp):
+    """Round a measured spacing to a sensible nominal value (0.99 -> 1, 2.03 -> 2, 0.49 -> 0.5)."""
+    if not np.isfinite(sp) or sp <= 0:
+        return 1.0
+    for step in (0.5, 0.25, 0.1, 0.05, 0.01):
+        r = round(sp / step) * step
+        if r > 0 and abs(r - sp) / sp < 0.05:
+            return float(round(r, 6))
+    return float(round(sp, 3))
+
+
+@dataclass
+class GeometrySettings:
+    mode: str = 'headers'            # 'headers' or 'manual'
+    first_recv_pos: float = 1.0      # position of the first trace (m)
+    recv_spacing: float = 0.0        # 0 = from headers (rounded)
+    first_shot_pos: float = 0.0      # manual mode only
+    shot_spacing: float = 10.0       # manual mode only
+    trace_placement: str = 'coordinates'   # 'coordinates', 'end' or 'index'
+    gap_insert_index: int = 0        # for trace_placement == 'index'
+
+
+def station_positions(recv_dist, shot_dist, nearest, first_recv_pos, recv_spacing,
+                      header_spacing):
+    """Picker positions from along-line distances: receivers are evenly numbered
+    (first_recv_pos + i * spacing, the picker's convention); each shot gets the
+    position of its nearest receiver plus the remaining distance rounded to whole
+    receiver spacings (so a source 1 m before receiver 1 lands at position 0)."""
+    n = len(recv_dist)
+    recv_pos = first_recv_pos + np.arange(n) * recv_spacing
+    hs = header_spacing if header_spacing > 0 else recv_spacing
+    shot_pos = np.array([recv_pos[k] + round((d - recv_dist[k]) / hs) * recv_spacing
+                         for d, k in zip(shot_dist, nearest)], dtype=float)
+    return recv_pos, shot_pos
+
+
+# =====================================================================
+# Assembling the survey
+# =====================================================================
+@dataclass
+class Survey:
+    files: list
+    data: object                     # (n_shots, n_samples, n_traces)
+    dt: float
+    quantity: str
+    delay_ms: object                 # per shot
+    shot_xy: object                  # (n_shots, 2)
+    shot_elev: object
+    recv_xy: object                  # (n_traces, 2) master receivers
+    recv_elev: object
+    recv_dist: object                # along-line distance of the receivers
+    shot_dist: object                # along-line distance of the shots
+    shot_offline: object             # perpendicular distance of each shot from the line
+    recv_pos: object                 # picker positions (recv_pos_index)
+    shot_pos: object                 # picker positions (shot_pos_index)
+    header_spacing: float
+    geometry: GeometrySettings
+    has_coords: bool
+    has_elev: bool
+    line: str = 'survey'
+    out_dir: str = ''
+    pkl_path: str = ''
+    sgt_path: str = ''
+    record_path: str = ''
+    use_header_delay: bool = True
+    load_existing_picks: bool = True
+    warnings: list = field(default_factory=list)
+    placement: dict = field(default_factory=dict)   # shot index -> master column of each trace
+    imported: str = ''
+
+    @property
+    def n_shots(self):
+        return self.data.shape[0]
+
+    @property
+    def time_shift_ms(self):
+        """Suggested picker time shift: the header delay (first sample time).
+        A delay of -50 ms means the first sample is 50 ms BEFORE the shot,
+        so the data are advanced by 50 ms (delta_t = -50 ms)."""
+        d = np.asarray(self.delay_ms, float)
+        return float(np.median(d)) if d.size else 0.0
+
+    def recv_df(self):
+        """Receiver table (same columns as the old recv_df_from_segy)."""
+        import pandas as pd
+        return pd.DataFrame({'utmx': self.recv_xy[:, 0], 'utmy': self.recv_xy[:, 1],
+                             'elevation': self.recv_elev, 'local_x': self.recv_dist,
+                             'local_y': 0.0, 'position': self.recv_pos})
+
+    def shot_df(self):
+        """Shot table (same columns as the old shot_df_from_segy, plus more)."""
+        import pandas as pd
+        return pd.DataFrame({'shot_index': np.arange(self.n_shots), 'shot_no': np.arange(self.n_shots) + 1,
+                             'file': [os.path.basename(f) for f in self.files],
+                             'utmx': self.shot_xy[:, 0], 'utmy': self.shot_xy[:, 1],
+                             'elevation': self.shot_elev, 'local_x': self.shot_dist,
+                             'local_y': 0.0, 'offline_m': self.shot_offline,
+                             'position': self.shot_pos, 'delay_ms': self.delay_ms})
+
+    def summary(self):
+        ns = self.data.shape[1]
+        return (f"{self.n_shots} shots x {self.data.shape[2]} traces x {ns} samples, "
+                f"dt {self.dt * 1e3:g} ms ({ns * self.dt:g} s), {self.quantity}; "
+                f"receivers {self.recv_pos[0]:g}-{self.recv_pos[-1]:g} m every "
+                f"{self.geometry.recv_spacing:g} m (headers {self.header_spacing:.3f} m); "
+                f"shots {self.shot_pos.min():g}-{self.shot_pos.max():g} m; "
+                f"header delay {self.time_shift_ms:+g} ms")
+
+    def record(self):
+        """Everything needed to repeat (and document) this import."""
+        return dict(version=IMPORT_RECORD_VERSION, imported=self.imported,
+                    files=[os.path.abspath(f) for f in self.files], quantity=self.quantity,
+                    dt_s=self.dt, n_samples=int(self.data.shape[1]), n_traces=int(self.data.shape[2]),
+                    geometry=self.geometry.__dict__.copy(), header_spacing_m=self.header_spacing,
+                    use_header_delay=self.use_header_delay, header_delay_ms=self.time_shift_ms,
+                    recv_pos=[float(v) for v in self.recv_pos],
+                    shot_pos=[float(v) for v in self.shot_pos],
+                    pkl=self.pkl_path, sgt=self.sgt_path, warnings=list(self.warnings))
+
+    def save_record(self, path=None):
+        path = path or self.record_path
+        if not path:
+            return None
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(self.record(), f, indent=2)
+        return path
+
+
+def load_record(path):
+    with open(path) as f:
+        r = json.load(f)
+    r['geometry'] = GeometrySettings(**{k: v for k, v in r.get('geometry', {}).items()
+                                        if k in GeometrySettings.__dataclass_fields__})
+    return r
+
+
+def _place_traces(rec, master, geom, spacing, warnings):
+    """Columns in the master receiver list for each trace of a shot with fewer traces."""
+    nm = master.ntr
+    if rec.ntr == nm:
+        return np.arange(nm)
+    if geom.trace_placement == 'coordinates' and rec.has_coords and master.has_coords:
+        cols = []
+        tol = 0.5 * spacing
+        for x, y in zip(rec.gx, rec.gy):
+            d = np.hypot(master.gx - x, master.gy - y)
+            k = int(np.argmin(d))
+            cols.append(k if d[k] <= tol else -1)
+        cols = np.array(cols)
+        bad = int(np.sum(cols < 0))
+        dup = len(cols[cols >= 0]) - len(set(cols[cols >= 0]))
+        if bad == 0 and dup == 0:
+            warnings.append(f'{rec.name}: {nm - rec.ntr} missing receiver(s) placed by coordinates.')
+            return cols
+        warnings.append(f'{rec.name}: coordinate matching failed ({bad} unmatched, {dup} '
+                        f'duplicate); padded at the end instead.')
+    if geom.trace_placement == 'index' and 0 <= geom.gap_insert_index <= rec.ntr:
+        g = int(geom.gap_insert_index)
+        cols = np.concatenate([np.arange(g), np.arange(g + nm - rec.ntr, nm)])
+        warnings.append(f'{rec.name}: {nm - rec.ntr} dead column(s) inserted after trace {g}.')
+        return cols
+    warnings.append(f'{rec.name}: {nm - rec.ntr} dead column(s) padded at the end.')
+    return np.arange(rec.ntr)
+
+
+def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
+                  sgt_path=None, use_header_delay=True, load_existing_picks=True):
+    """
+    Build a Survey from ShotRecords (read_shot results, in shot order).
+    Unreadable records are skipped with a warning. Raises ValueError if nothing
+    usable is left or the sample intervals differ.
+    """
+    if quantity not in QUANTITIES:
+        raise ValueError(f"Choose the data type (one of {', '.join(QUANTITIES)}).")
+    geom = geometry or GeometrySettings()
+    warnings = []
+    good = [r for r in records if r.ok]
+    for r in records:
+        if not r.ok:
+            warnings.append(f'SKIPPED {r.name}: {r.error}')
+        elif r.error:
+            warnings.append(f'{r.name}: {r.error}')
+    if not good:
+        raise ValueError('None of the files could be read as SEG-Y.')
+    dts = sorted({round(r.dt * 1e6) for r in good})
+    if len(dts) > 1:
+        raise ValueError(f"Files have different sample intervals ({', '.join(f'{d / 1e3:g} ms' for d in dts)}); "
+                         f"resample them first or import them separately.")
+    dt = good[0].dt
+    ns = max(r.ns for r in good)
+    if len({r.ns for r in good}) > 1:
+        warnings.append(f'Record lengths differ ({sorted({r.ns for r in good})} samples); '
+                        f'shorter shots zero-padded to {ns}.')
+    master = max(good, key=lambda r: r.ntr)            # first shot with the most traces
+    nm = master.ntr
+    has_coords = master.has_coords
+    has_elev = master.has_elev
+
+    # receiver geometry from the master shot
+    if has_coords:
+        rx, ry = master.gx, master.gy
+        rdist = along_line_distance(rx, ry)
+        hsp = float(np.median(np.diff(rdist))) if nm > 1 else 1.0
+    else:
+        rx = ry = np.full(nm, np.nan)
+        hsp = float('nan')
+        warnings.append('No receiver coordinates in the headers: using the manual geometry.')
+    spacing = geom.recv_spacing if geom.recv_spacing > 0 else (nice_spacing(hsp) if has_coords else 1.0)
+    geom.recv_spacing = spacing
+    if not has_coords:
+        rdist = np.arange(nm) * spacing
+    if has_coords and abs(hsp - spacing) / spacing > 0.02:
+        warnings.append(f'Header receiver spacing {hsp:.3f} m differs from the nominal {spacing:g} m by '
+                        f'{100 * abs(hsp - spacing) / spacing:.1f}%: positions use the nominal spacing.')
+
+    # data cube
+    data = np.zeros((len(good), ns, nm), dtype=np.float64)
+    placement = {}
+    for i, r in enumerate(good):
+        cols = _place_traces(r, master, geom, spacing if not has_coords else hsp, warnings)
+        data[i, :r.ns, cols] = r.data.T            # (traces, samples) into the master columns
+        placement[i] = cols
+
+    # shots
+    sxy = np.array([[r.sx, r.sy] for r in good])
+    selev = np.array([r.selev for r in good])
+    shot_coords_ok = has_coords and np.all(np.isfinite(sxy)) and np.ptp(sxy[:, 0]) + np.ptp(sxy[:, 1]) > 0
+    if shot_coords_ok:
+        sdist, soff, near = project_on_line(sxy[:, 0], sxy[:, 1], rx, ry, rdist)
+        far = np.where(soff > 2 * spacing)[0]
+        if len(far):
+            warnings.append(f"{len(far)} shot(s) more than {2 * spacing:g} m off the receiver line "
+                            f"(shot no. {', '.join(str(k + 1) for k in far[:10])}).")
+    else:
+        sdist = soff = None
+        near = None
+    if has_elev and not np.any(selev != 0) and shot_coords_ok:
+        selev = np.interp(sdist, rdist, master.gelev)
+        warnings.append('No source elevations in the headers: interpolated from the receivers.')
+
+    if geom.mode == 'headers' and shot_coords_ok:
+        recv_pos, shot_pos = station_positions(rdist, sdist, near, geom.first_recv_pos, spacing, hsp)
+    else:
+        if geom.mode == 'headers':
+            warnings.append('No usable source coordinates: using the manual shot positions.')
+            geom.mode = 'manual'
+        recv_pos = geom.first_recv_pos + np.arange(nm) * spacing
+        shot_pos = geom.first_shot_pos + np.arange(len(good)) * geom.shot_spacing
+        if sdist is None:
+            sdist = (shot_pos - geom.first_recv_pos)
+            soff = np.zeros(len(good))
+    dup = [p for p in set(shot_pos.tolist()) if list(shot_pos).count(p) > 1]
+    if dup:
+        warnings.append(f"Several shots at the same position {sorted(dup)} (repeat shots?): reciprocity "
+                        f"and the SGT file treat them as separate shots.")
+
+    delays = np.array([r.delay_ms for r in good])
+    if len(set(delays.tolist())) > 1:
+        warnings.append(f'Recording delays differ between shots ({sorted(set(delays.tolist()))} ms); '
+                        f'the median is used for the time shift.')
+
+    q = quantity
+    names = output_names([r.path for r in good], q, out_dir)
+    hints = {r.quantity_hint for r in good if r.quantity_hint}
+    if len(hints) == 1 and q not in hints:
+        warnings.append(f"Textual header says '{hints.pop()}' but '{q}' was chosen.")
+    sv = Survey(files=[r.path for r in good], data=data, dt=dt, quantity=q, delay_ms=delays,
+                shot_xy=sxy, shot_elev=selev,
+                recv_xy=np.column_stack([rx, ry]),
+                recv_elev=(master.gelev if has_elev else np.zeros(nm)),
+                recv_dist=rdist, shot_dist=np.asarray(sdist, float),
+                shot_offline=np.asarray(soff, float), recv_pos=np.asarray(recv_pos, float),
+                shot_pos=np.asarray(shot_pos, float), header_spacing=hsp, geometry=geom,
+                has_coords=has_coords, has_elev=has_elev, line=names['line'],
+                out_dir=names['out_dir'], pkl_path=pkl_path or names['pkl'],
+                sgt_path=sgt_path or names['sgt'], use_header_delay=use_header_delay,
+                load_existing_picks=load_existing_picks, warnings=warnings, placement=placement,
+                imported=datetime.datetime.now().isoformat(timespec='seconds'))
+    sv.record_path = os.path.splitext(sv.pkl_path)[0].replace('_picks', '') + '_import.json'
+    return sv
+
+
+def import_files(files, quantity, progress=None, **kw):
+    """Read + assemble in one call (script mode). progress(i, n, record) is optional."""
+    recs = []
+    for i, f in enumerate(files):
+        r = read_shot(f)
+        recs.append(r)
+        if progress is not None:
+            progress(i, len(files), r)
+    return import_survey(recs, quantity, **kw)
+
+
+def plot_geometry(survey, ax_profile=None, ax_map=None, highlight=None):
+    """Elevation profile (receivers + shots) and plan view; used by the dialog
+    and in script mode."""
+    import matplotlib.pyplot as plt
+    if ax_profile is None:
+        fig, (ax_profile, ax_map) = plt.subplots(2, 1, figsize=(9, 7), constrained_layout=True)
+    draw_geometry(ax_profile, ax_map, survey.recv_dist, survey.recv_elev, survey.recv_xy,
+                  survey.shot_dist, survey.shot_elev, survey.shot_xy, highlight=highlight)
+    return ax_profile, ax_map
+
+
+def draw_geometry(axp, axm, rdist, relev, rxy, sdist, selev, sxy, highlight=None, labels=True,
+                  highlight_label='Just read'):
+    """Shared drawing routine (profile on axp, plan view on axm)."""
+    axp.clear()
+    has_e = relev is not None and np.any(np.asarray(relev) != 0)
+    yr = np.asarray(relev) if has_e else np.zeros(len(rdist))
+    axp.plot(rdist, yr, '-', color='#7f8c8d', lw=1.5, zorder=1, label='Surface (receivers)')
+    axp.scatter(rdist, yr, s=8, color='#2c3e50', zorder=2, label=f'Receivers ({len(rdist)})')
+    if sdist is not None and len(sdist):
+        se = np.asarray(selev) if has_e else np.zeros(len(sdist))
+        axp.scatter(sdist, se, s=70, marker='*', color='#e74c3c', edgecolor='k', lw=0.5,
+                    zorder=3, label=f'Shots ({len(sdist)})')
+        if labels and len(sdist) <= 60:
+            for i, (d, e) in enumerate(zip(sdist, se)):
+                axp.annotate(str(i + 1), (d, e), textcoords='offset points', xytext=(0, 7),
+                             ha='center', fontsize='x-small', color='#c0392b')
+        if highlight is not None and 0 <= highlight < len(sdist):
+            axp.scatter([sdist[highlight]], [se[highlight]], s=260, facecolor='none',
+                        edgecolor='#f1c40f', lw=2.5, zorder=4, label=highlight_label)
+    axp.set_xlabel('Distance along the line from the first receiver (m)')
+    axp.set_ylabel('Elevation (m)' if has_e else 'Elevation (none in headers)')
+    axp.set_title('Topography and shot positions', fontsize='medium')
+    axp.grid(alpha=0.3)
+    axp.legend(fontsize='x-small', loc='best')
+    if axm is not None:
+        axm.clear()
+        rxy = np.asarray(rxy, float)
+        if rxy.size and np.all(np.isfinite(rxy)):
+            x0, y0 = rxy[0]
+            axm.plot(rxy[:, 0] - x0, rxy[:, 1] - y0, '.', color='#2c3e50', ms=3, label='Receivers')
+            if sxy is not None and len(sxy) and np.all(np.isfinite(sxy)):
+                sxy = np.asarray(sxy, float)
+                axm.scatter(sxy[:, 0] - x0, sxy[:, 1] - y0, s=60, marker='*', color='#e74c3c',
+                            edgecolor='k', lw=0.5, label='Shots', zorder=3)
+                if highlight is not None and 0 <= highlight < len(sxy):
+                    axm.scatter([sxy[highlight, 0] - x0], [sxy[highlight, 1] - y0], s=220,
+                                facecolor='none', edgecolor='#f1c40f', lw=2.5, zorder=4)
+            axm.set_aspect('equal', adjustable='datalim')
+            axm.set_xlabel(f'Easting - {x0:.1f} (m)')
+            axm.set_ylabel(f'Northing - {y0:.1f} (m)')
+            axm.legend(fontsize='x-small', loc='best')
+        else:
+            axm.text(0.5, 0.5, 'No coordinates in the headers', ha='center', va='center',
+                     transform=axm.transAxes)
+        axm.set_title('Plan view', fontsize='medium')
+        axm.grid(alpha=0.3)
+
+
+# =====================================================================
+# Qt dialog
+# =====================================================================
+try:
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QColor
+    from PyQt5.QtWidgets import (
+        QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QLabel, QLineEdit,
+        QDoubleSpinBox, QSpinBox, QComboBox, QCheckBox, QPushButton, QRadioButton,
+        QButtonGroup, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+        QFileDialog, QSplitter, QMessageBox, QApplication, QProgressBar, QWidget,
+        QPlainTextEdit, QScrollArea, QTabWidget)
+    from matplotlib.figure import Figure
+    try:
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+    except ImportError:
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+    _HAVE_QT = True
+except ImportError:
+    _HAVE_QT = False
+
+
+if _HAVE_QT:
+
+    _COLS = ['#', 'File', 'Traces', 'Samples', 'dt (ms)', 'Delay (ms)', 'Source X', 'Source Y',
+             'Elev (m)', 'Type (text hdr)', 'Status']
+
+    class ImportDialog(QDialog):
+        """
+        Import shot gathers. Files are read as soon as they are added (the table
+        and the topography fill in live); 'Import' assembles the survey.
+        """
+
+        def __init__(self, parent=None, start_folder='', pattern='*', quantity=None,
+                     geometry=None, files=None):
+            super().__init__(parent)
+            self.setWindowTitle('Import seismic data (SEG-Y)')
+            self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
+            self.records = []
+            self.survey = None
+            self._last_folder = start_folder or os.getcwd()
+            self._out_dir_user = False
+            self._pkl_user = False
+            self._geom_start = geometry or GeometrySettings()
+            self._build_ui(pattern)
+            if quantity in QUANTITIES:
+                self._set_quantity(quantity)
+            self.resize(1500, 900)
+            if files:
+                self.add_files(files)
+            elif start_folder and os.path.isdir(start_folder):
+                self.ed_folder.setText(start_folder)
+
+        # ---------------- UI ----------------
+        def _build_ui(self, pattern):
+            outer = QVBoxLayout(self)
+            split = QSplitter(Qt.Horizontal)
+            outer.addWidget(split, 1)
+
+            controls = QWidget()
+            left = QVBoxLayout(controls)
+
+            # files
+            g = QGroupBox('1. Files (one SEG-Y file per shot: .segy / .sgy)')
+            v = QVBoxLayout(g)
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Folder'))
+            self.ed_folder = QLineEdit()
+            row.addWidget(self.ed_folder, 1)
+            b = QPushButton('Browse…')
+            b.clicked.connect(self._browse_folder)
+            row.addWidget(b)
+            v.addLayout(row)
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Name filter'))
+            self.ed_pattern = QLineEdit(pattern or '*')
+            self.ed_pattern.setToolTip('Shell wildcards, e.g. *_stacked* or S_STACK_*; '
+                                       'only .segy / .sgy files are listed')
+            row.addWidget(self.ed_pattern, 1)
+            self.chk_recursive = QCheckBox('Include sub-folders')
+            row.addWidget(self.chk_recursive)
+            v.addLayout(row)
+            row = QHBoxLayout()
+            b = QPushButton('Read folder (batch)')
+            b.setToolTip('Read every matching .segy / .sgy file in the folder')
+            b.clicked.connect(self._read_folder)
+            row.addWidget(b)
+            b = QPushButton('Add files…')
+            b.setToolTip('Pick individual files (Ctrl/Shift for several)')
+            b.clicked.connect(self._browse_files)
+            row.addWidget(b)
+            b = QPushButton('Remove selected')
+            b.clicked.connect(self._remove_selected)
+            row.addWidget(b)
+            b = QPushButton('Clear')
+            b.clicked.connect(self._clear)
+            row.addWidget(b)
+            v.addLayout(row)
+            left.addWidget(g)
+
+            # data type
+            g = QGroupBox('2. What do the files contain?  (required)')
+            v = QVBoxLayout(g)
+            row = QHBoxLayout()
+            self.grp_q = QButtonGroup(self)
+            self.rb_q = {}
+            for i, q in enumerate(QUANTITIES):
+                rb = QRadioButton(q.capitalize())
+                self.grp_q.addButton(rb, i)
+                self.rb_q[q] = rb
+                row.addWidget(rb)
+            row.addStretch(1)
+            v.addLayout(row)
+            self.lbl_qhint = QLabel('Choose the data type. It decides which way the preprocessing '
+                                    'integrates (low-cut) or differentiates (high-cut).')
+            self.lbl_qhint.setWordWrap(True)
+            self.lbl_qhint.setStyleSheet('color: #555;')
+            v.addWidget(self.lbl_qhint)
+            self.grp_q.buttonClicked.connect(lambda *_: self._update_outputs())
+            left.addWidget(g)
+
+            # geometry
+            g = QGroupBox('3. Geometry (picker positions in metres)')
+            f = QFormLayout(g)
+            self.cb_geom = QComboBox()
+            self.cb_geom.addItem('From headers (shot positions from source coordinates)', 'headers')
+            self.cb_geom.addItem('Manual (evenly spaced shots)', 'manual')
+            self.cb_geom.currentIndexChanged.connect(self._geom_changed)
+            f.addRow('Shot positions', self.cb_geom)
+            gs = self._geom_start
+            self.sp_r0 = self._dspin(-1e6, 1e6, gs.first_recv_pos, 3)
+            self.sp_rdx = self._dspin(0, 1e4, gs.recv_spacing, 3)
+            self.sp_rdx.setSpecialValueText('from headers')
+            self.sp_s0 = self._dspin(-1e6, 1e6, gs.first_shot_pos, 3)
+            self.sp_sdx = self._dspin(0, 1e5, gs.shot_spacing, 3)
+            f.addRow('First receiver position', self.sp_r0)
+            f.addRow('Receiver spacing', self.sp_rdx)
+            f.addRow('First shot position (manual)', self.sp_s0)
+            f.addRow('Shot spacing (manual)', self.sp_sdx)
+            self.cb_place = QComboBox()
+            self.cb_place.addItem('Match by receiver coordinates (recommended)', 'coordinates')
+            self.cb_place.addItem('Pad dead traces at the end', 'end')
+            self.cb_place.addItem('Insert dead traces after trace…', 'index')
+            self.cb_place.currentIndexChanged.connect(self._geom_changed)
+            self.sp_gap = QSpinBox()
+            self.sp_gap.setRange(0, 100000)
+            self.sp_gap.setValue(gs.gap_insert_index)
+            f.addRow('Shots with fewer traces', self.cb_place)
+            f.addRow('… insert after trace', self.sp_gap)
+            self.lbl_geom = QLabel()
+            self.lbl_geom.setWordWrap(True)
+            self.lbl_geom.setStyleSheet('color: #555;')
+            f.addRow(self.lbl_geom)
+            idx = 0 if gs.mode == 'headers' else 1
+            self.cb_geom.setCurrentIndex(idx)
+            self.cb_place.setCurrentIndex(['coordinates', 'end', 'index'].index(gs.trace_placement)
+                                          if gs.trace_placement in ('coordinates', 'end', 'index') else 0)
+            for w in (self.sp_r0, self.sp_rdx, self.sp_s0, self.sp_sdx, self.sp_gap):
+                w.valueChanged.connect(self._geom_preview)
+            left.addWidget(g)
+
+            # time
+            g = QGroupBox('4. Time zero')
+            v = QVBoxLayout(g)
+            self.chk_delay = QCheckBox('Use the header recording delay as the time shift')
+            self.chk_delay.setChecked(True)
+            v.addWidget(self.chk_delay)
+            self.lbl_delay = QLabel('Recording delay: (read files first)')
+            self.lbl_delay.setWordWrap(True)
+            self.lbl_delay.setStyleSheet('color: #555;')
+            v.addWidget(self.lbl_delay)
+            left.addWidget(g)
+
+            # outputs
+            g = QGroupBox('5. Output files (names suggested automatically)')
+            f = QFormLayout(g)
+            row = QHBoxLayout()
+            self.ed_out = QLineEdit()
+            self.ed_out.textEdited.connect(lambda *_: self._mark_user('out'))
+            row.addWidget(self.ed_out, 1)
+            b = QPushButton('…')
+            b.setFixedWidth(30)
+            b.clicked.connect(self._browse_out)
+            row.addWidget(b)
+            f.addRow('Folder', row)
+            self.ed_pkl = QLineEdit()
+            self.ed_pkl.textEdited.connect(lambda *_: self._mark_user('pkl'))
+            f.addRow('Picks (.pkl)', self.ed_pkl)
+            self.ed_sgt = QLineEdit()
+            f.addRow('SGT (.txt)', self.ed_sgt)
+            self.chk_load = QCheckBox('Continue from the existing pick file if there is one')
+            self.chk_load.setChecked(True)
+            f.addRow(self.chk_load)
+            self.lbl_pkl = QLabel()
+            self.lbl_pkl.setWordWrap(True)
+            f.addRow(self.lbl_pkl)
+            row = QHBoxLayout()
+            b = QPushButton('Load import record…')
+            b.setToolTip('Repeat an earlier import (files, data type, geometry) from its _import.json')
+            b.clicked.connect(self._load_record)
+            row.addWidget(b)
+            row.addStretch(1)
+            f.addRow(row)
+            left.addWidget(g)
+            left.addStretch(1)
+
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(controls)
+            scroll.setMinimumWidth(460)
+            split.addWidget(scroll)
+
+            # right: table + geometry plots
+            right = QSplitter(Qt.Vertical)
+            self.table = QTableWidget(0, len(_COLS))
+            self.table.setHorizontalHeaderLabels(_COLS)
+            self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            self.table.verticalHeader().setVisible(False)
+            hh = self.table.horizontalHeader()
+            hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(1, QHeaderView.Interactive)
+            hh.setStretchLastSection(True)
+            self.table.setColumnWidth(1, 260)
+            self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.table.itemSelectionChanged.connect(self._selection_changed)
+            right.addWidget(self.table)
+
+            scr = QApplication.primaryScreen()
+            dpi = scr.logicalDotsPerInch() if scr is not None else 96
+            self.fig = Figure(dpi=dpi, constrained_layout=True)
+            self.canvas = FigureCanvas(self.fig)
+            gsp = self.fig.add_gridspec(1, 2, width_ratios=[2.2, 1])
+            self.ax_prof = self.fig.add_subplot(gsp[0, 0])
+            self.ax_map = self.fig.add_subplot(gsp[0, 1])
+            pw = QWidget()
+            pl = QVBoxLayout(pw)
+            pl.setContentsMargins(0, 0, 0, 0)
+            pl.addWidget(NavigationToolbar(self.canvas, pw))
+            pl.addWidget(self.canvas, 1)
+            right.addWidget(pw)
+            right.setStretchFactor(0, 1)
+            right.setStretchFactor(1, 2)
+            split.addWidget(right)
+            split.setStretchFactor(1, 1)
+            self._draw_empty()
+
+            # report + progress + buttons
+            self.txt_report = QPlainTextEdit()
+            self.txt_report.setReadOnly(True)
+            self.txt_report.setMaximumHeight(110)
+            outer.addWidget(self.txt_report)
+            row = QHBoxLayout()
+            self.progress = QProgressBar()
+            self.progress.setTextVisible(True)
+            self.progress.setFormat('%v / %m files')
+            self.progress.setValue(0)
+            row.addWidget(self.progress, 1)
+            self.btn_import = QPushButton('Import')
+            self.btn_import.setDefault(True)
+            self.btn_import.clicked.connect(self._do_import)
+            self.btn_cancel = QPushButton('Cancel')
+            self.btn_cancel.setAutoDefault(False)
+            self.btn_cancel.clicked.connect(self.reject)
+            row.addWidget(self.btn_import)
+            row.addWidget(self.btn_cancel)
+            outer.addLayout(row)
+            self._geom_changed()
+
+        def _dspin(self, lo, hi, val, dec):
+            s = QDoubleSpinBox()
+            s.setRange(lo, hi)
+            s.setDecimals(dec)
+            s.setValue(val)
+            s.setKeyboardTracking(False)
+            return s
+
+        # ---------------- quantity ----------------
+        def quantity(self):
+            b = self.grp_q.checkedButton()
+            if b is None:
+                return None
+            return QUANTITIES[self.grp_q.id(b)]
+
+        def _set_quantity(self, q):
+            if q in self.rb_q:
+                self.rb_q[q].setChecked(True)
+                self._update_outputs()
+
+        # ---------------- files ----------------
+        def _browse_folder(self):
+            d = QFileDialog.getExistingDirectory(self, 'Folder with SEG-Y shot files',
+                                                 self.ed_folder.text() or self._last_folder)
+            if d:
+                self.ed_folder.setText(d)
+                self._read_folder()
+
+        def _read_folder(self):
+            folder = self.ed_folder.text().strip()
+            if not os.path.isdir(folder):
+                QMessageBox.warning(self, 'Folder not found', f'Not a folder:\n{folder}')
+                return
+            files = find_segy_files(folder, self.chk_recursive.isChecked(), self.ed_pattern.text())
+            if not files:
+                QMessageBox.information(self, 'No SEG-Y files',
+                                        f'No .segy / .sgy files matching "{self.ed_pattern.text()}" in\n{folder}')
+                return
+            self._last_folder = folder
+            self.add_files(files, replace=True)
+
+        def _browse_files(self):
+            files, _ = QFileDialog.getOpenFileNames(self, 'SEG-Y shot files', self._last_folder,
+                                                    'SEG-Y (*.segy *.sgy *.SEGY *.SGY);;All files (*)')
+            if files:
+                self._last_folder = os.path.dirname(files[0])
+                self.add_files(files)
+
+        def add_files(self, files, replace=False):
+            """Read files and add them (natural order, no duplicates)."""
+            if replace:
+                self.records = []
+            have = {os.path.normcase(os.path.abspath(r.path)) for r in self.records}
+            new = [f for f in files if os.path.normcase(os.path.abspath(f)) not in have]
+            new = [f for f in new if is_segy(f)] + [f for f in new if not is_segy(f)]
+            allpaths = sorted([r.path for r in self.records] + new, key=natural_sort_key)
+            self.progress.setMaximum(max(1, len(new)))
+            self.progress.setValue(0)
+            self.btn_import.setEnabled(False)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                byname = {os.path.normcase(os.path.abspath(r.path)): r for r in self.records}
+                for i, f in enumerate(new):
+                    r = read_shot(f)
+                    byname[os.path.normcase(os.path.abspath(f))] = r
+                    self.records = [byname[os.path.normcase(os.path.abspath(p))] for p in allpaths
+                                    if os.path.normcase(os.path.abspath(p)) in byname]
+                    self.progress.setValue(i + 1)
+                    self._refresh_table()
+                    self._draw_geometry(highlight_path=r.path)
+                    QApplication.processEvents()
+            finally:
+                QApplication.restoreOverrideCursor()
+                self.btn_import.setEnabled(True)
+            self._after_read()
+
+        def _remove_selected(self):
+            rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
+            for r in rows:
+                if 0 <= r < len(self.records):
+                    del self.records[r]
+            self._refresh_table()
+            self._after_read()
+
+        def _clear(self):
+            self.records = []
+            self._refresh_table()
+            self._after_read()
+
+        def _refresh_table(self):
+            self.table.setRowCount(len(self.records))
+            ref = max((r for r in self.records if r.ok), key=lambda r: r.ntr, default=None)
+            for i, r in enumerate(self.records):
+                if r.ok:
+                    status = 'OK' if not r.error else 'warning'
+                    if ref is not None and r.ntr != ref.ntr:
+                        status = f'{ref.ntr - r.ntr} trace(s) missing'
+                    if ref is not None and abs(r.dt - ref.dt) > 1e-9:
+                        status = 'DIFFERENT dt'
+                    vals = [i + 1, r.name, r.ntr, r.ns, f'{r.dt * 1e3:g}', f'{r.delay_ms:g}',
+                            f'{r.sx:.2f}', f'{r.sy:.2f}', f'{r.selev:.2f}', r.quantity_hint or '-', status]
+                else:
+                    vals = [i + 1, r.name, '', '', '', '', '', '', '', '', 'NOT READ: ' + r.error[:60]]
+                for c, v in enumerate(vals):
+                    it = QTableWidgetItem(str(v))
+                    if c == 1:
+                        it.setToolTip(r.path)
+                    if not r.ok or vals[-1] == 'DIFFERENT dt':
+                        it.setForeground(QColor('#c0392b'))
+                    elif vals[-1] != 'OK':
+                        it.setForeground(QColor('#b9770e'))
+                    self.table.setItem(i, c, it)
+
+        def _after_read(self):
+            good = [r for r in self.records if r.ok]
+            if not good:
+                self.lbl_delay.setText('Recording delay: (read files first)')
+                self.lbl_geom.setText('')
+                self._draw_empty()
+                self._update_outputs()
+                self.txt_report.setPlainText('')
+                return
+            # data type suggestion from the textual header
+            hints = sorted({r.quantity_hint for r in good if r.quantity_hint})
+            if len(hints) == 1:
+                self.lbl_qhint.setText(f"The textual header says <b>{hints[0]}</b> "
+                                       f"(pre-selected - please confirm).")
+                self.lbl_qhint.setTextFormat(Qt.RichText)
+                if self.quantity() is None:
+                    self._set_quantity(hints[0])
+            elif len(hints) > 1:
+                self.lbl_qhint.setText(f"Textual headers disagree ({', '.join(hints)}): choose.")
+            else:
+                self.lbl_qhint.setText('The textual header does not say: choose the data type.')
+            delays = sorted({r.delay_ms for r in good})
+            if len(delays) == 1:
+                d = delays[0]
+                self.lbl_delay.setText(
+                    f'Header delay recording time: <b>{d:+g} ms</b> (first sample at {d:+g} ms). '
+                    + (f'Time shift {d:+g} ms puts the shot at t = 0.' if d else 'No shift needed.'))
+            else:
+                self.lbl_delay.setText(f'Delays differ between files: {delays} ms (median used).')
+            self.lbl_delay.setTextFormat(Qt.RichText)
+            if not self._out_dir_user:
+                self.ed_out.setText(output_names([r.path for r in good], 'x')['out_dir'])
+            self._geom_preview()
+            self._update_outputs()
+
+        def _selection_changed(self):
+            rows = sorted({i.row() for i in self.table.selectedIndexes()})
+            if rows:
+                self._draw_geometry(highlight_path=self.records[rows[0]].path)
+
+        # ---------------- geometry ----------------
+        def _geom_settings(self):
+            return GeometrySettings(mode=self.cb_geom.currentData(), first_recv_pos=self.sp_r0.value(),
+                                    recv_spacing=self.sp_rdx.value(), first_shot_pos=self.sp_s0.value(),
+                                    shot_spacing=self.sp_sdx.value(),
+                                    trace_placement=self.cb_place.currentData(),
+                                    gap_insert_index=self.sp_gap.value())
+
+        def _geom_changed(self, *args):
+            manual = self.cb_geom.currentData() == 'manual'
+            self.sp_s0.setEnabled(manual)
+            self.sp_sdx.setEnabled(manual)
+            self.sp_gap.setEnabled(self.cb_place.currentData() == 'index')
+            self._geom_preview()
+
+        def _geom_preview(self, *args):
+            good = [r for r in self.records if r.ok]
+            if not good:
+                return
+            try:
+                sv = self._assemble(dry=True)
+            except Exception as e:
+                self.lbl_geom.setText(f'<span style="color:#c0392b;">{e}</span>')
+                self.lbl_geom.setTextFormat(Qt.RichText)
+                return
+            sp = sv.shot_pos
+            txt = (f'Header receiver spacing {sv.header_spacing:.3f} m → nominal '
+                   f'{sv.geometry.recv_spacing:g} m; receivers {sv.recv_pos[0]:g} … {sv.recv_pos[-1]:g} m.<br>'
+                   f'Shot positions: {", ".join(f"{v:g}" for v in sp[:12])}{" …" if len(sp) > 12 else ""}')
+            self.lbl_geom.setText(txt)
+            self.lbl_geom.setTextFormat(Qt.RichText)
+            self.txt_report.setPlainText(sv.summary() + ('\n' + '\n'.join(sv.warnings) if sv.warnings else ''))
+
+        def _draw_empty(self):
+            for a in (self.ax_prof, self.ax_map):
+                a.clear()
+                a.text(0.5, 0.5, 'Add files: topography and shots appear here as they are read',
+                       ha='center', va='center', transform=a.transAxes, color='0.5')
+                a.set_xticks([])
+                a.set_yticks([])
+            self.canvas.draw_idle()
+
+        def _draw_geometry(self, highlight_path=None):
+            good = [r for r in self.records if r.ok]
+            if not good:
+                self._draw_empty()
+                return
+            master = max(good, key=lambda r: r.ntr)
+            if master.has_coords:
+                rdist = along_line_distance(master.gx, master.gy)
+                rxy = np.column_stack([master.gx, master.gy])
+                sxy = np.array([[r.sx, r.sy] for r in good])
+                sdist, _, _ = project_on_line(sxy[:, 0], sxy[:, 1], master.gx, master.gy, rdist)
+            else:
+                rdist = np.arange(master.ntr, dtype=float)
+                rxy = np.full((master.ntr, 2), np.nan)
+                sxy, sdist = None, None
+            selev = np.array([r.selev for r in good])
+            if master.has_elev and not np.any(selev != 0) and sdist is not None:
+                selev = np.interp(sdist, rdist, master.gelev)
+            hl = None
+            if highlight_path is not None:
+                for i, r in enumerate(good):
+                    if r.path == highlight_path:
+                        hl = i
+            draw_geometry(self.ax_prof, self.ax_map, rdist, master.gelev if master.has_elev else None,
+                          rxy, sdist, selev, sxy, highlight=hl,
+                          highlight_label='Just read' if self.progress.value() < self.progress.maximum() else 'Selected')
+            self.canvas.draw_idle()
+
+        # ---------------- outputs ----------------
+        def _mark_user(self, what):
+            if what == 'out':
+                self._out_dir_user = True
+            else:
+                self._pkl_user = True
+            self._update_outputs()
+
+        def _browse_out(self):
+            d = QFileDialog.getExistingDirectory(self, 'Output folder', self.ed_out.text() or self._last_folder)
+            if d:
+                self.ed_out.setText(d)
+                self._out_dir_user = True
+                self._update_outputs()
+
+        def _update_outputs(self):
+            good = [r for r in self.records if r.ok]
+            q = self.quantity()
+            if good:
+                names = output_names([r.path for r in good], q or 'data', self.ed_out.text().strip() or None)
+                if not self._pkl_user:
+                    self.ed_pkl.setText(os.path.basename(names['pkl']))
+                    self.ed_sgt.setText(os.path.basename(names['sgt']))
+            pkl = self._pkl_path()
+            n, msg = picks_file_info(pkl)
+            if n:
+                self.lbl_pkl.setText(f'<span style="color:#1e8449;">Found: {msg}.</span>')
+            elif msg:
+                self.lbl_pkl.setText(f'<span style="color:#c0392b;">{msg}</span>')
+            else:
+                self.lbl_pkl.setText('<span style="color:#555;">New pick file (nothing picked yet).</span>')
+            self.lbl_pkl.setTextFormat(Qt.RichText)
+
+        def _pkl_path(self):
+            name = self.ed_pkl.text().strip()
+            if not name:
+                return ''
+            if not name.lower().endswith('.pkl'):
+                name += '.pkl'
+            return name if os.path.isabs(name) else os.path.join(self.ed_out.text().strip(), name)
+
+        def _sgt_path(self):
+            name = self.ed_sgt.text().strip()
+            if not name:
+                return ''
+            return name if os.path.isabs(name) else os.path.join(self.ed_out.text().strip(), name)
+
+        # ---------------- import record ----------------
+        def _load_record(self):
+            path, _ = QFileDialog.getOpenFileName(self, 'Import record', self.ed_out.text() or self._last_folder,
+                                                  'Import records (*_import.json *.json)')
+            if not path:
+                return
+            try:
+                r = load_record(path)
+            except Exception as e:
+                QMessageBox.critical(self, 'Could not read the import record', str(e))
+                return
+            missing = [f for f in r['files'] if not os.path.isfile(f)]
+            if missing:
+                QMessageBox.warning(self, 'Files missing', f'{len(missing)} file(s) in the record are not '
+                                    f'there any more, e.g.\n{missing[0]}')
+            g = r['geometry']
+            self.cb_geom.setCurrentIndex(0 if g.mode == 'headers' else 1)
+            self.sp_r0.setValue(g.first_recv_pos)
+            self.sp_rdx.setValue(g.recv_spacing)
+            self.sp_s0.setValue(g.first_shot_pos)
+            self.sp_sdx.setValue(g.shot_spacing)
+            self.cb_place.setCurrentIndex(['coordinates', 'end', 'index'].index(g.trace_placement))
+            self.sp_gap.setValue(g.gap_insert_index)
+            self.chk_delay.setChecked(r.get('use_header_delay', True))
+            if r.get('pkl'):
+                self.ed_out.setText(os.path.dirname(r['pkl']))
+                self.ed_pkl.setText(os.path.basename(r['pkl']))
+                self._out_dir_user = self._pkl_user = True
+            if r.get('sgt'):
+                self.ed_sgt.setText(os.path.basename(r['sgt']))
+            self._set_quantity(r.get('quantity'))
+            self.add_files([f for f in r['files'] if os.path.isfile(f)], replace=True)
+
+        # ---------------- import ----------------
+        def _assemble(self, dry=False):
+            q = self.quantity() or ('acceleration' if dry else None)
+            if q is None:
+                raise ValueError('Choose what the files contain (acceleration / velocity / displacement).')
+            return import_survey(self.records, q, geometry=self._geom_settings(),
+                                 out_dir=self.ed_out.text().strip() or None,
+                                 pkl_path=self._pkl_path() or None, sgt_path=self._sgt_path() or None,
+                                 use_header_delay=self.chk_delay.isChecked(),
+                                 load_existing_picks=self.chk_load.isChecked())
+
+        def _do_import(self):
+            if not any(r.ok for r in self.records):
+                QMessageBox.warning(self, 'Nothing to import', 'Read a folder or add files first.')
+                return
+            if self.quantity() is None:
+                QMessageBox.warning(self, 'Data type', 'Choose what the files contain: acceleration, '
+                                    'velocity or displacement.\nThe preprocessing integrates or '
+                                    'differentiates from this.')
+                return
+            bad = [r.name for r in self.records if not r.ok]
+            if bad and QMessageBox.question(
+                    self, 'Unreadable files', f'{len(bad)} file(s) could not be read and will be '
+                    f'skipped:\n' + '\n'.join(bad[:8]) + '\n\nContinue?') != QMessageBox.Yes:
+                return
+            try:
+                sv = self._assemble()
+            except Exception as e:
+                QMessageBox.critical(self, 'Import failed', str(e))
+                return
+            try:
+                os.makedirs(sv.out_dir if os.path.dirname(sv.pkl_path) == '' else os.path.dirname(sv.pkl_path),
+                            exist_ok=True)
+            except Exception as e:
+                QMessageBox.critical(self, 'Output folder', f'Could not create the output folder:\n{e}')
+                return
+            self.survey = sv
+            self.accept()
+
+    def open_import_dialog(parent=None, **kw):
+        """Show the import dialog; returns a Survey or None (cancelled)."""
+        app = QApplication.instance() or QApplication([])
+        dlg = ImportDialog(parent, **kw)
+        dlg.exec_()
+        sv = dlg.survey
+        dlg.deleteLater()
+        return sv
+
+
+# =====================================================================
+# Geometry window (non-modal, opened from the picker's Data menu)
+# =====================================================================
+if _HAVE_QT:
+
+    class GeometryWindow(QDialog):
+        """Topography, plan view and import summary of the loaded survey.
+        Shots: green = picked, red = not picked, yellow ring = shot on the canvas.
+        Double-click a shot to open it in the picker (on_open_shot(index))."""
+
+        def __init__(self, survey, current_shot=None, picked=(), on_open_shot=None, parent=None):
+            super().__init__(parent)
+            self.setWindowTitle(f'Survey geometry - {survey.line}')
+            self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint |
+                                Qt.WindowMinimizeButtonHint)
+            self.setModal(False)
+            self.sv = survey
+            self.on_open_shot = on_open_shot
+            lay = QVBoxLayout(self)
+            tabs = QTabWidget()
+            lay.addWidget(tabs, 1)
+            scr = QApplication.primaryScreen()
+            dpi = scr.logicalDotsPerInch() if scr is not None else 96
+            self.fig = Figure(dpi=dpi, constrained_layout=True)
+            self.canvas = FigureCanvas(self.fig)
+            gsp = self.fig.add_gridspec(2, 1, height_ratios=[1.4, 1])
+            self.axp = self.fig.add_subplot(gsp[0])
+            self.axm = self.fig.add_subplot(gsp[1])
+            w = QWidget()
+            wl = QVBoxLayout(w)
+            wl.setContentsMargins(0, 0, 0, 0)
+            wl.addWidget(NavigationToolbar(self.canvas, w))
+            wl.addWidget(self.canvas, 1)
+            tabs.addTab(w, 'Topography / plan view')
+            self.txt = QPlainTextEdit()
+            self.txt.setReadOnly(True)
+            tabs.addTab(self.txt, 'Import summary')
+            self.lbl = QLabel('Green = picked, red = not picked, ring = shot on the picker canvas. '
+                              'Double-click a shot to open it.')
+            self.lbl.setStyleSheet('color: #555;')
+            lay.addWidget(self.lbl)
+            self.canvas.mpl_connect('button_press_event', self._click)
+            self.resize(1100, 800)
+            self._fill_summary()
+            self.update_state(current_shot, picked)
+
+        def _fill_summary(self):
+            sv = self.sv
+            lines = [sv.summary(), '', f'Imported: {sv.imported}', f'Data type: {sv.quantity}',
+                     f'Pick file: {sv.pkl_path}', f'SGT file: {sv.sgt_path}',
+                     f'Import record: {sv.record_path}',
+                     f'Geometry: {sv.geometry.mode}; first receiver {sv.geometry.first_recv_pos:g} m, '
+                     f'spacing {sv.geometry.recv_spacing:g} m; trace placement {sv.geometry.trace_placement}',
+                     '', 'Notes:'] + [f'  - {w}' for w in sv.warnings] + ['', 'Shots:']
+            try:
+                lines.append(sv.shot_df().to_string(index=False, float_format=lambda v: f'{v:.2f}'))
+            except Exception:
+                pass
+            self.txt.setPlainText('\n'.join(lines))
+
+        def update_state(self, current_shot=None, picked=()):
+            sv = self.sv
+            draw_geometry(self.axp, self.axm, sv.recv_dist, sv.recv_elev if sv.has_elev else None,
+                          sv.recv_xy, sv.shot_dist, sv.shot_elev, sv.shot_xy, highlight=current_shot,
+                          highlight_label='On the picker canvas')
+            picked = set(int(k) for k in picked)
+            se = np.asarray(sv.shot_elev) if sv.has_elev else np.zeros(sv.n_shots)
+            ok = np.array([i in picked for i in range(sv.n_shots)])
+            if ok.any():
+                self.axp.scatter(sv.shot_dist[ok], se[ok], s=70, marker='*', color='#27ae60',
+                                 edgecolor='k', lw=0.5, zorder=3.5, label=f'Picked ({ok.sum()})')
+                self.axp.legend(fontsize='x-small', loc='best')
+            self.axp.set_title(f'{sv.line}: topography and shots  '
+                               f'({ok.sum()} of {sv.n_shots} picked)', fontsize='medium')
+            self.canvas.draw_idle()
+
+        def _click(self, ev):
+            if not ev.dblclick or ev.inaxes is not self.axp or ev.xdata is None:
+                return
+            i = int(np.argmin(np.abs(self.sv.shot_dist - ev.xdata)))
+            if self.on_open_shot is not None:
+                self.on_open_shot(i)

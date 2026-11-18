@@ -71,271 +71,373 @@ file_path_sgt = f"C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/work
 #File for total reciprocity report
 reciprocity_report_directory = f"C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/SRT/SRT_displacement"
 
-# %% Loading seismic data (Shot Gather one by one) into an array/matrix
-# Shape: (n_shots, n_samples, n_traces)
+# ---- Data import (v8, data_importer.py) ----
+# USE_IMPORT_DIALOG = True : an import window opens (folder/batch or single files, data type,
+#                            geometry, live topography, automatic output names).
+#                            segy_data_path / search_string_for_segy_files above are only its
+#                            starting folder and name filter.
+# USE_IMPORT_DIALOG = False: script mode - reads segy_data_path with search_string_for_segy_files
+#                            and needs DATA_QUANTITY below.
+USE_IMPORT_DIALOG = True
+DATA_QUANTITY = None            # 'acceleration' | 'velocity' | 'displacement' (dialog: pre-selects it)
+IMPORT_RECORD_FILE = None       # e.g. '.../picks/S_STACK_0101.00_acceleration_import.json':
+                                # repeats that import exactly, without the dialog
+AUTO_OUTPUT_NAMES = True        # script mode: name the .pkl/.txt from the line name + data type
+                                # (False: use file_path_pkl / file_path_sgt above)
+LOAD_EXISTING_PICKS = True      # continue from the pick file if it already exists
 
-path = Path(segy_data_path)
+# %% Loading seismic data (v8: data_importer.py) into an array (n_shots, n_samples, n_traces)
+"""
+v8: reading, sorting, header extraction (dt, delay, coordinates, elevations), trace
+placement for shots with missing receivers, data type and output names are done by
+data_importer.py (import dialog or script mode). The previous loader is kept below,
+commented out, for reference.
+"""
+import importlib
+try:
+    _here = os.path.dirname(os.path.abspath(__file__))
+except NameError:                     # running cells in Spyder/IPython
+    _here = os.getcwd()
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+import data_importer as dimp
+importlib.reload(dimp)
 
-def natural_sort_key(s):
-    """Key function for natural sorting"""
-    return [int(text) if text.isdigit() else text.lower()
-            for text in re.split(r'(\d+)', s)]
+natural_sort_key = dimp.natural_sort_key
 
-# def read_and_sort_files(path, search_string_for_segy_files):
-#     """Reads files from the given path matching the search string and sorts them in mathematical order."""
-#     full_filenames = []
 
-#     for file in Path(path).glob(search_string_for_segy_files):
-#         filename = str(file)
-#         #print("Loading:",filename)
-#         full_filenames.append(filename)
+def _print_import_progress(i, n, rec):
+    state = 'ok' if rec.ok else f'NOT READ ({rec.error})'
+    print(f"  [{i + 1:>4}/{n}] {rec.name}: {rec.ntr} traces, {state}")
 
-#     full_filenames.sort(key=natural_sort_key)
+
+if IMPORT_RECORD_FILE:
+    # repeat an earlier import exactly (files, data type, geometry, outputs)
+    _rec = dimp.load_record(IMPORT_RECORD_FILE)
+    print(f"Repeating the import in {IMPORT_RECORD_FILE} ({len(_rec['files'])} files)")
+    SURVEY = dimp.import_files(_rec['files'], _rec['quantity'], progress=_print_import_progress,
+                               geometry=_rec['geometry'], pkl_path=_rec.get('pkl') or None,
+                               sgt_path=_rec.get('sgt') or None,
+                               use_header_delay=_rec.get('use_header_delay', True),
+                               load_existing_picks=LOAD_EXISTING_PICKS)
+elif USE_IMPORT_DIALOG:
+    app = QApplication.instance() or QApplication(sys.argv)
+    SURVEY = dimp.open_import_dialog(
+        start_folder=segy_data_path if os.path.isdir(segy_data_path) else '',
+        pattern=search_string_for_segy_files, quantity=DATA_QUANTITY)
+    if SURVEY is None:
+        raise SystemExit("Import cancelled: no data loaded. Run this cell again to import.")
+else:
+    _files = dimp.find_segy_files(segy_data_path, pattern=search_string_for_segy_files)
+    if not _files:
+        raise FileNotFoundError(f"No .segy/.sgy files matching '{search_string_for_segy_files}' "
+                                f"in {segy_data_path}")
+    if DATA_QUANTITY not in dimp.QUANTITIES:
+        raise ValueError("Script mode: set DATA_QUANTITY to 'acceleration', 'velocity' or "
+                         "'displacement' (what the SEG-Y files contain).")
+    print(f"Reading {len(_files)} SEG-Y files from {segy_data_path}")
+    SURVEY = dimp.import_files(_files, DATA_QUANTITY, progress=_print_import_progress,
+                               pkl_path=None if AUTO_OUTPUT_NAMES else file_path_pkl,
+                               sgt_path=None if AUTO_OUTPUT_NAMES else file_path_sgt,
+                               load_existing_picks=LOAD_EXISTING_PICKS)
+
+# ---- everything downstream uses these (same names as before) ----
+full_filenames = SURVEY.files
+shot_gather_array = SURVEY.data
+DATA_QUANTITY = SURVEY.quantity
+dt = SURVEY.dt
+file_path_pkl = SURVEY.pkl_path
+file_path_sgt = SURVEY.sgt_path
+reciprocity_report_directory = os.path.dirname(os.path.abspath(file_path_pkl))
+os.makedirs(reciprocity_report_directory, exist_ok=True)
+LOAD_EXISTING_PICKS = SURVEY.load_existing_picks
+recv_df_from_segy = SURVEY.recv_df()          # utmx, utmy, elevation, local_x, local_y, position
+shot_df_from_segy = SURVEY.shot_df()          # + file, offline_m, position, delay_ms
+try:
+    print(f"Import record saved: {SURVEY.save_record()}")
+except Exception as _e:
+    print(f"Could not save the import record: {_e}")
+
+print("Loaded file names and paths:", [os.path.basename(f) for f in full_filenames])
+print(SURVEY.summary())
+for _w in SURVEY.warnings:
+    print("  NOTE:", _w)
+print(f"Picks file : {file_path_pkl}")
+print(f"SGT file   : {file_path_sgt}")
+print(f'Total shots: {len(shot_gather_array)}')
+print(f'Active nodes: {shot_gather_array.shape[2]}, samples: {shot_gather_array.shape[1]}')
+if not USE_IMPORT_DIALOG:                     # the dialog already showed the topography
+    dimp.plot_geometry(SURVEY)
+    plt.show()
+
+
+# ---------------- previous loader (v7 and earlier), kept for reference ----------------
+# # %% Loading seismic data (Shot Gather one by one) into an array/matrix
+# # Shape: (n_shots, n_samples, n_traces)
+
+# path = Path(segy_data_path)
+
+# def natural_sort_key(s):
+#     """Key function for natural sorting"""
+#     return [int(text) if text.isdigit() else text.lower()
+#             for text in re.split(r'(\d+)', s)]
+
+# # def read_and_sort_files(path, search_string_for_segy_files):
+# #     """Reads files from the given path matching the search string and sorts them in mathematical order."""
+# #     full_filenames = []
+
+# #     for file in Path(path).glob(search_string_for_segy_files):
+# #         filename = str(file)
+# #         #print("Loading:",filename)
+# #         full_filenames.append(filename)
+
+# #     full_filenames.sort(key=natural_sort_key)
     
-#     print("Loaded file names and paths:", full_filenames)
+# #     print("Loaded file names and paths:", full_filenames)
     
-#     shot_gather = []
-#     for i in range(len(full_filenames)):
-#         seismic_data_i = _read_segy(full_filenames[i])
-#         seismic_data_arr = np.array(seismic_data_i.traces).T
-#         shot_gather.append(seismic_data_arr)
+# #     shot_gather = []
+# #     for i in range(len(full_filenames)):
+# #         seismic_data_i = _read_segy(full_filenames[i])
+# #         seismic_data_arr = np.array(seismic_data_i.traces).T
+# #         shot_gather.append(seismic_data_arr)
         
-#     shot_gather_array = np.array(shot_gather)
-#     return shot_gather_array, full_filenames   # also return file list for later use
+# #     shot_gather_array = np.array(shot_gather)
+# #     return shot_gather_array, full_filenames   # also return file list for later use
 
-# def read_and_sort_files(path, search_string_for_segy_files):
-#     """Reads files from the given path matching the search string and sorts them
-#     in mathematical order. Zero-pads shots with fewer receivers so the returned
-#     array is always (n_shots, n_samples, max_traces)."""
+# # def read_and_sort_files(path, search_string_for_segy_files):
+# #     """Reads files from the given path matching the search string and sorts them
+# #     in mathematical order. Zero-pads shots with fewer receivers so the returned
+# #     array is always (n_shots, n_samples, max_traces)."""
+# #     full_filenames = []
+
+# #     for file in Path(path).glob(search_string_for_segy_files):
+# #         full_filenames.append(str(file))
+
+# #     full_filenames.sort(key=natural_sort_key)
+# #     print("Loaded file names and paths:", full_filenames)
+
+# #     shot_gather = []
+# #     shapes = []
+# #     for fname in full_filenames:
+# #         seismic_data_i = _read_segy(fname)
+# #         arr = np.array(seismic_data_i.traces).T   # (n_samples, n_traces)
+# #         shot_gather.append(arr)
+# #         shapes.append(arr.shape)
+
+# #     # Report any mismatched shapes so you know which files differ
+# #     unique_shapes = set(shapes)
+# #     if len(unique_shapes) > 1:
+# #         print(f"WARNING: inhomogeneous shot shapes detected: {unique_shapes}")
+# #         for fname, sh in zip(full_filenames, shapes):
+# #             if sh != shapes[0]:
+# #                 print(f"  {fname}  →  {sh}  (expected {shapes[0]})")
+
+# #     max_samples = max(s[0] for s in shapes)
+# #     max_traces  = max(s[1] for s in shapes)
+
+# #     # Zero-pad every shot to (max_samples, max_traces)
+# #     padded = []
+# #     for arr in shot_gather:
+# #         ns, nt = arr.shape
+# #         p = np.zeros((max_samples, max_traces), dtype=arr.dtype)
+# #         p[:ns, :nt] = arr
+# #         padded.append(p)
+
+# #     shot_gather_array = np.array(padded)          # now guaranteed homogeneous
+# #     return shot_gather_array, full_filenames
+
+# def read_and_sort_files(path, search_string_for_segy_files, gap_insert_index=437):
+#     """
+#     Reads and sorts SEGY files. For shots with fewer receivers than the
+#     maximum, zero columns are inserted at gap_insert_index (not appended
+#     at the end) so that existing receiver position mappings stay intact.
+
+#     gap_insert_index : int
+#         The Python column index AFTER which the extra receivers appear
+#         in the fuller shots (default 436 based on your Day 2 geometry).
+#     """
 #     full_filenames = []
-
 #     for file in Path(path).glob(search_string_for_segy_files):
 #         full_filenames.append(str(file))
-
 #     full_filenames.sort(key=natural_sort_key)
 #     print("Loaded file names and paths:", full_filenames)
 
 #     shot_gather = []
-#     shapes = []
 #     for fname in full_filenames:
 #         seismic_data_i = _read_segy(fname)
 #         arr = np.array(seismic_data_i.traces).T   # (n_samples, n_traces)
 #         shot_gather.append(arr)
-#         shapes.append(arr.shape)
 
-#     # Report any mismatched shapes so you know which files differ
+#     # ── Diagnose shape mismatches ─────────────────────────────────────────────
+#     shapes = [arr.shape for arr in shot_gather]
 #     unique_shapes = set(shapes)
-#     if len(unique_shapes) > 1:
-#         print(f"WARNING: inhomogeneous shot shapes detected: {unique_shapes}")
-#         for fname, sh in zip(full_filenames, shapes):
-#             if sh != shapes[0]:
-#                 print(f"  {fname}  →  {sh}  (expected {shapes[0]})")
-
 #     max_samples = max(s[0] for s in shapes)
 #     max_traces  = max(s[1] for s in shapes)
 
-#     # Zero-pad every shot to (max_samples, max_traces)
+#     if len(unique_shapes) > 1:
+#         print(f"WARNING: inhomogeneous shot shapes detected → {unique_shapes}")
+#         for fname, s in zip(full_filenames, shapes):
+#             if s[1] != max_traces:
+#                 print(f"  missing {max_traces - s[1]} receiver(s): {fname}")
+
+#     # ── Pad each short shot by inserting zeros at the gap column ─────────────
 #     padded = []
 #     for arr in shot_gather:
 #         ns, nt = arr.shape
-#         p = np.zeros((max_samples, max_traces), dtype=arr.dtype)
-#         p[:ns, :nt] = arr
-#         padded.append(p)
+#         n_missing_traces = max_traces - nt
 
-#     shot_gather_array = np.array(padded)          # now guaranteed homogeneous
-#     return shot_gather_array, full_filenames
+#         # -- 1. Insert zero columns at the interior gap position --
+#         if n_missing_traces > 0:
+#             zeros = np.zeros((ns, n_missing_traces), dtype=np.float64)
+#             arr = np.concatenate(
+#                 [arr[:, :gap_insert_index],   # receivers 0 … 435   (unchanged)
+#                  zeros,                        # gap columns (dead)
+#                  arr[:, gap_insert_index:]],   # receivers 436+ from this shot
+#                 axis=1
+#             )
 
-def read_and_sort_files(path, search_string_for_segy_files, gap_insert_index=437):
-    """
-    Reads and sorts SEGY files. For shots with fewer receivers than the
-    maximum, zero columns are inserted at gap_insert_index (not appended
-    at the end) so that existing receiver position mappings stay intact.
+#         # -- 2. Pad time axis if any shot has fewer samples (rare) --
+#         if arr.shape[0] < max_samples:
+#             arr = np.vstack([
+#                 arr,
+#                 np.zeros((max_samples - arr.shape[0], arr.shape[1]))
+#             ])
 
-    gap_insert_index : int
-        The Python column index AFTER which the extra receivers appear
-        in the fuller shots (default 436 based on your Day 2 geometry).
-    """
-    full_filenames = []
-    for file in Path(path).glob(search_string_for_segy_files):
-        full_filenames.append(str(file))
-    full_filenames.sort(key=natural_sort_key)
-    print("Loaded file names and paths:", full_filenames)
+#         padded.append(arr.astype(np.float64))
 
-    shot_gather = []
-    for fname in full_filenames:
-        seismic_data_i = _read_segy(fname)
-        arr = np.array(seismic_data_i.traces).T   # (n_samples, n_traces)
-        shot_gather.append(arr)
+#     shot_gather_array = np.array(padded)     # guaranteed homogeneous now
+#     print(f"Final array shape: {shot_gather_array.shape}  "
+#           f"(shots × samples × master_receivers)")
+#     return shot_gather_array, full_filenames  # same signature as before
 
-    # ── Diagnose shape mismatches ─────────────────────────────────────────────
-    shapes = [arr.shape for arr in shot_gather]
-    unique_shapes = set(shapes)
-    max_samples = max(s[0] for s in shapes)
-    max_traces  = max(s[1] for s in shapes)
+# shot_gather_array, full_filenames = read_and_sort_files(path, search_string_for_segy_files)
 
-    if len(unique_shapes) > 1:
-        print(f"WARNING: inhomogeneous shot shapes detected → {unique_shapes}")
-        for fname, s in zip(full_filenames, shapes):
-            if s[1] != max_traces:
-                print(f"  missing {max_traces - s[1]} receiver(s): {fname}")
-
-    # ── Pad each short shot by inserting zeros at the gap column ─────────────
-    padded = []
-    for arr in shot_gather:
-        ns, nt = arr.shape
-        n_missing_traces = max_traces - nt
-
-        # -- 1. Insert zero columns at the interior gap position --
-        if n_missing_traces > 0:
-            zeros = np.zeros((ns, n_missing_traces), dtype=np.float64)
-            arr = np.concatenate(
-                [arr[:, :gap_insert_index],   # receivers 0 … 435   (unchanged)
-                 zeros,                        # gap columns (dead)
-                 arr[:, gap_insert_index:]],   # receivers 436+ from this shot
-                axis=1
-            )
-
-        # -- 2. Pad time axis if any shot has fewer samples (rare) --
-        if arr.shape[0] < max_samples:
-            arr = np.vstack([
-                arr,
-                np.zeros((max_samples - arr.shape[0], arr.shape[1]))
-            ])
-
-        padded.append(arr.astype(np.float64))
-
-    shot_gather_array = np.array(padded)     # guaranteed homogeneous now
-    print(f"Final array shape: {shot_gather_array.shape}  "
-          f"(shots × samples × master_receivers)")
-    return shot_gather_array, full_filenames  # same signature as before
-
-shot_gather_array, full_filenames = read_and_sort_files(path, search_string_for_segy_files)
-
-print(f'Total shots: {len(shot_gather_array)}')
-print(f'Active nodes: {shot_gather_array.shape[2]}, samples: {shot_gather_array.shape[1]}')
+# print(f'Total shots: {len(shot_gather_array)}')
+# print(f'Active nodes: {shot_gather_array.shape[2]}, samples: {shot_gather_array.shape[1]}')
 
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Extract receiver and shot positions from SEGY headers
-# ──────────────────────────────────────────────────────────────────────
+# # ──────────────────────────────────────────────────────────────────────
+# # Extract receiver and shot positions from SEGY headers
+# # ──────────────────────────────────────────────────────────────────────
 
-# After reading and padding, we have:
-# shot_gather_array : shape (n_shots, n_samples, max_traces)
-# full_filenames    : list of file paths
+# # After reading and padding, we have:
+# # shot_gather_array : shape (n_shots, n_samples, max_traces)
+# # full_filenames    : list of file paths
 
-# Find a shot that has the maximum number of traces (should be max_traces)
-max_traces = shot_gather_array.shape[2]
-idx_max = None
-for i, arr in enumerate(shot_gather_array):
-    if arr.shape[1] == max_traces:
-        idx_max = i
-        break
-if idx_max is None:
-    # Fallback: use the first file (should not happen)
-    idx_max = 0
-    print("Warning: No shot with max_traces found; using first file.")
+# # Find a shot that has the maximum number of traces (should be max_traces)
+# max_traces = shot_gather_array.shape[2]
+# idx_max = None
+# for i, arr in enumerate(shot_gather_array):
+#     if arr.shape[1] == max_traces:
+#         idx_max = i
+#         break
+# if idx_max is None:
+#     # Fallback: use the first file (should not happen)
+#     idx_max = 0
+#     print("Warning: No shot with max_traces found; using first file.")
 
-max_file = full_filenames[idx_max]
-print(f"Using shot {idx_max} (file: {max_file}) for receiver positions.")
+# max_file = full_filenames[idx_max]
+# print(f"Using shot {idx_max} (file: {max_file}) for receiver positions.")
 
-# Extract receiver positions from that file
-def extract_receiver_positions(segy_file):
-    """
-    Read SEGY file and extract group coordinates (UTM) and elevation.
-    Computes local_x as cumulative distance along the line.
-    Returns DataFrame with columns: utmx, utmy, elevation, local_x, local_y (=0).
-    """
-    st = _read_segy(segy_file)
+# # Extract receiver positions from that file
+# def extract_receiver_positions(segy_file):
+#     """
+#     Read SEGY file and extract group coordinates (UTM) and elevation.
+#     Computes local_x as cumulative distance along the line.
+#     Returns DataFrame with columns: utmx, utmy, elevation, local_x, local_y (=0).
+#     """
+#     st = _read_segy(segy_file)
     
-    utmx = []; utmy = []; elevation = []
+#     utmx = []; utmy = []; elevation = []
     
-    for trace in st.traces:
-        th = trace.stats.segy.trace_header
-        gx = getattr(th, 'group_coordinate_x', None)
-        gy = getattr(th, 'group_coordinate_y', None)
-        elev = getattr(th, 'receiver_group_elevation', None)
-        if gx is not None:
-            gx = gx / 100.0
-        if gy is not None:
-            gy = gy / 100.0
-        if elev is not None:
-            elev = elev / 100.0
-        utmx.append(gx if gx is not None else np.nan)
-        utmy.append(gy if gy is not None else np.nan)
-        elevation.append(elev if elev is not None else np.nan)
+#     for trace in st.traces:
+#         th = trace.stats.segy.trace_header
+#         gx = getattr(th, 'group_coordinate_x', None)
+#         gy = getattr(th, 'group_coordinate_y', None)
+#         elev = getattr(th, 'receiver_group_elevation', None)
+#         if gx is not None:
+#             gx = gx / 100.0
+#         if gy is not None:
+#             gy = gy / 100.0
+#         if elev is not None:
+#             elev = elev / 100.0
+#         utmx.append(gx if gx is not None else np.nan)
+#         utmy.append(gy if gy is not None else np.nan)
+#         elevation.append(elev if elev is not None else np.nan)
     
-    df = pd.DataFrame({'utmx': utmx, 'utmy': utmy, 'elevation': elevation})
+#     df = pd.DataFrame({'utmx': utmx, 'utmy': utmy, 'elevation': elevation})
     
-    # Compute local_x along the line using Pythagoras
-    dx = np.diff(df['utmx'].values)
-    dy = np.diff(df['utmy'].values)
-    distances = np.sqrt(dx**2 + dy**2)
-    local_x = np.concatenate(([0], np.cumsum(distances)))
-    df['local_x'] = local_x
-    df['local_y'] = 0.0   # 2D line
+#     # Compute local_x along the line using Pythagoras
+#     dx = np.diff(df['utmx'].values)
+#     dy = np.diff(df['utmy'].values)
+#     distances = np.sqrt(dx**2 + dy**2)
+#     local_x = np.concatenate(([0], np.cumsum(distances)))
+#     df['local_x'] = local_x
+#     df['local_y'] = 0.0   # 2D line
     
-    return df
-first_segy_file = full_filenames[-1]
-recv_df_from_segy = extract_receiver_positions(first_segy_file)
-#recv_pos = recv_df_from_segy['local_x'].values   # length == max_traces
+#     return df
+# first_segy_file = full_filenames[-1]
+# recv_df_from_segy = extract_receiver_positions(first_segy_file)
+# #recv_pos = recv_df_from_segy['local_x'].values   # length == max_traces
 
-# recv_df_srt_path = 'C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Coweeta_project/SRT/day1_recv_df_from_header.csv'
-# recv_df_from_segy.to_csv(recv_df_srt_path)
+# # recv_df_srt_path = 'C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Coweeta_project/SRT/day1_recv_df_from_header.csv'
+# # recv_df_from_segy.to_csv(recv_df_srt_path)
 
-print("\nReceiver positions extracted from the max-traces shot:")
-print(recv_df_from_segy.head())
-#print(f"Total receivers: {len(recv_pos)} (matches max_traces)")
+# print("\nReceiver positions extracted from the max-traces shot:")
+# print(recv_df_from_segy.head())
+# #print(f"Total receivers: {len(recv_pos)} (matches max_traces)")
 
-# Quick elevation profile plot
-plt.figure(figsize=(8,5))
-plt.scatter(recv_df_from_segy['local_x'], recv_df_from_segy['elevation'],
-            color='blue', s=25, label='Receivers')
-plt.plot(recv_df_from_segy['local_x'], recv_df_from_segy['elevation'],
-         color='red', linewidth=1.5, label='Profile')
-plt.xlabel('Local X (m)'); plt.ylabel('Elevation (m)')
-plt.title('Receiver Elevation Profile'); plt.grid(True, alpha=0.3); plt.legend()
-plt.tight_layout(); plt.show()
+# # Quick elevation profile plot
+# plt.figure(figsize=(8,5))
+# plt.scatter(recv_df_from_segy['local_x'], recv_df_from_segy['elevation'],
+#             color='blue', s=25, label='Receivers')
+# plt.plot(recv_df_from_segy['local_x'], recv_df_from_segy['elevation'],
+#          color='red', linewidth=1.5, label='Profile')
+# plt.xlabel('Local X (m)'); plt.ylabel('Elevation (m)')
+# plt.title('Receiver Elevation Profile'); plt.grid(True, alpha=0.3); plt.legend()
+# plt.tight_layout(); plt.show()
 
-# ── Extract shot positions from all SEGY files ──────────────────────
-def extract_shot_positions(full_filenames):
-    """
-    Read all SEGY files and extract source coordinates.
-    Returns DataFrame with columns: shot_index, utmx, utmy, local_x, local_y.
-    """
+# # ── Extract shot positions from all SEGY files ──────────────────────
+# def extract_shot_positions(full_filenames):
+#     """
+#     Read all SEGY files and extract source coordinates.
+#     Returns DataFrame with columns: shot_index, utmx, utmy, local_x, local_y.
+#     """
     
-    utmx = []; utmy = []; shot_index = []
+#     utmx = []; utmy = []; shot_index = []
     
-    for idx, fname in enumerate(full_filenames):
-        st = _read_segy(fname)
-        th = st.traces[0].stats.segy.trace_header
-        sx = getattr(th, 'source_coordinate_x', None)
-        sy = getattr(th, 'source_coordinate_y', None)
-        if sx is not None:
-            sx = sx / 100.0
-        if sy is not None:
-            sy = sy / 100.0
-        shot_index.append(idx)
-        utmx.append(sx if sx is not None else np.nan)
-        utmy.append(sy if sy is not None else np.nan)
+#     for idx, fname in enumerate(full_filenames):
+#         st = _read_segy(fname)
+#         th = st.traces[0].stats.segy.trace_header
+#         sx = getattr(th, 'source_coordinate_x', None)
+#         sy = getattr(th, 'source_coordinate_y', None)
+#         if sx is not None:
+#             sx = sx / 100.0
+#         if sy is not None:
+#             sy = sy / 100.0
+#         shot_index.append(idx)
+#         utmx.append(sx if sx is not None else np.nan)
+#         utmy.append(sy if sy is not None else np.nan)
     
-    df = pd.DataFrame({'shot_index': shot_index, 'utmx': utmx, 'utmy': utmy})
+#     df = pd.DataFrame({'shot_index': shot_index, 'utmx': utmx, 'utmy': utmy})
     
-    # Compute local_x along the line
-    dx = np.diff(df['utmx'].values)
-    dy = np.diff(df['utmy'].values)
-    distances = np.sqrt(dx**2 + dy**2)
-    local_x = np.concatenate(([0], np.cumsum(distances)))
-    df['local_x'] = local_x
-    df['local_y'] = 0.0
+#     # Compute local_x along the line
+#     dx = np.diff(df['utmx'].values)
+#     dy = np.diff(df['utmy'].values)
+#     distances = np.sqrt(dx**2 + dy**2)
+#     local_x = np.concatenate(([0], np.cumsum(distances)))
+#     df['local_x'] = local_x
+#     df['local_y'] = 0.0
     
-    return df
+#     return df
 
-shot_df_from_segy = extract_shot_positions(full_filenames)
+# shot_df_from_segy = extract_shot_positions(full_filenames)
 
-print("\nShot positions extracted from headers:")
-print(shot_df_from_segy.head())
-print(f"Total shots: {len(shot_df_from_segy)}")
+# print("\nShot positions extracted from headers:")
+# print(shot_df_from_segy.head())
+# print(f"Total shots: {len(shot_df_from_segy)}")
+
 # %% Data Normalizer
 def normalizer(dd):
     """
@@ -379,32 +481,54 @@ print(norm_data.shape)
 #%% Create an array for shot and receiver positions wrt index.
 
 """
-Note:- Setting up the Shot and Receiver positions (theoretical) on the 1D cartesian co-ordinate. 
-
+Note:- Shot and Receiver positions on the 1D line (metres), used everywhere in the picker.
+v8: they come from the import (data_importer.py): 'From headers' = shot positions from the
+source coordinates (nearest receiver + whole receiver spacings), receivers evenly numbered from
+the first receiver position; 'Manual' = evenly spaced shots as typed in the import dialog.
+Set GEOMETRY_OVERRIDE = True to use the hard-coded positions below instead (old behaviour).
 """
-first_shot_pos =0
-last_shot_pos = 170
-shot_spacing =  10
+shot_pos_index = np.asarray(SURVEY.shot_pos, dtype=float).copy()
+recv_pos_index = np.asarray(SURVEY.recv_pos, dtype=float).copy()
+recv_spacing = SURVEY.geometry.recv_spacing   #this is important parameter. It'll be used in the code going further
 
-shot_pos_index = np.arange(first_shot_pos,last_shot_pos+shot_spacing,shot_spacing)
- 
-non_recorded_shot_pos =  np.array([]) #if there's any shot needs to be deleted write the offset positions in this matrix
+GEOMETRY_OVERRIDE = False
+if GEOMETRY_OVERRIDE:
+    first_shot_pos =0
+    last_shot_pos = 170
+    shot_spacing =  10
 
-shot_pos_index =  np.setdiff1d(shot_pos_index, non_recorded_shot_pos)
+    shot_pos_index = np.arange(first_shot_pos,last_shot_pos+shot_spacing,shot_spacing)
 
-#Setting-up Receiver offsets
-first_recv_pos = 1
-last_recv_pos = 170
+    non_recorded_shot_pos =  np.array([]) #if there's any shot needs to be deleted write the offset positions in this matrix
 
-recv_spacing = 1 #this is important parameter. It'll be used in the code going further
+    shot_pos_index =  np.setdiff1d(shot_pos_index, non_recorded_shot_pos)
+
+    #Setting-up Receiver offsets
+    first_recv_pos = 1
+    last_recv_pos = 170
+
+    recv_spacing = 1 #this is important parameter. It'll be used in the code going further
 
 
-recv_pos_index = np.arange(first_recv_pos,last_recv_pos+ recv_spacing,recv_spacing)
+    recv_pos_index = np.arange(first_recv_pos,last_recv_pos+ recv_spacing,recv_spacing)
 
-non_recorded_recv_pos = np.array([])
+    non_recorded_recv_pos = np.array([])
 
-recv_pos_index =  np.setdiff1d(recv_pos_index, non_recorded_recv_pos)
+    recv_pos_index =  np.setdiff1d(recv_pos_index, non_recorded_recv_pos)
 
+# whole-metre positions stay integers (as with the old np.arange geometry)
+if np.allclose(shot_pos_index, np.round(shot_pos_index)) and \
+        np.allclose(recv_pos_index, np.round(recv_pos_index)):
+    shot_pos_index = np.round(shot_pos_index).astype(int)
+    recv_pos_index = np.round(recv_pos_index).astype(int)
+    if float(recv_spacing).is_integer():
+        recv_spacing = int(recv_spacing)
+if len(shot_pos_index) != shot_gather_array.shape[0]:
+    raise ValueError(f"{len(shot_pos_index)} shot positions for {shot_gather_array.shape[0]} shots: "
+                     f"check the geometry (import dialog or GEOMETRY_OVERRIDE).")
+if len(recv_pos_index) != shot_gather_array.shape[2]:
+    raise ValueError(f"{len(recv_pos_index)} receiver positions for {shot_gather_array.shape[2]} traces: "
+                     f"check the geometry (import dialog or GEOMETRY_OVERRIDE).")
 
 print('Total No of Shots are: ',shot_pos_index.shape[0], '\nat positions: ', shot_pos_index)
 print('Total No of Receivers are: ',recv_pos_index.shape[0], '\nat positions: ', recv_pos_index)
@@ -528,6 +652,12 @@ def time_shift(datafile, delta_t, dt):
 
 apply_tshift = 'yes'     # used as the starting time-shift setting below
 delta_t = -0.05          # s
+# v8: the import supplies the time zero from the SEG-Y 'delay recording time' header
+# (delay -50 ms = first sample 50 ms before the shot -> shift -50 ms)
+if SURVEY.use_header_delay:
+    delta_t = SURVEY.time_shift_ms * 1e-3
+    apply_tshift = 'yes' if delta_t != 0 else 'no'
+    print(f"Time shift from the header delay: {delta_t * 1e3:+g} ms")
 
 # ---------------------------------------------------------------------
 # NEW: preprocess_designer.py (same folder). Trace kills -> demean ->
@@ -547,18 +677,19 @@ import preprocess_designer as ppz
 importlib.reload(ppz)
 
 # Sample interval from the SEG-Y headers (the picker's 0.1 ms pick units assume 1 ms data)
-dt = ppz.segy_sample_interval(full_filenames[0], default=0.001)
+dt = SURVEY.dt                       # v8: from the import (SEG-Y headers)
 if abs(dt - 0.001) > 1e-9:
     print(f"WARNING: data sample interval is {dt * 1e3:g} ms, but the picker's pick units "
           f"(0.1 ms after x10 resampling) assume 1 ms data.")
 
 PREPROC_PARAMS = ppz.PreprocParams(
-    input_quantity='acceleration',    # what the loaded SEG-Y files contain:
-                                      # 'acceleration' | 'velocity' | 'displacement'
+    input_quantity=DATA_QUANTITY,     # v8: chosen at import (acceleration/velocity/displacement)
     convert=False,                    # True: also integrate/differentiate at start-up
     demean=True,                      # demean before integration (Steve's v6)
     lowcut_on=True, lowcut_hz=15.0, lowcut_transition_hz=20.0,   # after EACH integration
     lowcut_taps=0, lowcut_atten_db=60.0,                         # 0 taps = auto size
+    highcut_on=True, highcut_hz=120.0, highcut_transition_hz=40.0,  # v8: after EACH differentiation
+    highcut_taps=0, highcut_atten_db=60.0,
     time_shift_on=(apply_tshift.lower() == 'yes'), delta_t_ms=delta_t * 1e3,
     mute_on=False, mute_ms=0.0,
     normalize=True,                   # per-trace RMS (as before)
@@ -569,6 +700,10 @@ PREPROC_PRESET_FILE = None            # e.g. 'my_preprocessing.json' (includes t
 if PREPROC_PRESET_FILE:
     PREPROC_PARAMS = ppz.PreprocParams.load_json(PREPROC_PRESET_FILE)
     print(f"Loaded preprocessing preset {PREPROC_PRESET_FILE}")
+    if PREPROC_PARAMS.input_quantity != DATA_QUANTITY:     # the import decides the data type
+        print(f"  preset says input '{PREPROC_PARAMS.input_quantity}', import says "
+              f"'{DATA_QUANTITY}': using '{DATA_QUANTITY}'")
+        PREPROC_PARAMS.input_quantity = DATA_QUANTITY
 
 # {quantity: (n_shots, n_samples, n_traces)}; only the input quantity unless convert=True
 QUANTITY_DATA = ppz.run_preprocessing(shot_gather_array, dt, PREPROC_PARAMS)
@@ -868,14 +1003,19 @@ def load_picks_and_points(file_path):
     return final_picks_dict, final_clicked_points
 
 # Now you can access the loaded data and check on it
-final_picks_dict, final_clicked_points = load_picks_and_points(file_path_pkl)
+# v8: only if the pick file exists (and LOAD_EXISTING_PICKS); otherwise start empty
+if LOAD_EXISTING_PICKS and os.path.isfile(file_path_pkl):
+    final_picks_dict, final_clicked_points = load_picks_and_points(file_path_pkl)
+else:
+    final_picks_dict, final_clicked_points = {}, {}
+    print(f"Starting a new pick file: {file_path_pkl}")
 
 #fixing old picks which are wrt offset
 # print("Picks before adjusting recv pos index\n",final_picks_dict['final_picks_for_shot_no_10'])
 # for key in final_picks_dict:
 #     final_picks_dict[key][0,:, 0] = final_picks_dict[key][0,:, 0]-1
     
-print("Picks after adjusting recv pos index\n", final_picks_dict['final_picks_for_shot_no_10'])
+# print("Picks after adjusting recv pos index\n", final_picks_dict['final_picks_for_shot_no_10'])
 
 
 
@@ -1831,6 +1971,52 @@ def go_to_shot(idx, source=''):
     print(f"Opened shot no. {shot_no + 1} (index {shot_no}){source}.")
 
 
+geometry_window = None                 # Data > Survey geometry window (non-modal)
+
+
+def _picked_shot_indices():
+    out = []
+    for k in final_picks_dict:
+        try:
+            out.append(int(str(k).rsplit('_', 1)[-1]))
+        except ValueError:
+            pass
+    return out
+
+
+def open_geometry_window():
+    """Data > Survey geometry / topography: elevation profile, plan view, import summary."""
+    global geometry_window
+    if 'SURVEY' not in globals() or SURVEY is None:
+        print("No import information (data were not loaded with data_importer).")
+        return
+    if geometry_window is not None:
+        try:
+            geometry_window.update_state(shot_no, _picked_shot_indices())
+            geometry_window.show()
+            geometry_window.raise_()
+            geometry_window.activateWindow()
+            return
+        except RuntimeError:                  # window was deleted
+            geometry_window = None
+    geometry_window = dimp.GeometryWindow(
+        SURVEY, current_shot=shot_no, picked=_picked_shot_indices(),
+        on_open_shot=lambda i: QTimer.singleShot(0, lambda: go_to_shot(i, ' from the geometry window')))
+    geometry_window.show()
+
+
+def refresh_geometry_window():
+    if geometry_window is None:
+        return
+    try:
+        if geometry_window.isVisible():
+            geometry_window.update_state(shot_no, _picked_shot_indices())
+    except RuntimeError:
+        pass
+    except Exception as e:
+        print(f"Geometry window refresh failed: {e}")
+
+
 def open_shot_from_reciprocity(idx):
     """Double-click in the QC window: save the current shot (like 'n') and open shot idx."""
     go_to_shot(idx, ' from the reciprocity window')
@@ -2062,7 +2248,8 @@ Everything else is in the menus / toolbar:
   Data: preprocessing, acceleration / velocity / displacement
   Processing: filter designer
   Picks: void picks on a trace, undo void, save
-  QC: reciprocity"""
+  QC: reciprocity
+  Data: survey geometry / topography (double-click a shot to open it)"""
 
 
 def show_shortcuts():
@@ -2109,6 +2296,8 @@ def install_app_menus(fig):
     win.setWindowTitle('First-arrival picker')
 
     m_data = mb.addMenu('&Data')
+    m_data.addAction('Survey geometry / topography...', open_geometry_window)
+    m_data.addSeparator()
     m_data.addAction('Preprocessing (integration, time shift, trace kills)...',
                      _run_from_menu(open_preprocessing_ui))
     m_q = m_data.addMenu('Show quantity')
@@ -2145,7 +2334,8 @@ def install_app_menus(fig):
     tools.setText('Tools \u25be')
     tools.setPopupMode(QToolButton.InstantPopup)
     menu = QMenu(tools)
-    for title, func in (('Preprocessing...', _run_from_menu(open_preprocessing_ui)),
+    for title, func in (('Survey geometry / topography...', open_geometry_window),
+                        ('Preprocessing...', _run_from_menu(open_preprocessing_ui)),
                         ('Filter designer...', _run_from_menu(open_filter_designer_ui)),
                         ('Reciprocity QC...', open_reciprocity_window),
                         ('Void picks on a trace...', _run_from_menu(open_void_picks_ui)),
@@ -2155,6 +2345,7 @@ def install_app_menus(fig):
     tools.setMenu(menu)
     tb.addWidget(tools)
     tb.addSeparator()
+    tb.addAction('\u26f0 Geometry', open_geometry_window)
     tb.addAction('\u2699 Preprocessing', _run_from_menu(open_preprocessing_ui))
     tb.addAction('\u224b Filter', _run_from_menu(open_filter_designer_ui))
     tb.addAction('\u21c4 Reciprocity QC', open_reciprocity_window)
@@ -2162,6 +2353,7 @@ def install_app_menus(fig):
     tb.addAction('\U0001F4BE Save picks', _run_from_menu(_save_picks_menu))
     win.addToolBarBreak()
     win.addToolBar(tb)
+    refresh_geometry_window()                 # follow the shot on the canvas
 
 
 def open_filter_designer_ui(preview_shot=None, parent=None):
@@ -2692,6 +2884,26 @@ def finalize_and_process_picks():
 
    
 
+def pick_metadata():
+    """What the picks were made on: saved inside the pick file (key 'metadata')."""
+    import datetime
+    sv = globals().get('SURVEY')
+    return {
+        'saved': datetime.datetime.now().isoformat(timespec='seconds'),
+        'line': getattr(sv, 'line', ''),
+        'files': [os.path.basename(f) for f in full_filenames],
+        'data_quantity_imported': DATA_QUANTITY,
+        'quantity_displayed': ACTIVE_QUANTITY,
+        'dt_s': float(dt), 'resample_factor': RESAMPLE_FACTOR,
+        'pick_units': f'samples of {dt * 1e3 / RESAMPLE_FACTOR:g} ms after resampling',
+        'preprocessing': PREPROC_PARAMS.to_dict(),
+        'filter': FILTER_PARAMS.summary(),
+        'shot_pos_index': [float(v) for v in shot_pos_index],
+        'recv_pos_index': [float(v) for v in recv_pos_index],
+        'import_record': getattr(sv, 'record_path', ''),
+    }
+
+
 def save_picks(file_path_pkl):  # Optional: specify the file path
     global final_pick_gather_multi_seed, clicked_points, final_picks_dict, final_clicked_points
     
@@ -2703,7 +2915,7 @@ def save_picks(file_path_pkl):  # Optional: specify the file path
         # final_pick_gather_multi_seed = None  # Comment this out
     
     # Save clicked points for the current shot
-    final_clicked_points[f'clicked_points_for_shot_{shot_no }'] = clicked_points[shot_no]
+    final_clicked_points[f'clicked_points_for_shot_{shot_no }'] = clicked_points.get(shot_no, [])
     for key, value in final_clicked_points.items():
         final_clicked_points[key] = np.array(value)
     
@@ -2712,12 +2924,17 @@ def save_picks(file_path_pkl):  # Optional: specify the file path
         'final_picks': final_picks_dict,
         'clicked_points': final_clicked_points
     }
+    try:                                   # v8: how these picks were made (reproducibility)
+        data_to_save['metadata'] = pick_metadata()
+    except Exception:
+        pass
 
     # Export to a binary file using pickle
     with open(file_path_pkl, 'wb') as file:
         pickle.dump(data_to_save, file)
 
     print(f"Data successfully saved to {file_path_pkl} for shot no {shot_no }")
+    refresh_geometry_window()
     
     #following loop helps print which shot numbers are picked upto now
     picked_shots = []
