@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, asdict
 
 import numpy as np
 from scipy.signal import (firwin, minimum_phase, lfilter, freqz, iirnotch, filtfilt,
-                          butter, sosfilt, sosfiltfilt, sosfreqz)
+                          butter, sosfilt, sosfiltfilt, sosfreqz, resample_poly)
 
 FILTER_TYPES = {
     'minphase_fir': 'Minimum-phase FIR (causal)',
@@ -394,6 +394,93 @@ def _balanced(d):
     return out
 
 
+class WigglePanel:
+    """
+    Variable-area wiggles on one axes, drawn with the picker's display rules:
+      * every trace balanced to unit RMS over the displayed window,
+      * one amplitude scale for the whole gather (its max |amplitude|),
+      * swing = data / scale * gain * trace spacing, clipped to `clip` trace
+        spacings (None = no clipping), positive lobes filled.
+
+    prepare() does the expensive part once (balance, decimate traces, display
+    upsampling); draw() only rescales and updates the existing artists, so gain
+    and clip changes are fast and the current zoom is kept.
+    """
+
+    def __init__(self, ax, color='black'):
+        self.ax = ax
+        self.color = color
+        self.lc = None
+        self.poly = None
+        self.d = None
+
+    def reset(self):
+        """Forget the artists (call after ax.clear())."""
+        self.lc = self.poly = None
+
+    def prepare(self, data, fs, x=None, step=1, oversample=2):
+        d = _balanced(data)
+        ns, ntr = d.shape
+        x = np.arange(1, ntr + 1, dtype=float) if x is None else np.asarray(x, dtype=float)
+        dx = float(np.median(np.diff(x))) if len(x) > 1 else 1.0
+        step = max(1, int(step))
+        idx = np.arange(0, ntr, step)
+        d, self.xs = d[:, idx], x[idx]
+        self.scale = float(np.max(np.abs(d))) or 1.0
+        osf = max(1, int(oversample))
+        if osf > 1:
+            d = resample_poly(d, osf, 1, axis=0)       # display-only, band-limited
+        self.d = d / self.scale
+        self.t = np.arange(d.shape[0]) / (fs * osf) * 1e3
+        self.sp = step * abs(dx)                       # spacing between plotted traces
+
+    def full_limits(self):
+        self.ax.set_xlim(self.xs[0] - self.sp, self.xs[-1] + self.sp)
+        self.ax.set_ylim(self.t[-1], 0)
+
+    def draw(self, gain, clip, title=None):
+        from matplotlib.collections import LineCollection, PolyCollection
+        tr = self.d * (gain * self.sp)
+        if clip is not None:
+            np.clip(tr, -clip * self.sp, clip * self.sp, out=tr)
+        tr[0, :] = tr[-1, :] = 0
+        nt, ntr = tr.shape
+        X = (self.xs[None, :] + tr).T                                  # (ntr, nt)
+        T = np.broadcast_to(self.t, (ntr, nt))
+        segs = np.stack([X, T], axis=-1)
+        pos = (self.xs[None, :] + np.maximum(tr, 0)).T[:, ::-1]
+        PX = np.concatenate([np.broadcast_to(self.xs[:, None], (ntr, nt)), pos], axis=1)
+        PY = np.concatenate([T, T[:, ::-1]], axis=1)
+        verts = np.stack([PX, PY], axis=-1)
+        new = self.lc is None
+        if new:
+            self.lc = LineCollection(segs, colors=self.color, linewidths=0.5)
+            self.poly = PolyCollection(verts, facecolors=self.color, edgecolors='none',
+                                       linewidths=0)
+            self.ax.add_collection(self.lc)
+            self.ax.add_collection(self.poly)
+            self.ax.set_xlabel('Receiver position')
+            self.ax.set_ylabel('Time (ms)')
+            self.ax.grid(alpha=0.3, ls='--')
+            self.full_limits()
+        else:
+            self.lc.set_segments(segs)
+            self.poly.set_verts(verts)
+        if title is not None:
+            self.ax.set_title(title)
+        return new
+
+
+def draw_gather_wiggle(ax, data, fs, x=None, gain=3.5, clip=1.0, step=1, oversample=4,
+                       title='', color='black'):
+    """One-off wiggle plot (picker display rules). Returns the amplitude scale used."""
+    ax.clear()
+    wp = WigglePanel(ax, color)
+    wp.prepare(data, fs, x, step, oversample)
+    wp.draw(gain, clip, title)
+    return wp.scale
+
+
 def draw_gather(ax, data, fs, x=None, clip=None, title=''):
     """Variable-density image of one gather (time down). Returns the clip used."""
     ax.clear()
@@ -447,8 +534,10 @@ try:
     from matplotlib.figure import Figure
     try:
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
     except ImportError:                                   # older matplotlib
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
     _HAVE_QT = True
 except ImportError:                                       # maths still usable without Qt
     _HAVE_QT = False
@@ -491,10 +580,13 @@ if _HAVE_QT:
           shot_label : text shown above the preview, e.g. 'Shot 3'.
           on_apply   : callback(FilterParams) run by Apply and by OK.
           preview_ms : how much of the trace to show in the gather preview.
+          wiggle_gain, wiggle_clip : starting gain / clip for the wiggle preview
+                       (pass the picker's gain_factor[0] and CLIP_FRACTION).
         """
 
         def __init__(self, params=None, fs=1000.0, preview=None, x=None, shot_label='',
-                     on_apply=None, preview_ms=400, parent=None):
+                     on_apply=None, preview_ms=400, wiggle_gain=3.5, wiggle_clip=1.0,
+                     parent=None):
             super().__init__(parent)
             self.setWindowTitle('Filter designer')
             self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
@@ -502,9 +594,15 @@ if _HAVE_QT:
             self.nyq = 0.5 * self.fs
             self.on_apply = on_apply
             self.preview = None if preview is None else np.asarray(preview, dtype=float)
-            if self.preview is not None:
-                nmax = int(round(preview_ms * 1e-3 * self.fs))
-                self.preview_win = slice(0, min(nmax, self.preview.shape[0]))
+            self._preview_ms = float(preview_ms)
+            self._wiggle_gain = float(wiggle_gain)
+            self._wiggle_clip = 1.0 if wiggle_clip is None else float(wiggle_clip)
+            self._stages = None               # current filter chain
+            self._after = None                # current shot after filtering
+            self._prep_key = None             # what the wiggle panels were prepared from
+            self._view_key = None             # (window, mode) last drawn: zoom kept while unchanged
+            self._resp_stale = True
+            self._data_stale = True
             self.x = x
             self.shot_label = shot_label
             self._start = (params or FilterParams()).copy()
@@ -515,6 +613,10 @@ if _HAVE_QT:
             self._timer.setSingleShot(True)
             self._timer.setInterval(250)                # debounce live preview
             self._timer.timeout.connect(self._refresh)
+            self._dtimer = QTimer(self)                 # display-only changes (gain, clip, ...)
+            self._dtimer.setSingleShot(True)
+            self._dtimer.setInterval(60)
+            self._dtimer.timeout.connect(self._redraw_data)
 
             self._build_ui()
             self.set_params(self._start)
@@ -530,22 +632,22 @@ if _HAVE_QT:
         # ------------------------------------------------------------------
         # UI construction
         # ------------------------------------------------------------------
-        def _dspin(self, lo, hi, step, dec, suffix=''):
+        def _dspin(self, lo, hi, step, dec, suffix='', slot=None, track=False):
             sb = QDoubleSpinBox()
             sb.setRange(lo, hi)
             sb.setSingleStep(step)
             sb.setDecimals(dec)
             sb.setSuffix(suffix)
-            sb.setKeyboardTracking(False)
-            sb.valueChanged.connect(self._changed)
+            sb.setKeyboardTracking(track)   # True: update while typing (no Enter needed)
+            sb.valueChanged.connect(slot or self._changed)
             return sb
 
-        def _ispin(self, lo, hi, step=1):
+        def _ispin(self, lo, hi, step=1, slot=None, track=False):
             sb = QSpinBox()
             sb.setRange(lo, hi)
             sb.setSingleStep(step)
-            sb.setKeyboardTracking(False)
-            sb.valueChanged.connect(self._changed)
+            sb.setKeyboardTracking(track)
+            sb.valueChanged.connect(slot or self._changed)
             return sb
 
         def _band_group(self, title):
@@ -662,13 +764,45 @@ if _HAVE_QT:
 
             self.fig_data = Figure(dpi=dpi, constrained_layout=True)
             self.canvas_data = FigureCanvas(self.fig_data)
-            self.ax_before = self.fig_data.add_subplot(1, 2, 1)
-            self.ax_after = self.fig_data.add_subplot(1, 2, 2, sharex=self.ax_before,
+            # Two rows (Before above After) with shared axes: zoom one, both follow
+            self.ax_before = self.fig_data.add_subplot(2, 1, 1)
+            self.ax_after = self.fig_data.add_subplot(2, 1, 2, sharex=self.ax_before,
                                                       sharey=self.ax_before)
-            self.tabs.addTab(self.canvas_data,
+            self.panels = (WigglePanel(self.ax_before), WigglePanel(self.ax_after))
+            data_tab = QWidget()
+            dl = QVBoxLayout(data_tab)
+            dl.setContentsMargins(2, 2, 2, 2)
+            ctl = QHBoxLayout()
+            self.cb_disp = QComboBox()
+            self.cb_disp.addItem('Wiggle (as in picker)', 'wiggle')
+            self.cb_disp.addItem('Variable density', 'image')
+            self.cb_disp.currentIndexChanged.connect(self._display_changed)
+            ds = self._display_changed
+            self.sp_gain = self._dspin(0.1, 50.0, 0.5, 2, slot=ds, track=True)
+            self.sp_gain.setValue(self._wiggle_gain)
+            self.sp_clip = self._dspin(0.1, 5.0, 0.1, 2, ' traces', slot=ds, track=True)
+            self.sp_clip.setValue(self._wiggle_clip)
+            n_ms = (self.preview.shape[0] / self.fs * 1e3) if self.preview is not None else 1000
+            self.sp_win = self._dspin(20, max(20.0, n_ms), 50, 0, ' ms', slot=ds)
+            self.sp_win.setValue(min(self._preview_ms, n_ms))
+            ntr = self.preview.shape[1] if self.preview is not None else 1
+            self.sp_step = self._ispin(1, max(1, ntr), slot=ds)
+            self.sp_step.setValue(max(1, int(np.ceil(ntr / 200))))   # <= ~200 wiggles by default
+            for label, w in (('Display', self.cb_disp), ('Gain', self.sp_gain),
+                             ('Clip', self.sp_clip), ('Window', self.sp_win),
+                             ('Every Nth trace', self.sp_step)):
+                ctl.addWidget(QLabel(label))
+                ctl.addWidget(w)
+            ctl.addStretch(1)
+            dl.addLayout(ctl)
+            self.nav_data = NavigationToolbar(self.canvas_data, data_tab)
+            dl.addWidget(self.nav_data)
+            dl.addWidget(self.canvas_data, 1)
+            self.tabs.addTab(data_tab,
                              f'Data preview{(" - " + self.shot_label) if self.shot_label else ""}')
             if self.preview is None:
                 self.tabs.setTabEnabled(1, False)
+            self.tabs.currentChanged.connect(self._tab_changed)
             split.addWidget(self.tabs)
             split.setStretchFactor(0, 0)
             split.setStretchFactor(1, 1)
@@ -763,12 +897,30 @@ if _HAVE_QT:
         # Live update
         # ------------------------------------------------------------------
         def _changed(self, *args):
+            """A filter setting changed: re-filter (debounced 250 ms)."""
             if self._building:
                 return
             self._update_visibility()
             self._timer.start()
 
+        def _display_changed(self, *args):
+            """Only the data display changed (gain, clip, window, ...): redraw, no re-filter."""
+            if self._building:
+                return
+            self._update_visibility()
+            self._dtimer.start()
+
+        def _tab_changed(self, idx):
+            # Each tab is drawn only when visible; catch up when it is shown.
+            if idx == 0 and self._resp_stale:
+                self._draw_response_tab()
+            elif idx == 1 and self._data_stale:
+                self._redraw_data()
+
         def _update_visibility(self):
+            wig = self.cb_disp.currentData() == 'wiggle'
+            for w in (self.sp_gain, self.sp_clip, self.sp_step):
+                w.setEnabled(wig)
             ftype = self.cb_type.currentData()
             fir = ftype in ('minphase_fir', 'zerophase_fir')
             self.chk_iir_zp.setVisible(ftype == 'iir')
@@ -797,28 +949,91 @@ if _HAVE_QT:
                                  color='#c0392b', fontweight='bold')
                     canvas.draw_idle()
                 return
+            self._params = p
+            self._stages = build_filter_chain(p, self.fs)
+            if self.preview is not None:
+                self._after = apply_filter_chain(self.preview, self._stages, time_axis=0,
+                                                 verbose=False)
+            self._resp_stale = self._data_stale = True
+            # Draw only the tab that is on screen; the other catches up when shown.
+            if self.tabs.currentIndex() == 0:
+                self._draw_response_tab()
+            else:
+                self._redraw_data()
+
+        def _draw_response_tab(self):
+            if self._stages is None:
+                return
+            p, stages = self._params, self._stages
             self.fig_resp.suptitle('')
-            stages = build_filter_chain(p, self.fs)
             draw_response(self.ax_resp, stages, self.fs,
                           title=f'Realized response ({FILTER_TYPES[p.filter_type]})')
             draw_impulse(self.ax_imp, stages, self.fs)
             if self.preview is not None:
-                after = apply_filter_chain(self.preview, stages, time_axis=0, verbose=False)
-                draw_spectrum(self.ax_spec, self.preview, after, self.fs, stages,
+                draw_spectrum(self.ax_spec, self.preview, self._after, self.fs, stages,
                               title=f'Spectrum{(" - " + self.shot_label) if self.shot_label else ""}')
-                w = self.preview_win
-                clip = draw_gather(self.ax_before, self.preview[w], self.fs, self.x,
-                                   title='Before')
-                draw_gather(self.ax_after, after[w], self.fs, self.x, clip=clip,
-                            title='After')
-                self.fig_data.suptitle(f'{self.shot_label}   |   {p.summary()}   '
-                                       f'(same display clip on both)', fontsize='medium')
-                self.canvas_data.draw_idle()
             else:
                 self.ax_spec.clear()
                 self.ax_spec.text(0.5, 0.5, 'No data preview', ha='center', va='center',
                                   transform=self.ax_spec.transAxes)
+            self._resp_stale = False
             self.canvas_resp.draw_idle()
+
+        def _redraw_data(self):
+            """
+            Before/after gathers. Fast path: if only gain/clip changed, the wiggle
+            artists are rescaled in place (no re-filter, no re-layout, zoom kept).
+            """
+            if self.preview is None or self._after is None:
+                return
+            if self.tabs.currentIndex() != 1:
+                self._data_stale = True
+                return
+            nwin = int(round(self.sp_win.value() * 1e-3 * self.fs))
+            w = slice(0, max(2, min(nwin, self.preview.shape[0])))
+            mode = self.cb_disp.currentData()
+            view = (w.stop, mode)
+            same_view = self._view_key == view
+
+            if mode == 'wiggle':
+                step = self.sp_step.value()
+                # display upsampling: about one sample per screen pixel, at most x4
+                h_px = max(100.0, self.ax_before.get_window_extent().height)
+                osf = int(np.clip(round(h_px / w.stop), 1, 4))
+                prep = (w.stop, step, osf, id(self._after))
+                if not same_view:                       # new window or coming from image
+                    for ax, pnl in zip((self.ax_before, self.ax_after), self.panels):
+                        ax.clear()
+                        pnl.reset()
+                if prep != self._prep_key or not same_view:
+                    self.panels[0].prepare(self.preview[w], self.fs, self.x, step, osf)
+                    self.panels[1].prepare(self._after[w], self.fs, self.x, step, osf)
+                    self._prep_key = prep
+                gain, clip = self.sp_gain.value(), self.sp_clip.value()
+                self.panels[0].draw(gain, clip, 'Before')
+                self.panels[1].draw(gain, clip, 'After')
+                self.ax_after.set_xlabel('Receiver position')
+                self.ax_before.set_xlabel('')
+                note = (f'wiggles: gain {gain:g}, clip {clip:g} trace(s); '
+                        f'each panel balanced like the picker')
+            else:
+                keep = ((self.ax_before.get_xlim(), self.ax_before.get_ylim())
+                        if same_view else None)
+                for pnl in self.panels:
+                    pnl.reset()
+                self._prep_key = None
+                clip = draw_gather(self.ax_before, self.preview[w], self.fs, self.x, title='Before')
+                draw_gather(self.ax_after, self._after[w], self.fs, self.x, clip=clip, title='After')
+                self.ax_before.set_xlabel('')
+                if keep is not None:
+                    self.ax_before.set_xlim(keep[0])
+                    self.ax_before.set_ylim(keep[1])
+                note = 'same display clip on both'
+            self._view_key = view
+            self._data_stale = False
+            self.fig_data.suptitle(f'{self.shot_label}   |   {self._params.summary()}   ({note})',
+                                   fontsize='medium')
+            self.canvas_data.draw_idle()
 
         # ------------------------------------------------------------------
         # Buttons
@@ -861,7 +1076,7 @@ if _HAVE_QT:
 
 
 def open_filter_designer(params=None, fs=1000.0, preview=None, x=None, shot_label='',
-                         on_apply=None, parent=None):
+                         on_apply=None, parent=None, **kwargs):
     """
     Show the dialog (modal). Returns the accepted FilterParams, or None if cancelled.
     on_apply(params) is called by Apply and by OK.
@@ -873,7 +1088,7 @@ def open_filter_designer(params=None, fs=1000.0, preview=None, x=None, shot_labe
         import sys
         app = QApplication(sys.argv)
     dlg = FilterDesignerDialog(params, fs, preview=preview, x=x, shot_label=shot_label,
-                               on_apply=on_apply, parent=parent)
+                               on_apply=on_apply, parent=parent, **kwargs)
     accepted = dlg.exec_() == QDialog.Accepted
     return dlg.get_params() if accepted else None
 

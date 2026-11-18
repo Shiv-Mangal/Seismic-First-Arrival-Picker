@@ -33,7 +33,7 @@ import bruges
 # Plotting Packages
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from matplotlib.widgets import RadioButtons, Slider
+from matplotlib.widgets import RadioButtons, Slider, Button
 from matplotlib.collections import PolyCollection, LineCollection
 
 # seismic data reading
@@ -55,8 +55,8 @@ segy_data_path = 'C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/work
 #segy_data_path = 'C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Coweeta_project/seismic_data/Line101_final_v1/'  # Replace with your actual directory path
 
 
-#search_string_for_segy_files = '*_stacked.segy'
-search_string_for_segy_files = 'HeaderFix_101.0_10000.0_STACKED.segy'
+search_string_for_segy_files = '*_stacked.segy'
+#search_string_for_segy_files = 'HeaderFix_101.0_10000.0_STACKED.segy'
 
 #search string stacked Trigger corrected
 #search_string_for_segy_files = 'displacement_S_STACK_*.sgy' 
@@ -370,9 +370,9 @@ print(norm_data.shape)
 
 #%% wiggle plot test
 
-for i in range(10,11):
-    plt.figure(figsize = (16,9))
-    segypy.wiggle(norm_data[i,:400,:], gain = 10)
+# for i in range(10,11):
+#     plt.figure(figsize = (16,9))
+#     segypy.wiggle(norm_data[i,:400,:], gain = 10)
 
 
 #%% Create an array for shot and receiver positions wrt index.
@@ -588,12 +588,11 @@ if plot_spectrum.lower() == 'yes':
 # filtered_data.shape
 #%%
 
-for i in range(1):
-    #plt.figure(figsize = (16,9))
-    segypy.wiggle(filtered_data[i,:400,:], gain = 10)
+# for i in range(1):
+#     #plt.figure(figsize = (16,9))
+#     segypy.wiggle(filtered_data[i,:400,:], gain = 10)
 
 #%% Resampling the seismic data for better precision
-
 
 def resample_2D_gather(data, sampling_interval):
     """
@@ -622,9 +621,9 @@ norm_data_resamp.shape
 
 #resamp_data[0]
 #%%
-for i in range(10,11):
-    plt.figure(figsize = (16,9))
-    segypy.wiggle(filtered_data_resamp[i,:2500,:], gain = 10)
+# for i in range(10,11):
+#     plt.figure(figsize = (16,9))
+#     segypy.wiggle(filtered_data_resamp[i,:2500,:], gain = 10)
 
 #%% Realtime Reciprocity Guider Function
 def realtime_reciprocity_guider(final_picks_dict, shot_pos, shot_no, recv_pos, ax, tol=1):
@@ -845,8 +844,17 @@ shot_pos = shot_pos_index
 
 
 
-no_of_samples_to_plot = 2500 #number of samples you want to plot on a single trace for picking
+no_of_samples_to_plot = 4500 #number of samples you want to plot on a single trace for picking
 gain_factor = [3.5]  # Default gain factor
+
+# ---------------- Live reciprocity QC (reciprocity_analyzer.py, same folder) ----------------
+import importlib
+import reciprocity_analyzer as rcq
+importlib.reload(rcq)                  # pick up edits without restarting the kernel
+RECIPROCITY_THRESHOLD_MS = 2.0         # flag shots whose median |reciprocal error| exceeds this
+recip_window = None                    # the pop-out window (kept alive while open)
+recip_button = None                    # canvas button (kept alive: matplotlib widgets need a reference)
+recip_button_ax = None
 
 # ---------------- Wiggle display balance (adapted from Steve's v15) ----------------
 CLIP_FRACTION = 1.0         # max wiggle swing, in trace spacings. Gain can go as high as you
@@ -1361,6 +1369,19 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
 
         gain_slider.on_changed(update_gain_slider)
 
+        # ----- Reciprocity QC button (under the radio buttons) -----
+        global recip_button, recip_button_ax
+        recip_button_ax = plt.axes([0.9200, 0.52, 0.06, 0.06])
+        recip_button = Button(recip_button_ax, 'Reciprocity\nQC', color='#eaf2f8',
+                              hovercolor='#aed6f1')
+        recip_button.label.set_fontsize('medium')
+        recip_button.label.set_fontweight('bold')
+        recip_button.label.set_color('#2c3e50')
+        for spine in recip_button_ax.spines.values():
+            spine.set_edgecolor('#2c3e50')
+            spine.set_linewidth(1.5)
+        recip_button.on_clicked(lambda _evt: open_reciprocity_window())
+
 # Main plotting function attached with zoom listener function
 previous_radio_button_state = None
 
@@ -1432,6 +1453,7 @@ def plot_shot():
         if previous_radio_button_state['reverse'] in ['Normal', 'Reverse']:
             radio_reverse.set_active(['Normal', 'Reverse'].index(previous_radio_button_state['reverse']))
 
+    refresh_reciprocity_window()
     plt.show()
 
 
@@ -1483,7 +1505,7 @@ def update_plot_with_picks():
         # Disconnect the old widgets first: newer matplotlib keeps their canvas
         # callbacks alive after fig.clear(), and they then crash on every redraw.
         for _w in (globals().get('radio_data'), globals().get('radio_reverse'),
-                   globals().get('gain_slider')):
+                   globals().get('gain_slider'), globals().get('recip_button')):
             if _w is not None:
                 try:
                     _w.disconnect_events()
@@ -1545,6 +1567,7 @@ def update_plot_with_picks():
         ax.set_ylim(current_ylim)
     
     fig.canvas.draw()
+    refresh_reciprocity_window()   # picks may have changed: update the QC window if open
 
 def adjust_gain():
     global gain_factor
@@ -1596,6 +1619,59 @@ def apply_new_filter(params):
         fig.canvas.draw_idle()
 
 
+# ---------------------------------------------------------------------
+# Reciprocity QC window <-> picker
+# ---------------------------------------------------------------------
+def _reciprocity_inputs():
+    """Latest picks and geometry for the reciprocity window (called on every refresh)."""
+    factor = norm_data_resamp.shape[1] // norm_data.shape[1]    # 10 -> picks in 0.1 ms samples
+    return dict(final_picks_dict=final_picks_dict,
+                shot_x=shot_pos,             # shot positions, by shot index
+                recv_x=recv_pos,             # receiver positions (pick x values)
+                dt_pick=1.0 / (fs * factor),
+                current_shot=shot_no)
+
+
+def open_reciprocity_window():
+    """Pop out (or bring forward) the live reciprocity QC window."""
+    global recip_window
+    if recip_window is None:
+        recip_window = rcq.ReciprocityWindow(_reciprocity_inputs,
+                                             on_open_shot=open_shot_from_reciprocity,
+                                             threshold_ms=RECIPROCITY_THRESHOLD_MS)
+    else:
+        recip_window.refresh()
+    recip_window.show()
+    recip_window.raise_()
+    recip_window.activateWindow()
+
+
+def refresh_reciprocity_window():
+    """Called after picks change; does nothing if the window was never opened or is closed."""
+    if recip_window is not None:
+        try:
+            recip_window.live_refresh()
+        except Exception as e:
+            print(f"Reciprocity window refresh failed: {e}")
+
+
+def open_shot_from_reciprocity(idx):
+    """Double-click in the QC window: save the current shot (like 'n') and open shot idx."""
+    global shot_no, final_pick_gather_multi_seed
+    if not 0 <= idx < len(seismic_data):
+        print(f"Shot index {idx} is not loaded ({len(seismic_data)} shots).")
+        return
+    if shot_no is not None and fig is not None and plt.fignum_exists(fig.number):
+        finalize_and_process_picks()
+        save_picks(file_path_pkl)
+    shot_no = idx
+    final_pick_gather_multi_seed = None      # don't carry the previous shot's picks over
+    clicked_points[shot_no] = final_clicked_points.get(f'clicked_points_for_shot_{shot_no}', [])
+    mode[0] = 'Home'
+    plot_shot()
+    print(f"Opened shot no. {shot_no + 1} (index {shot_no}) from the reciprocity window.")
+
+
 def open_filter_designer_ui(preview_shot=None, parent=None):
     """Open the filter designer on preview_shot (default: the shot being picked)."""
     if preview_shot is None:
@@ -1606,6 +1682,9 @@ def open_filter_designer_ui(preview_shot=None, parent=None):
         x=recv_pos,
         shot_label=f'Shot {preview_shot + 1}',
         on_apply=apply_new_filter,
+        preview_ms=no_of_samples_to_plot / 10,        # same time window as the picker (0.1 ms samples)
+        wiggle_gain=gain_factor[0],                   # same gain / clip as the picker's wiggles
+        wiggle_clip=CLIP_FRACTION,
         parent=parent)
     dlg.exec_()
 
@@ -2341,11 +2420,18 @@ def new_shot(): #To move to the new shot
     initialize_plot()
     final_pick_gather_multi_seed = None  # Reset for the new shot
 
-# Ensure the QApplication is created only once
+# Start the picker.
+# No app.exec_() / sys.exit() here: in Spyder/IPython the Qt event loop is already
+# running, and in plain `python script.py` plt.show() blocks until the picker
+# window is closed. A blocking app.exec_() froze the kernel when the shot dialog
+# was closed without submitting (no window left to ever end the loop).
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)   # reuse Spyder's Qt app
+    if 'inline' in mpl.get_backend().lower():
+        print("WARNING: matplotlib is using the inline backend, so the picker can't be "
+              "interactive. In Spyder: Preferences > IPython console > Graphics > "
+              "Backend = Qt (or run %matplotlib qt), then restart the kernel.")
     initialize_plot()
-    sys.exit(app.exec_())         
 
 #%% Printing/checking how many shots were picked in the session 
 
