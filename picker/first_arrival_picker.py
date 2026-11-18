@@ -42,12 +42,23 @@ import segypy
 from obspy.io.segy.core import _read_segy
 
 #%% File paths and names
+"""
+v9: files, output names and picks are chosen in the import window (data_importer.py).
+The previous hard-coded paths are kept below as comments for reference.
+"""
+segy_data_path = ''                  # folder the import window opens in ('' = current folder);
+                                     # script mode (USE_IMPORT_DIALOG = False) reads this folder
+search_string_for_segy_files = '*'   # name filter (wildcards); only .segy/.sgy files are listed
+file_path_pkl = None                 # set by the import (script mode with AUTO_OUTPUT_NAMES = False: your path)
+file_path_sgt = None
+reciprocity_report_directory = None
+
 
 #day_1
 #segy_data_path = 'C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/Seismic_data/Line_101/stacked_data1'  # Replace with your actual directory path
 
 #data path stacked_WSH
-segy_data_path = 'C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/Seismic_data/Line_101/stacked_WSH'
+# segy_data_path = 'C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/Seismic_data/Line_101/stacked_WSH'
 
 # #data path stacked Trigger corrected displacement
 # segy_data_path = "C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/SRT/SRT_displacement/segy_discplacement_local_header/"
@@ -56,7 +67,7 @@ segy_data_path = 'C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/work
 #segy_data_path = 'C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Coweeta_project/seismic_data/Line101_final_v1/'  # Replace with your actual directory path
 
 
-search_string_for_segy_files = '*_stacked.segy'
+# search_string_for_segy_files = '*_stacked.segy'
 #search_string_for_segy_files = 'HeaderFix_101.0_10000.0_STACKED.segy'
 
 #search string stacked Trigger corrected
@@ -64,14 +75,14 @@ search_string_for_segy_files = '*_stacked.segy'
 
 
 #file path and name to save the picks in .pkl format to recover when loose track in between the picking
-file_path_pkl =f"C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/SRT/SRT_displacement/SLF_101_picks_disc1_offset.pkl"
+# file_path_pkl =f"C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/SRT/SRT_displacement/SLF_101_picks_disc1_offset.pkl"
 #saving the .txt file in three columns (S G T) for pygimli format
-file_path_sgt = f"C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/SRT/SRT_displacement/SLF_101_picks_disc1_offset_V2.txt"
+# file_path_sgt = f"C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/SRT/SRT_displacement/SLF_101_picks_disc1_offset_V2.txt"
 
 #File for total reciprocity report
-reciprocity_report_directory = f"C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/SRT/SRT_displacement"
+# reciprocity_report_directory = f"C:/Users/shiv3210/SynologyDrive/onedrive_workspace - Copy/workspace/Project_2/Craig_county/seismic/SRT/SRT_displacement"
 
-# ---- Data import (v8, data_importer.py) ----
+# ---- Data import (v8/v9, data_importer.py) ----
 # USE_IMPORT_DIALOG = True : an import window opens (folder/batch or single files, data type,
 #                            geometry, live topography, automatic output names).
 #                            segy_data_path / search_string_for_segy_files above are only its
@@ -84,7 +95,8 @@ IMPORT_RECORD_FILE = None       # e.g. '.../picks/S_STACK_0101.00_acceleration_i
                                 # repeats that import exactly, without the dialog
 AUTO_OUTPUT_NAMES = True        # script mode: name the .pkl/.txt from the line name + data type
                                 # (False: use file_path_pkl / file_path_sgt above)
-LOAD_EXISTING_PICKS = True      # continue from the pick file if it already exists
+LOAD_EXISTING_PICKS = True      # script mode: continue from the auto-named pick file if it exists
+EXISTING_PICKS_FILE = None      # script mode: a .pkl or SGT .txt to continue from (overrides the names)
 
 # %% Loading seismic data (v8: data_importer.py) into an array (n_shots, n_samples, n_traces)
 """
@@ -119,7 +131,9 @@ if IMPORT_RECORD_FILE:
                                geometry=_rec['geometry'], pkl_path=_rec.get('pkl') or None,
                                sgt_path=_rec.get('sgt') or None,
                                use_header_delay=_rec.get('use_header_delay', True),
-                               load_existing_picks=LOAD_EXISTING_PICKS)
+                               load_existing_picks=LOAD_EXISTING_PICKS,
+                               picks_source=_rec['pkl'] if _rec.get('pkl') and os.path.isfile(_rec['pkl'])
+                               else (_rec.get('picks_source') or ''))
 elif USE_IMPORT_DIALOG:
     app = QApplication.instance() or QApplication(sys.argv)
     SURVEY = dimp.open_import_dialog(
@@ -136,10 +150,18 @@ else:
         raise ValueError("Script mode: set DATA_QUANTITY to 'acceleration', 'velocity' or "
                          "'displacement' (what the SEG-Y files contain).")
     print(f"Reading {len(_files)} SEG-Y files from {segy_data_path}")
+    if not AUTO_OUTPUT_NAMES and not EXISTING_PICKS_FILE and not file_path_pkl:
+        raise ValueError("AUTO_OUTPUT_NAMES = False needs file_path_pkl (and file_path_sgt) in the first cell.")
+    if EXISTING_PICKS_FILE:                   # outputs follow the existing picks
+        _pk, _sg = dimp.ImportDialog._pair_paths(EXISTING_PICKS_FILE) if dimp._HAVE_QT else \
+            (EXISTING_PICKS_FILE, os.path.splitext(EXISTING_PICKS_FILE)[0] + '_SGT.txt')
+    else:
+        _pk = None if AUTO_OUTPUT_NAMES else file_path_pkl
+        _sg = None if AUTO_OUTPUT_NAMES else file_path_sgt
     SURVEY = dimp.import_files(_files, DATA_QUANTITY, progress=_print_import_progress,
-                               pkl_path=None if AUTO_OUTPUT_NAMES else file_path_pkl,
-                               sgt_path=None if AUTO_OUTPUT_NAMES else file_path_sgt,
-                               load_existing_picks=LOAD_EXISTING_PICKS)
+                               pkl_path=_pk, sgt_path=_sg,
+                               load_existing_picks=LOAD_EXISTING_PICKS,
+                               picks_source=EXISTING_PICKS_FILE or '')
 
 # ---- everything downstream uses these (same names as before) ----
 full_filenames = SURVEY.files
@@ -162,6 +184,8 @@ print("Loaded file names and paths:", [os.path.basename(f) for f in full_filenam
 print(SURVEY.summary())
 for _w in SURVEY.warnings:
     print("  NOTE:", _w)
+if SURVEY.picks_source:
+    print(f"Continuing picks from: {SURVEY.picks_source}")
 print(f"Picks file : {file_path_pkl}")
 print(f"SGT file   : {file_path_sgt}")
 print(f'Total shots: {len(shot_gather_array)}')
@@ -741,7 +765,9 @@ FILTER_PARAMS = fdz.FilterParams(
     iir_zero_phase=False,             # IIR only: True = forward-backward (zero phase)
 
     lowcut_on=True,  lowcut_hz=10.0,  lowcut_transition_hz=20.0,  lowcut_taps=131,  lowcut_order=4,
-    highcut_on=True, highcut_hz=80.0, highcut_transition_hz=40.0, highcut_taps=51,  highcut_order=4,
+    # v9: high-cut 150 Hz (was 80): on Line 101 first peaks move +5 ms instead of +12 ms,
+    # onsets +2 ms (middle half +1..+5) instead of +3 (0..+11). See the designer's timing presets.
+    highcut_on=True, highcut_hz=150.0, highcut_transition_hz=60.0, highcut_taps=51,  highcut_order=4,
 
     notch_on=True,
     notches=[[199.0, 8.0]],           # [[freq Hz, Q], ...]
@@ -749,8 +775,10 @@ FILTER_PARAMS = fdz.FilterParams(
 )
 FILTER_PRESET_FILE = None             # e.g. 'my_filter.json' to start from a saved preset
 
-plot_filter_response = 'yes'          # realized response + impulse response
-plot_spectrum = 'yes'                 # average spectrum before vs after (all shots)
+plot_filter_response = 'no'           # 'yes': realized response + impulse response figure at start
+plot_spectrum = 'no'                  # 'yes': spectrum before vs after figure at start
+                                      # (v9: off, so the shot dialog follows the import directly;
+                                      #  both are in the filter designer)
 OPEN_FILTER_DESIGNER_AT_START = False
 
 if FILTER_PRESET_FILE:
@@ -759,16 +787,28 @@ if FILTER_PRESET_FILE:
 
 if OPEN_FILTER_DESIGNER_AT_START:
     _p = fdz.open_filter_designer(FILTER_PARAMS, fs, preview=norm_data[0], x=recv_pos_index,
-                                  shot_label='Shot 1')
+                                  shot_label='Shot 1', pre_shift_s=filter_pre_shift())
     if _p is not None:
         FILTER_PARAMS = _p
+
+def filter_pre_shift():
+    """Time shift already in norm_data (s). The filter undoes it, filters the record from
+    its real start (pre-trigger included) and re-applies it: filter-then-shift, like
+    Steve's picker, so a causal filter never starts cold at shot time."""
+    return PREPROC_PARAMS.delta_t_ms * 1e-3 if PREPROC_PARAMS.time_shift_on else 0.0
+
 
 filter_stages = fdz.build_filter_chain(FILTER_PARAMS, fs)
 print(f"Filter: {FILTER_PARAMS.summary()}")
 if plot_filter_response.lower() == 'yes':
     fdz.plot_filter_qc(filter_stages, fs, title=f'Realized response ({FILTER_PARAMS.summary()})')
 
-filtered_data = fdz.apply_filter_chain(norm_data, filter_stages, time_axis=1)
+filtered_data = fdz.apply_filter_chain(norm_data, filter_stages, time_axis=1,
+                                       pre_shift_s=filter_pre_shift(), fs=fs)
+try:      # how far this filter moves first breaks on these data (v9)
+    print("Filter timing (shot 1):", fdz.timing_summary(filter_stages, fs, norm_data[0], filtered_data[0]))
+except Exception as _e:
+    print(f"Filter timing check skipped: {_e}")
 
 if plot_spectrum.lower() == 'yes':
     fdz.plot_spectrum_before_after(norm_data, filtered_data, fs, stages=filter_stages)
@@ -925,7 +965,7 @@ def plot_shot_data(shot_no, clicked_points, final_clicked_points, final_picks_di
                 linestyle='-', marker='_', color=marker_color,
                 markerfacecolor=marker_color, markeredgecolor=marker_color,
                 markeredgewidth=2.5,
-                linewidth=0, markersize=ms(10),
+                linewidth=0, markersize=ms(15),                  # v9: 15 (was 10)
                 label='Picks')
 
     # ---- Plot shot position indicator ----
@@ -1003,8 +1043,17 @@ def load_picks_and_points(file_path):
     return final_picks_dict, final_clicked_points
 
 # Now you can access the loaded data and check on it
-# v8: only if the pick file exists (and LOAD_EXISTING_PICKS); otherwise start empty
-if LOAD_EXISTING_PICKS and os.path.isfile(file_path_pkl):
+# v9: continue from the import window's choice (.pkl or SGT .txt); otherwise start empty
+_src = getattr(SURVEY, 'picks_source', '') or ''
+if _src.lower().endswith('.pkl') and os.path.isfile(_src):
+    final_picks_dict, final_clicked_points = load_picks_and_points(_src)
+elif _src and os.path.isfile(_src):                       # SGT text -> picks (saved to file_path_pkl)
+    final_picks_dict, _msg = dimp.sgt_to_picks(_src, shot_pos_index, recv_pos_index,
+                                               dt / RESAMPLE_FACTOR)
+    final_clicked_points = {}
+    print(f"Read picks from the SGT file {_src}: {_msg}")
+    print(f"They are saved to {file_path_pkl} at the first save.")
+elif LOAD_EXISTING_PICKS and os.path.isfile(file_path_pkl):
     final_picks_dict, final_clicked_points = load_picks_and_points(file_path_pkl)
 else:
     final_picks_dict, final_clicked_points = {}, {}
@@ -1891,7 +1940,8 @@ def apply_new_filter(params):
 
     t0 = time.time()
     stages = fdz.build_filter_chain(params, fs)          # raises on invalid settings
-    new_filtered = fdz.apply_filter_chain(norm_data, stages, time_axis=1)
+    new_filtered = fdz.apply_filter_chain(norm_data, stages, time_axis=1,
+                                          pre_shift_s=filter_pre_shift(), fs=fs)
     factor = norm_data_resamp.shape[1] // norm_data.shape[1]
     new_resamp = (scipy.signal.resample(new_filtered, norm_data.shape[1] * factor, axis=1)
                   if factor > 1 else new_filtered)
@@ -2098,7 +2148,8 @@ def set_active_quantity(q, redraw=True):
     ACTIVE_QUANTITY = q
     norm_data = QUANTITY_DATA[q]
     filter_stages = fdz.build_filter_chain(FILTER_PARAMS, fs)
-    filtered_data = fdz.apply_filter_chain(norm_data, filter_stages, time_axis=1, verbose=False)
+    filtered_data = fdz.apply_filter_chain(norm_data, filter_stages, time_axis=1, verbose=False,
+                                           pre_shift_s=filter_pre_shift(), fs=fs)
     n_out = norm_data.shape[1] * RESAMPLE_FACTOR
     norm_data_resamp = scipy.signal.resample(norm_data, n_out, axis=1)
     filtered_data_resamp = scipy.signal.resample(filtered_data, n_out, axis=1)
@@ -2369,7 +2420,8 @@ def open_filter_designer_ui(preview_shot=None, parent=None):
         preview_ms=no_of_samples_to_plot / 10,        # same time window as the picker (0.1 ms samples)
         wiggle_gain=gain_factor[0],                   # same gain / clip as the picker's wiggles
         wiggle_clip=CLIP_FRACTION,
-        parent=parent)
+        parent=parent,
+        pre_shift_s=filter_pre_shift())               # filter before the time shift (v9)
     dlg.exec_()
     _keep_dialog(dlg)
 
@@ -2796,7 +2848,7 @@ def on_click(event):
             return
 
         # Plot the accepted pick
-        ax.scatter(snapped_x, snapped_y, color='red', s=ss(150), marker='_')
+        ax.scatter(snapped_x, snapped_y, color='red', s=ss(225), marker='_', linewidths=2.5)
         print(f"Manually picked point : ({snapped_x}, {snapped_y})")
         fig.canvas.draw()
         update_mode_text()
@@ -3150,6 +3202,22 @@ if __name__ == '__main__':
               "interactive. In Spyder: Preferences > IPython console > Graphics > "
               "Backend = Qt (or run %matplotlib qt), then restart the kernel.")
     initialize_plot()
+
+#%% ==== End of the picking session: run the cells below one at a time ====
+"""
+v9: running the whole file (F5 / Run file) stops here, so the import is followed directly
+by the shot dialog and the picker, and nothing below runs on half-finished picks.
+When you have finished picking, run the cells below one at a time (Ctrl+Enter).
+"""
+def _running_single_cell():
+    import inspect
+    return any(f.function in ('runcell', 'debugcell', 'run_cell_magic') for f in inspect.stack())
+
+
+if __name__ == '__main__' and not _running_single_cell():
+    print("Picker is running. When you have finished picking, run the cells below this one "
+          "one at a time (Ctrl+Enter).")
+    raise SystemExit
 
 #%% Printing/checking how many shots were picked in the session 
 

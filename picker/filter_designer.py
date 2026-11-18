@@ -40,9 +40,10 @@ FILTER_TYPES = {
 }
 
 TYPE_HELP = {
-    'minphase_fir': ("Causal: the onset stays put (within ~1-2 ms), but peaks and troughs "
-                     "move later by the filter delay (several ms, more with a steep low-cut). "
-                     "Pick the first departure, not the first peak/trough."),
+    'minphase_fir': ("Causal: nothing arrives before the true onset, but every causal band-limit "
+                     "delays the energy. The HIGH-CUT sets the delay (Line 101: 80 Hz -> first "
+                     "peaks +12 ms, 150 Hz -> +5 ms, low-cut alone -> 0 ms). Pick the first "
+                     "departure; the timing line below is measured on this shot."),
     'zerophase_fir': ("Peaks and troughs stay put, but the wavelet becomes symmetric: low-level "
                       "energy appears BEFORE the true onset, so first-break picks come out early."),
     'iir': ("Butterworth. Causal (minimum phase) by default; tick zero-phase for a "
@@ -65,8 +66,8 @@ class FilterParams:
     lowcut_order: int = 4                  # IIR only
 
     highcut_on: bool = True                # low-pass stage
-    highcut_hz: float = 80.0
-    highcut_transition_hz: float = 40.0    # FIR only
+    highcut_hz: float = 150.0              # v9: 150 Hz (was 80): peaks +5 ms instead of +12 ms
+    highcut_transition_hz: float = 60.0    # FIR only
     highcut_taps: int = 51                 # FIR only (odd)
     highcut_order: int = 4                 # IIR only
 
@@ -273,14 +274,146 @@ def build_filter_chain(p, fs):
     return stages
 
 
-def apply_filter_chain(data, stages, time_axis=1, verbose=True):
-    """Apply every stage in order along time_axis. Zero traces stay zero."""
+def fft_time_shift(data, delta_t, fs, axis):
+    """Circular FFT time shift along axis (negative delta_t = earlier)."""
+    n = data.shape[axis]
+    f = np.fft.fftfreq(n, d=1.0 / fs)
+    ph = np.exp(-2j * np.pi * f * delta_t)
+    shape = [1] * data.ndim
+    shape[axis] = n
+    return np.real(np.fft.ifft(np.fft.fft(data, axis=axis) * ph.reshape(shape), axis=axis))
+
+
+def apply_filter_chain(data, stages, time_axis=1, verbose=True, pre_shift_s=0.0, fs=None):
+    """
+    Apply every stage in order along time_axis. Zero traces stay zero.
+    pre_shift_s: the time shift already applied to `data` (e.g. -0.05 s). When given,
+    the shift is undone first, the record is filtered from its real start (pre-trigger
+    included, no cold start at shot time, no wrapped tail), and the shift is re-applied:
+    the same order as Steve's picker (filter, then shift).
+    """
     out = np.asarray(data, dtype=np.float64)
+    zero = None
+    if pre_shift_s and fs:
+        zero = ~np.any(out != 0, axis=time_axis, keepdims=True)
+        out = fft_time_shift(out, -pre_shift_s, fs, time_axis)
     for st in stages:
         if verbose:
             print(f"Applying {st['label']}")
         out = st['apply'](out, time_axis)
+    if pre_shift_s and fs:
+        out = fft_time_shift(out, pre_shift_s, fs, time_axis)
+        out = np.where(zero, 0.0, out)                  # killed traces stay exactly zero
     return out
+
+
+# =====================================================================
+# Timing check: how far does the filter move first breaks?
+# =====================================================================
+def _mer_pick(x, L=20):
+    e = np.concatenate([[0.0], np.cumsum(x ** 2)])
+    i = np.arange(L, len(x) - L)
+    r = (e[i + L] - e[i]) / (e[i] - e[i - L] + 1e-9 * e[-1] + 1e-30)
+    return int(i[np.argmax(r ** 3 * np.abs(x[i]) ** 3)])
+
+
+def _aic_pick(x, lo, hi):
+    seg = x[lo:hi]
+    n = len(seg)
+    if n < 10:
+        return lo
+    k = np.arange(3, n - 3)
+    c1 = np.cumsum(seg ** 2)
+    c2 = np.cumsum(seg)
+    # variance of seg[:k] and seg[k:] from running sums
+    v1 = c1[k - 1] / k - (c2[k - 1] / k) ** 2
+    v2 = (c1[-1] - c1[k - 1]) / (n - k) - ((c2[-1] - c2[k - 1]) / (n - k)) ** 2
+    aic = k * np.log(np.maximum(v1, 1e-30)) + (n - k - 1) * np.log(np.maximum(v2, 1e-30))
+    return int(lo + k[int(np.argmin(aic))])
+
+
+def _first_peak(x, on, n=60):
+    seg = np.abs(x[on:on + n])
+    if seg.size == 0:
+        return on
+    j = int(np.argmax(seg > 0.5 * seg.max()))
+    while j + 1 < len(seg) and seg[j + 1] >= seg[j]:
+        j += 1
+    return on + j
+
+
+def measure_time_shift(before, after, fs, time_axis=0, max_traces=400):
+    """
+    Median shift (ms) of first-break onsets (energy-ratio + AIC picks) and of the first
+    peak after the onset, filtered minus unfiltered, over traces with a clear arrival.
+    Returns dict(onset_ms, onset_q1, onset_q3, peak_ms, n) or None.
+    """
+    b = np.moveaxis(np.asarray(before, float), time_axis, 0)
+    a = np.moveaxis(np.asarray(after, float), time_axis, 0)
+    b = b.reshape(b.shape[0], -1)
+    a = a.reshape(a.shape[0], -1)
+    ns = b.shape[0]
+    do, dp = [], []
+    cols = np.where(np.any(b != 0, axis=0))[0]
+    if len(cols) > max_traces:
+        cols = cols[np.linspace(0, len(cols) - 1, max_traces).astype(int)]
+    w = int(round(0.03 * fs))
+    for j in cols:
+        x = b[:, j]
+        m = _mer_pick(x, L=max(5, int(round(0.02 * fs))))
+        if m < w or m > ns - 2 * w:
+            continue
+        on0 = _aic_pick(x, max(m - 2 * w, 3), min(m + 2 * w, ns - 3))
+        pre = np.std(x[max(0, on0 - w):on0]) + 1e-30
+        post = np.std(x[on0:on0 + w])
+        if post / pre < 5:                       # no clear arrival on this trace
+            continue
+        on1 = _aic_pick(a[:, j], max(on0 - w, 3), min(on0 + w, ns - 3))
+        do.append((on1 - on0) / fs * 1e3)
+        dp.append((_first_peak(a[:, j], on1) - _first_peak(x, on0)) / fs * 1e3)
+    if len(do) < 5:
+        return None
+    do, dp = np.array(do), np.array(dp)
+    return dict(onset_ms=float(np.median(do)), onset_q1=float(np.percentile(do, 25)),
+                onset_q3=float(np.percentile(do, 75)), peak_ms=float(np.median(dp)), n=len(do))
+
+
+def filter_delay(stages, fs, n=2048):
+    """Impulse response of the chain from t = 0: (peak ms, 50 %-energy ms, % energy before 0)."""
+    t_ms, imp, pct = impulse_response(stages, fs, n=n)
+    k0 = n // 2
+    h = imp[k0:]
+    e = np.cumsum(h ** 2) / (np.sum(h ** 2) + 1e-30)
+    return float(t_ms[k0 + int(np.argmax(np.abs(h)))]), float(t_ms[k0 + int(np.argmax(e > 0.5))]), pct
+
+
+def timing_summary(stages, fs, before=None, after=None):
+    """One line for the console / dialog."""
+    pk, e50, pct = filter_delay(stages, fs)
+    txt = f"impulse peak +{pk:.0f} ms, half the energy by +{e50:.0f} ms, {pct:.1f}% before t = 0"
+    if before is not None and after is not None:
+        m = measure_time_shift(before, after, fs)
+        if m:
+            txt = (f"first-break onsets {m['onset_ms']:+.0f} ms (middle half {m['onset_q1']:+.0f} to "
+                   f"{m['onset_q3']:+.0f}), first peaks {m['peak_ms']:+.0f} ms over {m['n']} traces; " + txt)
+    return txt
+
+
+# presets for the designer: (button text, tooltip, settings)
+TIMING_PRESETS = [
+    ('No delay', 'Minimum-phase low-cut 10 Hz only (+ notch): Line 101 onsets 0 ms, peaks 0 ms; '
+                 'high-frequency noise stays', dict(filter_type='minphase_fir', lowcut_on=True,
+                 lowcut_hz=10.0, lowcut_transition_hz=20.0, lowcut_taps=131, highcut_on=False)),
+    ('Small delay', 'Minimum-phase 10-150 Hz (+ notch): Line 101 onsets +2 ms, peaks +5 ms',
+     dict(filter_type='minphase_fir', lowcut_on=True, lowcut_hz=10.0, lowcut_transition_hz=20.0,
+          lowcut_taps=131, highcut_on=True, highcut_hz=150.0, highcut_transition_hz=60.0,
+          highcut_taps=51)),
+    ('Strong', 'Minimum-phase 10-80 Hz (+ notch), the old default: Line 101 onsets +3 ms '
+               '(up to +11), peaks +12 ms; cleanest far offsets',
+     dict(filter_type='minphase_fir', lowcut_on=True, lowcut_hz=10.0, lowcut_transition_hz=20.0,
+          lowcut_taps=131, highcut_on=True, highcut_hz=80.0, highcut_transition_hz=40.0,
+          highcut_taps=51)),
+]
 
 
 # =====================================================================
@@ -357,7 +490,10 @@ def draw_impulse(ax, stages, fs):
     ax.set_xlim(-60, 120)
     ax.set_xlabel('Time relative to spike (ms)')
     ax.set_ylabel('Amplitude')
-    ax.set_title(f'Impulse response: {pct:.1f}% of energy before t = 0')
+    k0 = len(imp) // 2
+    kp = k0 + int(np.argmax(np.abs(imp[k0:])))
+    ax.axvline(t_ms[kp], color='tab:orange', lw=1, ls=':', label=f'peak delay {t_ms[kp]:+.0f} ms')
+    ax.set_title(f'Impulse response: {pct:.1f}% of energy before t = 0, peak at {t_ms[kp]:+.0f} ms')
     ax.grid(alpha=0.3)
     ax.legend(fontsize='small', loc='upper right')
 
@@ -587,8 +723,9 @@ if _HAVE_QT:
 
         def __init__(self, params=None, fs=1000.0, preview=None, x=None, shot_label='',
                      on_apply=None, preview_ms=400, wiggle_gain=3.5, wiggle_clip=1.0,
-                     parent=None):
+                     parent=None, pre_shift_s=0.0):
             super().__init__(parent)
+            self.pre_shift_s = float(pre_shift_s or 0.0)
             self.setWindowTitle('Filter designer')
             self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
             self.fs = float(fs)
@@ -731,6 +868,15 @@ if _HAVE_QT:
             pf.addRow('Phase', self.cb_notch_phase)
             nl.addLayout(pf)
             left.addWidget(self.g_notch)
+
+            g_tp = QGroupBox('Timing presets (one click; hover for the measured shifts)')
+            lay_pre_timing = QHBoxLayout(g_tp)
+            for name, tip, kw in TIMING_PRESETS:            # v9
+                b = QPushButton(name)
+                b.setToolTip(tip)
+                b.clicked.connect(lambda _c=False, kw=kw: self._timing_preset(kw))
+                lay_pre_timing.addWidget(b)
+            left.addWidget(g_tp)
 
             g_pre = QGroupBox('Presets')
             pr = QHBoxLayout(g_pre)
@@ -954,7 +1100,15 @@ if _HAVE_QT:
             self._stages = build_filter_chain(p, self.fs)
             if self.preview is not None:
                 self._after = apply_filter_chain(self.preview, self._stages, time_axis=0,
-                                                 verbose=False)
+                                                 verbose=False, pre_shift_s=self.pre_shift_s,
+                                                 fs=self.fs)
+            try:
+                tline = timing_summary(self._stages, self.fs, self.preview, self._after)
+                self.lbl_msgs.setText(self.lbl_msgs.text() +
+                                      f'<span style="color:#1f4e79;"><b>Timing (this shot):</b> '
+                                      f'{tline}</span><br>')
+            except Exception as e:                       # never block the preview
+                print(f"Timing check skipped: {e}")
             self._resp_stale = self._data_stale = True
             # Draw only the tab that is on screen; the other catches up when shown.
             if self.tabs.currentIndex() == 0:
@@ -1059,6 +1213,12 @@ if _HAVE_QT:
         def _ok(self):
             if self._run_apply():
                 self.accept()
+
+        def _timing_preset(self, kw):
+            p = self.get_params()
+            for k, v in kw.items():
+                setattr(p, k, v)
+            self.set_params(p)
 
         def _load_preset(self):
             path, _ = QFileDialog.getOpenFileName(self, 'Load filter preset', '',

@@ -337,6 +337,7 @@ class Survey:
     record_path: str = ''
     use_header_delay: bool = True
     load_existing_picks: bool = True
+    picks_source: str = ''           # existing .pkl or SGT .txt to continue from ('' = new picks)
     warnings: list = field(default_factory=list)
     placement: dict = field(default_factory=dict)   # shot index -> master column of each trace
     imported: str = ''
@@ -388,7 +389,8 @@ class Survey:
                     use_header_delay=self.use_header_delay, header_delay_ms=self.time_shift_ms,
                     recv_pos=[float(v) for v in self.recv_pos],
                     shot_pos=[float(v) for v in self.shot_pos],
-                    pkl=self.pkl_path, sgt=self.sgt_path, warnings=list(self.warnings))
+                    pkl=self.pkl_path, sgt=self.sgt_path, picks_source=self.picks_source,
+                    warnings=list(self.warnings))
 
     def save_record(self, path=None):
         path = path or self.record_path
@@ -438,7 +440,7 @@ def _place_traces(rec, master, geom, spacing, warnings):
 
 
 def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
-                  sgt_path=None, use_header_delay=True, load_existing_picks=True):
+                  sgt_path=None, use_header_delay=True, load_existing_picks=True, picks_source=''):
     """
     Build a Survey from ShotRecords (read_shot results, in shot order).
     Unreadable records are skipped with a warning. Raises ValueError if nothing
@@ -548,9 +550,16 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
                 has_coords=has_coords, has_elev=has_elev, line=names['line'],
                 out_dir=names['out_dir'], pkl_path=pkl_path or names['pkl'],
                 sgt_path=sgt_path or names['sgt'], use_header_delay=use_header_delay,
-                load_existing_picks=load_existing_picks, warnings=warnings, placement=placement,
+                load_existing_picks=load_existing_picks or bool(picks_source),
+                picks_source=picks_source or '', warnings=warnings, placement=placement,
                 imported=datetime.datetime.now().isoformat(timespec='seconds'))
     sv.record_path = os.path.splitext(sv.pkl_path)[0].replace('_picks', '') + '_import.json'
+    a, b = line_axis(np.column_stack([rx, ry])) if has_coords else (None, None)
+    if a is not None:
+        az = (np.degrees(np.arctan2(b[0], b[1])) + 360) % 180
+        warnings.append(f'Line: {rdist[-1]:.1f} m along the receivers (sqrt(dE^2 + dN^2)), azimuth '
+                        f'{az:.1f} deg from north; receivers up to '
+                        f'{np.abs(cross_line(np.column_stack([rx, ry]), a, b)).max():.2f} m off the straight line.')
     return sv
 
 
@@ -576,6 +585,24 @@ def plot_geometry(survey, ax_profile=None, ax_map=None, highlight=None):
     return ax_profile, ax_map
 
 
+def line_axis(rxy):
+    """Straight line through the receivers (first receiver + unit direction, least squares)."""
+    rxy = np.asarray(rxy, float)
+    if len(rxy) < 2 or not np.all(np.isfinite(rxy)):
+        return None, None
+    c = rxy - rxy.mean(0)
+    u = np.linalg.svd(c, full_matrices=False)[2][0]
+    if (rxy[-1] - rxy[0]) @ u < 0:
+        u = -u
+    return rxy[0], u
+
+
+def cross_line(xy, origin, u):
+    """Signed perpendicular distance (m) from the straight line (positive = left of the direction)."""
+    v = np.asarray(xy, float) - origin
+    return v[:, 1] * u[0] - v[:, 0] * u[1]
+
+
 def draw_geometry(axp, axm, rdist, relev, rxy, sdist, selev, sxy, highlight=None, labels=True,
                   highlight_label='Just read'):
     """Shared drawing routine (profile on axp, plan view on axm)."""
@@ -595,7 +622,7 @@ def draw_geometry(axp, axm, rdist, relev, rxy, sdist, selev, sxy, highlight=None
         if highlight is not None and 0 <= highlight < len(sdist):
             axp.scatter([sdist[highlight]], [se[highlight]], s=260, facecolor='none',
                         edgecolor='#f1c40f', lw=2.5, zorder=4, label=highlight_label)
-    axp.set_xlabel('Distance along the line from the first receiver (m)')
+    axp.set_xlabel('Distance along the line from receiver 1, \u221a(\u0394E\u00b2 + \u0394N\u00b2) (m)')
     axp.set_ylabel('Elevation (m)' if has_e else 'Elevation (none in headers)')
     axp.set_title('Topography and shot positions', fontsize='medium')
     axp.grid(alpha=0.3)
@@ -603,25 +630,193 @@ def draw_geometry(axp, axm, rdist, relev, rxy, sdist, selev, sxy, highlight=None
     if axm is not None:
         axm.clear()
         rxy = np.asarray(rxy, float)
-        if rxy.size and np.all(np.isfinite(rxy)):
-            x0, y0 = rxy[0]
-            axm.plot(rxy[:, 0] - x0, rxy[:, 1] - y0, '.', color='#2c3e50', ms=3, label='Receivers')
+        o, u = line_axis(rxy)
+        if o is not None:
+            # line view: x = Pythagorean distance from receiver 1 along the line, y = real
+            # perpendicular (cross-line) offset, both from easting AND northing
+            ra = (rxy - o) @ u
+            rc = cross_line(rxy, o, u)
+            axm.plot(ra, rc, '.', color='#2c3e50', ms=3, label='Receivers')
             if sxy is not None and len(sxy) and np.all(np.isfinite(sxy)):
                 sxy = np.asarray(sxy, float)
-                axm.scatter(sxy[:, 0] - x0, sxy[:, 1] - y0, s=60, marker='*', color='#e74c3c',
-                            edgecolor='k', lw=0.5, label='Shots', zorder=3)
+                sa, sc = (sxy - o) @ u, cross_line(sxy, o, u)
+                axm.scatter(sa, sc, s=60, marker='*', color='#e74c3c', edgecolor='k', lw=0.5,
+                            label='Shots', zorder=3)
                 if highlight is not None and 0 <= highlight < len(sxy):
-                    axm.scatter([sxy[highlight, 0] - x0], [sxy[highlight, 1] - y0], s=220,
-                                facecolor='none', edgecolor='#f1c40f', lw=2.5, zorder=4)
-            axm.set_aspect('equal', adjustable='datalim')
-            axm.set_xlabel(f'Easting - {x0:.1f} (m)')
-            axm.set_ylabel(f'Northing - {y0:.1f} (m)')
-            axm.legend(fontsize='x-small', loc='best')
+                    axm.scatter([sa[highlight]], [sc[highlight]], s=220, facecolor='none',
+                                edgecolor='#f1c40f', lw=2.5, zorder=4)
+            axm.axhline(0, color='0.6', lw=0.8, ls='--')
+            lim = max(1.0, 1.2 * float(np.nanmax(np.abs(np.concatenate(
+                [rc, cross_line(np.asarray(sxy, float), o, u) if sxy is not None and len(sxy) else rc])))))
+            axm.set_ylim(-lim, lim)
+            az = (np.degrees(np.arctan2(u[0], u[1])) + 360) % 180
+            axm.set_xlabel('Along the line from receiver 1, \u221a(\u0394E\u00b2 + \u0394N\u00b2) (m)')
+            axm.set_ylabel('Cross-line offset (m)')
+            axm.text(0.01, 0.97, f'Receiver 1: E {o[0]:.2f}, N {o[1]:.2f}; azimuth {az:.1f}\u00b0',
+                     transform=axm.transAxes, va='top', fontsize='x-small', color='0.3')
+            axm.legend(fontsize='x-small', loc='lower right')
         else:
             axm.text(0.5, 0.5, 'No coordinates in the headers', ha='center', va='center',
                      transform=axm.transAxes)
-        axm.set_title('Plan view', fontsize='medium')
+        axm.set_title('Line view (cross-line exaggerated)', fontsize='medium')
         axm.grid(alpha=0.3)
+
+
+# =====================================================================
+# Existing picks: find, describe, read SGT back into picks
+# =====================================================================
+PICK_EXTENSIONS = ('.pkl', '.txt', '.csv', '.sgt')
+
+
+def find_pick_files(folders):
+    """Pick files (.pkl, or SGT .txt/.csv/.sgt with three numeric columns) in the given
+    folders and their 'picks' sub-folders, newest first."""
+    seen, out = set(), []
+    for d in folders:
+        if not d:
+            continue
+        for sub in (d, os.path.join(d, 'picks')):
+            if not os.path.isdir(sub):
+                continue
+            for n in os.listdir(sub):
+                full = os.path.normpath(os.path.join(sub, n))
+                key = os.path.normcase(full)
+                if key in seen or not os.path.isfile(full) or not n.lower().endswith(PICK_EXTENSIONS):
+                    continue
+                if n.lower().endswith('.pkl'):
+                    ok = picks_file_info(full)[0] > 0 or 'pick' in n.lower()
+                else:
+                    ok = _looks_like_sgt(full)
+                if ok:
+                    seen.add(key)
+                    out.append(full)
+    out.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+    return out
+
+
+def _looks_like_sgt(path):
+    try:
+        arr = read_sgt(path, max_rows=50)
+        return arr.shape[0] > 0 and arr.shape[1] >= 3
+    except Exception:
+        return False
+
+
+def read_sgt(path, max_rows=None):
+    """
+    Three-column S G T text (space, tab or comma separated; header / comment lines skipped).
+    Also reads pyGIMLi's unified .sgt format (sensor block + '# s g t' data block): S and G
+    are then returned as the sensors' x coordinates.
+    """
+    with open(path) as f:
+        lines = f.read().splitlines()
+    # pyGIMLi unified format: "<n sensors>", "# x y", sensors, "<n data>", "# s g t ...", data
+    if lines and lines[0].strip().isdigit() and any(l.strip().lower().startswith('#') for l in lines[:3]):
+        ns = int(lines[0].split()[0])
+        k = 1
+        while lines[k].strip().startswith('#'):
+            k += 1
+        sensors = np.array([[float(v) for v in lines[k + i].replace(',', ' ').split()[:2]] for i in range(ns)])
+        k += ns
+        nd = int(lines[k].split()[0])
+        k += 1
+        cols = lines[k].lstrip('#').lower().split()
+        k += 1
+        rows = [l.replace(',', ' ').split() for l in lines[k:k + nd] if l.strip()]
+        js, jg, jt = cols.index('s'), cols.index('g'), cols.index('t')
+        data = np.array([[sensors[int(float(r[js])) - 1, 0], sensors[int(float(r[jg])) - 1, 0],
+                          float(r[jt])] for r in rows])
+        return data[:max_rows] if max_rows else data
+    out = []
+    for l in lines:
+        t = l.strip()
+        if not t or t[0] in '#%;/':
+            continue
+        parts = re.split(r'[,\s;]+', t)
+        try:
+            vals = [float(v) for v in parts[:3]]
+        except ValueError:
+            continue                                   # header line
+        if len(vals) == 3:
+            out.append(vals)
+        if max_rows and len(out) >= max_rows:
+            break
+    return np.array(out, dtype=float).reshape(-1, 3)
+
+
+def pick_file_summary(path):
+    """One line describing an existing pick file."""
+    if not path:
+        return ''
+    if not os.path.isfile(path):
+        return 'file not found'
+    if path.lower().endswith('.pkl'):
+        n, msg = picks_file_info(path)
+        try:
+            import pickle
+            with open(path, 'rb') as f:
+                meta = pickle.load(f).get('metadata', {})
+            if meta.get('data_quantity_imported'):
+                msg += f"; picked on {meta.get('quantity_displayed', '?')} from {meta['data_quantity_imported']} data"
+        except Exception:
+            pass
+        return msg or 'pick file (no picks inside)'
+    try:
+        a = read_sgt(path)
+        return f'SGT text: {len(a)} picks on {len(np.unique(a[:, 0]))} shots (converted to picks at import)'
+    except Exception as e:
+        return f'could not read: {e}'
+
+
+def sgt_to_picks(path, shot_pos, recv_pos, pick_dt_s):
+    """
+    Turn an SGT file back into the picker's picks:
+    {'final_picks_for_shot_no_<i>': array (1, N, 2) of [receiver position, pick sample]}.
+    The S/G convention is detected by matching against the imported geometry:
+    positions, positions + 1 (the old DTW export), or 1-based indices. T is in seconds
+    (ms is detected when values exceed 10). Returns (picks, report text).
+    """
+    a = read_sgt(path)
+    if a.size == 0:
+        raise ValueError(f'No S G T rows in {path}')
+    shot_pos = np.asarray(shot_pos, float)
+    recv_pos = np.asarray(recv_pos, float)
+    sp = float(np.median(np.diff(recv_pos))) if len(recv_pos) > 1 else 1.0
+    tol = 0.25 * sp
+
+    def match(vals, pos):
+        cands = {'positions': vals, 'positions + 1': vals - 1}
+        if np.all(np.abs(vals - np.round(vals)) < 1e-6) and vals.min() >= 1 and vals.max() <= len(pos):
+            cands['1-based index'] = pos[np.round(vals).astype(int) - 1]
+        best = None
+        for name, v in cands.items():
+            idx = np.array([int(np.argmin(np.abs(pos - x))) for x in v])
+            ok = np.abs(pos[idx] - v) <= tol
+            if best is None or ok.mean() > best[2].mean():
+                best = (name, idx, ok)
+        return best
+
+    sname, sidx, sok = match(a[:, 0], shot_pos)
+    gname, gidx, gok = match(a[:, 1], recv_pos)
+    t = a[:, 2].copy()
+    unit = 's'
+    if np.nanmax(t) > 10:                          # milliseconds
+        t = t / 1000.0
+        unit = 'ms'
+    ok = sok & gok & np.isfinite(t)
+    if ok.mean() < 0.9:
+        raise ValueError(f'Only {100 * ok.mean():.0f}% of the SGT rows match the imported geometry '
+                         f'(shots as {sname}, receivers as {gname}). Check that the SGT belongs to '
+                         f'these files and this geometry.')
+    picks = {}
+    for s_idx in np.unique(sidx[ok]):
+        m = ok & (sidx == s_idx)
+        order = np.argsort(recv_pos[gidx[m]])
+        arr = np.column_stack([recv_pos[gidx[m]][order], np.round(t[m][order] / pick_dt_s)])
+        picks[f'final_picks_for_shot_no_{int(s_idx)}'] = arr[None, :, :]
+    rep_ = (f'{ok.sum()} of {len(a)} SGT rows read as picks on {len(picks)} shots '
+            f'(S = shot {sname}, G = receiver {gname}, T in {unit})')
+    return picks, rep_
 
 
 # =====================================================================
@@ -669,6 +864,7 @@ if _HAVE_QT:
             self._last_folder = start_folder or os.getcwd()
             self._out_dir_user = False
             self._pkl_user = False
+            self._closing_ok = False
             self._geom_start = geometry or GeometrySettings()
             self._build_ui(pattern)
             if quantity in QUANTITIES:
@@ -750,39 +946,65 @@ if _HAVE_QT:
             # geometry
             g = QGroupBox('3. Geometry (picker positions in metres)')
             f = QFormLayout(g)
-            self.cb_geom = QComboBox()
-            self.cb_geom.addItem('From headers (shot positions from source coordinates)', 'headers')
-            self.cb_geom.addItem('Manual (evenly spaced shots)', 'manual')
-            self.cb_geom.currentIndexChanged.connect(self._geom_changed)
-            f.addRow('Shot positions', self.cb_geom)
+            self._geom_form = f
             gs = self._geom_start
+            # receiver spacing: from headers (default) or typed
+            row = QHBoxLayout()
+            self.rb_sp_hdr = QRadioButton('From headers')
+            self.rb_sp_man = QRadioButton('Manual')
+            self.grp_sp = QButtonGroup(self)
+            self.grp_sp.addButton(self.rb_sp_hdr)
+            self.grp_sp.addButton(self.rb_sp_man)
+            (self.rb_sp_man if gs.recv_spacing > 0 else self.rb_sp_hdr).setChecked(True)
+            row.addWidget(self.rb_sp_hdr)
+            row.addWidget(self.rb_sp_man)
+            row.addStretch(1)
+            f.addRow('Receiver spacing', row)
+            self.sp_rdx = self._dspin(0.001, 1e4, gs.recv_spacing if gs.recv_spacing > 0 else 1.0, 3)
+            self.sp_rdx.setSuffix(' m')
+            self.lab_rdx = QLabel('… spacing')
+            f.addRow(self.lab_rdx, self.sp_rdx)
             self.sp_r0 = self._dspin(-1e6, 1e6, gs.first_recv_pos, 3)
-            self.sp_rdx = self._dspin(0, 1e4, gs.recv_spacing, 3)
-            self.sp_rdx.setSpecialValueText('from headers')
-            self.sp_s0 = self._dspin(-1e6, 1e6, gs.first_shot_pos, 3)
-            self.sp_sdx = self._dspin(0, 1e5, gs.shot_spacing, 3)
+            self.sp_r0.setSuffix(' m')
             f.addRow('First receiver position', self.sp_r0)
-            f.addRow('Receiver spacing', self.sp_rdx)
-            f.addRow('First shot position (manual)', self.sp_s0)
-            f.addRow('Shot spacing (manual)', self.sp_sdx)
+            # shot positions: from source coordinates (default) or evenly spaced
+            row = QHBoxLayout()
+            self.rb_sh_hdr = QRadioButton('From headers')
+            self.rb_sh_man = QRadioButton('Manual')
+            self.grp_sh = QButtonGroup(self)
+            self.grp_sh.addButton(self.rb_sh_hdr)
+            self.grp_sh.addButton(self.rb_sh_man)
+            (self.rb_sh_man if gs.mode == 'manual' else self.rb_sh_hdr).setChecked(True)
+            row.addWidget(self.rb_sh_hdr)
+            row.addWidget(self.rb_sh_man)
+            row.addStretch(1)
+            f.addRow('Shot positions', row)
+            self.sp_s0 = self._dspin(-1e6, 1e6, gs.first_shot_pos, 3)
+            self.sp_s0.setSuffix(' m')
+            self.sp_sdx = self._dspin(0.001, 1e5, gs.shot_spacing, 3)
+            self.sp_sdx.setSuffix(' m')
+            self.lab_s0, self.lab_sdx = QLabel('… first shot at'), QLabel('… shot spacing')
+            f.addRow(self.lab_s0, self.sp_s0)
+            f.addRow(self.lab_sdx, self.sp_sdx)
             self.cb_place = QComboBox()
             self.cb_place.addItem('Match by receiver coordinates (recommended)', 'coordinates')
             self.cb_place.addItem('Pad dead traces at the end', 'end')
             self.cb_place.addItem('Insert dead traces after trace…', 'index')
-            self.cb_place.currentIndexChanged.connect(self._geom_changed)
             self.sp_gap = QSpinBox()
             self.sp_gap.setRange(0, 100000)
             self.sp_gap.setValue(gs.gap_insert_index)
+            self.lab_gap = QLabel('… after trace')
             f.addRow('Shots with fewer traces', self.cb_place)
-            f.addRow('… insert after trace', self.sp_gap)
+            f.addRow(self.lab_gap, self.sp_gap)
             self.lbl_geom = QLabel()
             self.lbl_geom.setWordWrap(True)
             self.lbl_geom.setStyleSheet('color: #555;')
             f.addRow(self.lbl_geom)
-            idx = 0 if gs.mode == 'headers' else 1
-            self.cb_geom.setCurrentIndex(idx)
             self.cb_place.setCurrentIndex(['coordinates', 'end', 'index'].index(gs.trace_placement)
                                           if gs.trace_placement in ('coordinates', 'end', 'index') else 0)
+            for rb in (self.rb_sp_hdr, self.rb_sp_man, self.rb_sh_hdr, self.rb_sh_man):
+                rb.toggled.connect(self._geom_changed)
+            self.cb_place.currentIndexChanged.connect(self._geom_changed)
             for w in (self.sp_r0, self.sp_rdx, self.sp_s0, self.sp_sdx, self.sp_gap):
                 w.valueChanged.connect(self._geom_preview)
             left.addWidget(g)
@@ -799,9 +1021,24 @@ if _HAVE_QT:
             v.addWidget(self.lbl_delay)
             left.addWidget(g)
 
-            # outputs
-            g = QGroupBox('5. Output files (names suggested automatically)')
-            f = QFormLayout(g)
+            # picks: new file or continue an existing one
+            g = QGroupBox('5. Picks')
+            v = QVBoxLayout(g)
+            row = QHBoxLayout()
+            self.rb_new = QRadioButton('Start a new pick file')
+            self.rb_cont = QRadioButton('Continue existing picks')
+            self.grp_mode = QButtonGroup(self)
+            self.grp_mode.addButton(self.rb_new)
+            self.grp_mode.addButton(self.rb_cont)
+            self.rb_new.setChecked(True)
+            row.addWidget(self.rb_new)
+            row.addWidget(self.rb_cont)
+            row.addStretch(1)
+            v.addLayout(row)
+            # new
+            self.w_new = QWidget()
+            f = QFormLayout(self.w_new)
+            f.setContentsMargins(0, 0, 0, 0)
             row = QHBoxLayout()
             self.ed_out = QLineEdit()
             self.ed_out.textEdited.connect(lambda *_: self._mark_user('out'))
@@ -816,19 +1053,37 @@ if _HAVE_QT:
             f.addRow('Picks (.pkl)', self.ed_pkl)
             self.ed_sgt = QLineEdit()
             f.addRow('SGT (.txt)', self.ed_sgt)
-            self.chk_load = QCheckBox('Continue from the existing pick file if there is one')
-            self.chk_load.setChecked(True)
-            f.addRow(self.chk_load)
+            v.addWidget(self.w_new)
+            # continue
+            self.w_cont = QWidget()
+            f = QFormLayout(self.w_cont)
+            f.setContentsMargins(0, 0, 0, 0)
+            row = QHBoxLayout()
+            self.cb_existing = QComboBox()
+            self.cb_existing.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            self.cb_existing.currentIndexChanged.connect(lambda *_: self._update_outputs())
+            row.addWidget(self.cb_existing, 1)
+            b = QPushButton('Browse…')
+            b.clicked.connect(self._browse_existing)
+            row.addWidget(b)
+            f.addRow('Pick file', row)
+            self.lbl_cont_out = QLabel()
+            self.lbl_cont_out.setWordWrap(True)
+            self.lbl_cont_out.setStyleSheet('color: #555;')
+            f.addRow(self.lbl_cont_out)
+            v.addWidget(self.w_cont)
             self.lbl_pkl = QLabel()
             self.lbl_pkl.setWordWrap(True)
-            f.addRow(self.lbl_pkl)
+            v.addWidget(self.lbl_pkl)
+            for rb in (self.rb_new, self.rb_cont):
+                rb.toggled.connect(lambda *_: self._mode_changed())
             row = QHBoxLayout()
             b = QPushButton('Load import record…')
-            b.setToolTip('Repeat an earlier import (files, data type, geometry) from its _import.json')
+            b.setToolTip('Repeat an earlier import (files, data type, geometry, picks) from its _import.json')
             b.clicked.connect(self._load_record)
             row.addWidget(b)
             row.addStretch(1)
-            f.addRow(row)
+            v.addLayout(row)
             left.addWidget(g)
             left.addStretch(1)
 
@@ -894,6 +1149,7 @@ if _HAVE_QT:
             row.addWidget(self.btn_cancel)
             outer.addLayout(row)
             self._geom_changed()
+            self._mode_changed()
 
         def _dspin(self, lo, hi, val, dec):
             s = QDoubleSpinBox()
@@ -1050,17 +1306,22 @@ if _HAVE_QT:
 
         # ---------------- geometry ----------------
         def _geom_settings(self):
-            return GeometrySettings(mode=self.cb_geom.currentData(), first_recv_pos=self.sp_r0.value(),
-                                    recv_spacing=self.sp_rdx.value(), first_shot_pos=self.sp_s0.value(),
+            return GeometrySettings(mode='manual' if self.rb_sh_man.isChecked() else 'headers',
+                                    first_recv_pos=self.sp_r0.value(),
+                                    recv_spacing=self.sp_rdx.value() if self.rb_sp_man.isChecked() else 0.0,
+                                    first_shot_pos=self.sp_s0.value(),
                                     shot_spacing=self.sp_sdx.value(),
                                     trace_placement=self.cb_place.currentData(),
                                     gap_insert_index=self.sp_gap.value())
 
         def _geom_changed(self, *args):
-            manual = self.cb_geom.currentData() == 'manual'
-            self.sp_s0.setEnabled(manual)
-            self.sp_sdx.setEnabled(manual)
-            self.sp_gap.setEnabled(self.cb_place.currentData() == 'index')
+            # manual fields only appear when Manual is chosen
+            for w, show in ((self.lab_rdx, self.rb_sp_man.isChecked()), (self.sp_rdx, self.rb_sp_man.isChecked()),
+                            (self.lab_s0, self.rb_sh_man.isChecked()), (self.sp_s0, self.rb_sh_man.isChecked()),
+                            (self.lab_sdx, self.rb_sh_man.isChecked()), (self.sp_sdx, self.rb_sh_man.isChecked()),
+                            (self.lab_gap, self.cb_place.currentData() == 'index'),
+                            (self.sp_gap, self.cb_place.currentData() == 'index')):
+                w.setVisible(show)
             self._geom_preview()
 
         def _geom_preview(self, *args):
@@ -1133,22 +1394,93 @@ if _HAVE_QT:
                 self._out_dir_user = True
                 self._update_outputs()
 
+        def _search_folders(self):
+            good = [r for r in self.records if r.ok]
+            dirs = [self.ed_out.text().strip()]
+            dirs += sorted({os.path.dirname(os.path.abspath(r.path)) for r in good})
+            return [d for d in dirs if d]
+
+        def _refresh_existing(self, select=None):
+            cur = select or self.cb_existing.currentData()
+            files = find_pick_files(self._search_folders())
+            if cur and cur not in files and os.path.isfile(cur):
+                files.insert(0, cur)
+            self.cb_existing.blockSignals(True)
+            self.cb_existing.clear()
+            for f_ in files:
+                self.cb_existing.addItem(os.path.basename(f_), f_)
+                self.cb_existing.setItemData(self.cb_existing.count() - 1, f_, Qt.ToolTipRole)
+            if cur and cur in files:
+                self.cb_existing.setCurrentIndex(files.index(cur))
+            self.cb_existing.blockSignals(False)
+            return files
+
+        def _browse_existing(self):
+            path, _ = QFileDialog.getOpenFileName(
+                self, 'Existing picks (.pkl) or SGT file (.txt)', self._search_folders()[0] if self._search_folders() else '',
+                'Picks or SGT (*.pkl *.txt *.csv *.sgt);;All files (*)')
+            if path:
+                self._refresh_existing(select=os.path.normpath(path))
+                self._update_outputs()
+
+        def _mode_changed(self):
+            cont = self.rb_cont.isChecked()
+            if cont:
+                self._refresh_existing()
+            self.w_new.setVisible(not cont)
+            self.w_cont.setVisible(cont)
+            self._update_outputs()
+
+        def existing_source(self):
+            return self.cb_existing.currentData() if self.rb_cont.isChecked() else ''
+
+        @staticmethod
+        def _pair_paths(src):
+            """Pick file and SGT file that go with an existing source (.pkl or .txt)."""
+            stem = os.path.splitext(src)[0]
+            if src.lower().endswith('.pkl'):
+                base = stem[:-6] if stem.endswith('_picks') else stem
+                cands = [base + '_SGT.txt', base + '_sgt.txt', base + '.txt']
+                sgt = next((c for c in cands if os.path.isfile(c)), base + '_SGT.txt')
+                return src, sgt
+            base = re.sub(r'(_SGT|_sgt)$', '', stem)
+            return base + '_picks.pkl', src
+
         def _update_outputs(self):
             good = [r for r in self.records if r.ok]
             q = self.quantity()
-            if good:
+            if good and not self._pkl_user:
                 names = output_names([r.path for r in good], q or 'data', self.ed_out.text().strip() or None)
-                if not self._pkl_user:
-                    self.ed_pkl.setText(os.path.basename(names['pkl']))
-                    self.ed_sgt.setText(os.path.basename(names['sgt']))
-            pkl = self._pkl_path()
-            n, msg = picks_file_info(pkl)
-            if n:
-                self.lbl_pkl.setText(f'<span style="color:#1e8449;">Found: {msg}.</span>')
-            elif msg:
-                self.lbl_pkl.setText(f'<span style="color:#c0392b;">{msg}</span>')
+                self.ed_pkl.setText(os.path.basename(names['pkl']))
+                self.ed_sgt.setText(os.path.basename(names['sgt']))
+            if self.rb_cont.isChecked():
+                src = self.existing_source()
+                if not src:
+                    n_found = self.cb_existing.count()
+                    self.lbl_pkl.setText('<span style="color:#c0392b;">No pick file found next to the data or '
+                                         'in its picks folder: use Browse… to choose a .pkl or SGT .txt.</span>'
+                                         if n_found == 0 else '')
+                    self.lbl_cont_out.setText('')
+                else:
+                    pkl, sgt = self._pair_paths(src)
+                    self.lbl_pkl.setText(f'<span style="color:#1e8449;">{pick_file_summary(src)}</span>')
+                    self.lbl_cont_out.setText(
+                        f'Picks are read from and saved to: {pkl}<br>SGT export: {sgt}'
+                        + ('<br>(the SGT picks become this .pkl at import; the .txt is rewritten only when you export the SGT)'
+                           if not src.lower().endswith('.pkl') else ''))
+                    self.lbl_cont_out.setTextFormat(Qt.RichText)
             else:
-                self.lbl_pkl.setText('<span style="color:#555;">New pick file (nothing picked yet).</span>')
+                pkl = self._pkl_path()
+                if pkl and os.path.isfile(pkl):
+                    self.lbl_pkl.setText(f'<span style="color:#b9770e;">{os.path.basename(pkl)} already exists '
+                                         f'({pick_file_summary(pkl)}). Choose "Continue existing picks" to use it, '
+                                         f'or change the name.</span>')
+                else:
+                    found = find_pick_files(self._search_folders()) if good else []
+                    self.lbl_pkl.setText('<span style="color:#555;">New pick file (nothing picked yet).'
+                                         + (f' {len(found)} existing pick file(s) found next to the data: '
+                                            f'choose "Continue existing picks" to use one.' if found else '')
+                                         + '</span>')
             self.lbl_pkl.setTextFormat(Qt.RichText)
 
         def _pkl_path(self):
@@ -1181,9 +1513,11 @@ if _HAVE_QT:
                 QMessageBox.warning(self, 'Files missing', f'{len(missing)} file(s) in the record are not '
                                     f'there any more, e.g.\n{missing[0]}')
             g = r['geometry']
-            self.cb_geom.setCurrentIndex(0 if g.mode == 'headers' else 1)
+            (self.rb_sh_hdr if g.mode == 'headers' else self.rb_sh_man).setChecked(True)
+            (self.rb_sp_man if g.recv_spacing > 0 else self.rb_sp_hdr).setChecked(True)
             self.sp_r0.setValue(g.first_recv_pos)
-            self.sp_rdx.setValue(g.recv_spacing)
+            if g.recv_spacing > 0:
+                self.sp_rdx.setValue(g.recv_spacing)
             self.sp_s0.setValue(g.first_shot_pos)
             self.sp_sdx.setValue(g.shot_spacing)
             self.cb_place.setCurrentIndex(['coordinates', 'end', 'index'].index(g.trace_placement))
@@ -1197,17 +1531,26 @@ if _HAVE_QT:
                 self.ed_sgt.setText(os.path.basename(r['sgt']))
             self._set_quantity(r.get('quantity'))
             self.add_files([f for f in r['files'] if os.path.isfile(f)], replace=True)
+            if r.get('pkl') and os.path.isfile(r['pkl']):          # continue the record's picks
+                self.rb_cont.setChecked(True)
+                self._refresh_existing(select=os.path.normpath(r['pkl']))
+                self._update_outputs()
 
         # ---------------- import ----------------
         def _assemble(self, dry=False):
             q = self.quantity() or ('acceleration' if dry else None)
             if q is None:
                 raise ValueError('Choose what the files contain (acceleration / velocity / displacement).')
-            return import_survey(self.records, q, geometry=self._geom_settings(),
-                                 out_dir=self.ed_out.text().strip() or None,
-                                 pkl_path=self._pkl_path() or None, sgt_path=self._sgt_path() or None,
+            src = self.existing_source()
+            if src:                                   # outputs follow the existing picks (v9)
+                pkl, sgt = self._pair_paths(src)
+                out_dir = os.path.dirname(pkl)
+            else:
+                pkl, sgt, out_dir = self._pkl_path() or None, self._sgt_path() or None, self.ed_out.text().strip() or None
+            return import_survey(self.records, q, geometry=self._geom_settings(), out_dir=out_dir,
+                                 pkl_path=pkl, sgt_path=sgt,
                                  use_header_delay=self.chk_delay.isChecked(),
-                                 load_existing_picks=self.chk_load.isChecked())
+                                 load_existing_picks=bool(src), picks_source=src or '')
 
         def _do_import(self):
             if not any(r.ok for r in self.records):
@@ -1218,6 +1561,25 @@ if _HAVE_QT:
                                     'velocity or displacement.\nThe preprocessing integrates or '
                                     'differentiates from this.')
                 return
+            if self.rb_cont.isChecked() and not self.existing_source():
+                QMessageBox.warning(self, 'Existing picks', 'Choose the pick file to continue (Browse…), '
+                                    'or select "Start a new pick file".')
+                return
+            if self.rb_new.isChecked() and self._pkl_path() and os.path.isfile(self._pkl_path()):
+                box = QMessageBox(self)
+                box.setWindowTitle('Pick file exists')
+                box.setText(f'{os.path.basename(self._pkl_path())} already exists '
+                            f'({pick_file_summary(self._pkl_path())}).')
+                b_cont = box.addButton('Continue those picks', QMessageBox.AcceptRole)
+                b_over = box.addButton('Start over (overwrite at first save)', QMessageBox.DestructiveRole)
+                box.addButton(QMessageBox.Cancel)
+                box.setDefaultButton(b_cont)
+                box.exec_()
+                if box.clickedButton() is b_cont:
+                    self.rb_cont.setChecked(True)
+                    self._refresh_existing(select=os.path.normpath(self._pkl_path()))
+                elif box.clickedButton() is not b_over:
+                    return
             bad = [r.name for r in self.records if not r.ok]
             if bad and QMessageBox.question(
                     self, 'Unreadable files', f'{len(bad)} file(s) could not be read and will be '
@@ -1234,8 +1596,30 @@ if _HAVE_QT:
             except Exception as e:
                 QMessageBox.critical(self, 'Output folder', f'Could not create the output folder:\n{e}')
                 return
+            if sv.picks_source and not sv.picks_source.lower().endswith('.pkl'):
+                try:                                  # check the SGT matches this geometry now
+                    _, msg = sgt_to_picks(sv.picks_source, sv.shot_pos, sv.recv_pos, sv.dt / 10)
+                    sv.warnings.append('SGT: ' + msg)
+                except Exception as e:
+                    QMessageBox.critical(self, 'SGT file does not fit', str(e))
+                    return
             self.survey = sv
+            self._closing_ok = True
             self.accept()
+
+        def closeEvent(self, ev):
+            """Closing the window (X) with valid files and a data type = Import."""
+            if self._closing_ok or self.survey is not None:
+                ev.accept()
+                return
+            if any(r.ok for r in self.records) and self.quantity() is not None:
+                self._do_import()
+                if self.survey is not None:
+                    ev.accept()
+                else:
+                    ev.ignore()                       # a check failed: stay open
+                return
+            ev.accept()                               # nothing to import: same as Cancel
 
     def open_import_dialog(parent=None, **kw):
         """Show the import dialog; returns a Survey or None (cancelled)."""
