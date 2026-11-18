@@ -916,7 +916,9 @@ gain_minus_btn = gain_plus_btn = None
 _quantity_actions = {}                 # menu actions (checked = active quantity)
 last_void = None                       # undo record for the last 'void picks'
 _last_cursor_x = None                  # receiver under the mouse (default for void picks)
-GAIN_MIN, GAIN_MAX = 0.1, 50.0         # gain slider range (log scale)
+GAIN_MIN, GAIN_MAX = 0.1, 200.0        # gain slider range (log scale)
+prev_shot_ax = next_shot_ax = None     # Prev / Next shot buttons on the canvas
+prev_shot_btn = next_shot_btn = None
 recip_window = None                    # the pop-out window (kept alive while open)
 recip_button = None                    # canvas button (kept alive: matplotlib widgets need a reference)
 recip_button_ax = None
@@ -1038,7 +1040,7 @@ class InputDialog(QDialog):
         layout.addWidget(self.gainLabel)
 
         self.gainSpinBox = QDoubleSpinBox()
-        self.gainSpinBox.setRange(0.1, 10.0)
+        self.gainSpinBox.setRange(GAIN_MIN, GAIN_MAX)
         self.gainSpinBox.setDecimals(2)
         self.gainSpinBox.setValue(gain_factor[0])
         layout.addWidget(self.gainSpinBox)
@@ -1065,6 +1067,13 @@ class InputDialog(QDialog):
         self.submitButton = QPushButton("Submit")
         self.submitButton.clicked.connect(self.onSubmit)
         layout.addWidget(self.submitButton)
+        # Enter = Submit (the other buttons must not grab the Enter key)
+        for _b in (self.filterButton, self.preprocButton):
+            _b.setAutoDefault(False)
+            _b.setDefault(False)
+        self.submitButton.setAutoDefault(True)
+        self.submitButton.setDefault(True)
+        self.lineEdit.setFocus()
 
         self.setLayout(layout)
 
@@ -1458,13 +1467,13 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
         gain_slider.valtext.set_color('#2980b9')
         gain_slider.valtext.set_text(f'\u00d7{_g0:.2f}')
         # decade ticks under the track
-        for _tv in (0.1, 0.3, 1, 3, 10, 30):
+        for _tv in (0.1, 0.3, 1, 3, 10, 30, 100):
             if GAIN_MIN <= _tv <= GAIN_MAX:
                 _lx = np.log10(_tv)
-                gain_slider_ax.plot([_lx, _lx], [-0.15, 0.0], color='#7f8c8d', lw=1,
+                gain_slider_ax.plot([_lx, _lx], [-0.25, 0.0], color='#5d6d7e', lw=1.2,
                                     clip_on=False, transform=gain_slider_ax.get_xaxis_transform())
-                gain_slider_ax.text(_lx, -0.55, f'{_tv:g}', transform=gain_slider_ax.get_xaxis_transform(),
-                                    ha='center', va='top', fontsize='x-small', color='#7f8c8d',
+                gain_slider_ax.text(_lx, -0.40, f'{_tv:g}', transform=gain_slider_ax.get_xaxis_transform(),
+                                    ha='center', va='top', fontsize='medium', color='#34495e',
                                     clip_on=False)
 
         def update_gain_slider(val):
@@ -1505,6 +1514,24 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
             spine.set_edgecolor('#2c3e50')
             spine.set_linewidth(1.5)
         recip_button.on_clicked(lambda _evt: open_reciprocity_window())
+
+        # ----- Previous / Next shot buttons (under the Reciprocity QC button) -----
+        global prev_shot_ax, next_shot_ax, prev_shot_btn, next_shot_btn
+        prev_shot_ax = plt.axes([0.9200, 0.262, 0.06, 0.045])
+        next_shot_ax = plt.axes([0.9200, 0.210, 0.06, 0.045])
+        prev_shot_btn = Button(prev_shot_ax, '\u25c0  Prev', color='#eaf2f8', hovercolor='#aed6f1')
+        next_shot_btn = Button(next_shot_ax, 'Next  \u25b6', color='#eaf2f8', hovercolor='#aed6f1')
+        _n_sh = len(seismic_data)
+        for _b, _a, _ok in ((prev_shot_btn, prev_shot_ax, shot_no is not None and shot_no > 0),
+                            (next_shot_btn, next_shot_ax, shot_no is not None and shot_no < _n_sh - 1)):
+            _b.label.set_fontsize('medium')
+            _b.label.set_fontweight('bold')
+            _b.label.set_color('#2c3e50' if _ok else '#aab7b8')   # grey = no shot that way
+            for spine in _a.spines.values():
+                spine.set_edgecolor('#2c3e50')
+                spine.set_linewidth(1.5)
+        prev_shot_btn.on_clicked(lambda _evt: step_shot(-1))
+        next_shot_btn.on_clicked(lambda _evt: step_shot(+1))
 
 # Main plotting function attached with zoom listener function
 previous_radio_button_state = None
@@ -1632,7 +1659,8 @@ def update_plot_with_picks():
         for _w in (globals().get('radio_data'), globals().get('radio_reverse'),
                    globals().get('gain_slider'), globals().get('recip_button'),
                    globals().get('radio_quantity'), globals().get('gain_minus_btn'),
-                   globals().get('gain_plus_btn')):
+                   globals().get('gain_plus_btn'), globals().get('prev_shot_btn'),
+                   globals().get('next_shot_btn')):
             if _w is not None:
                 try:
                     _w.disconnect_events()
@@ -1782,13 +1810,17 @@ def refresh_reciprocity_window():
             print(f"Reciprocity window refresh failed: {e}")
 
 
-def open_shot_from_reciprocity(idx):
-    """Double-click in the QC window: save the current shot (like 'n') and open shot idx."""
+def go_to_shot(idx, source=''):
+    """Save the current shot's picks (like 'n') and open shot index idx directly."""
     global shot_no, final_pick_gather_multi_seed
     if not 0 <= idx < len(seismic_data):
         print(f"Shot index {idx} is not loaded ({len(seismic_data)} shots).")
         return
     if shot_no is not None and fig is not None and plt.fignum_exists(fig.number):
+        try:
+            reset_cursor_and_toolbar()
+        except Exception:
+            pass
         finalize_and_process_picks()
         save_picks(file_path_pkl)
     shot_no = idx
@@ -1796,7 +1828,24 @@ def open_shot_from_reciprocity(idx):
     clicked_points[shot_no] = final_clicked_points.get(f'clicked_points_for_shot_{shot_no}', [])
     mode[0] = 'Home'
     plot_shot()
-    print(f"Opened shot no. {shot_no + 1} (index {shot_no}) from the reciprocity window.")
+    print(f"Opened shot no. {shot_no + 1} (index {shot_no}){source}.")
+
+
+def open_shot_from_reciprocity(idx):
+    """Double-click in the QC window: save the current shot (like 'n') and open shot idx."""
+    go_to_shot(idx, ' from the reciprocity window')
+
+
+def step_shot(direction):
+    """Prev / Next buttons: save picks and open the neighbouring shot."""
+    if shot_no is None:
+        return
+    target = shot_no + direction
+    if not 0 <= target < len(seismic_data):
+        print("Already at the " + ("first" if direction < 0 else "last") + " shot.")
+        return
+    # deferred: the button's own figure is closed and rebuilt by plot_shot()
+    QTimer.singleShot(0, lambda: go_to_shot(target))
 
 
 # ---------------------------------------------------------------------
@@ -1817,7 +1866,8 @@ def _is_widget_axes(a):
     if a is None:
         return False
     return any(a is w for w in (gain_slider_ax, rax1, rax2, rax3, recip_button_ax,
-                                gain_minus_ax, gain_plus_ax) if w is not None)
+                                gain_minus_ax, gain_plus_ax, prev_shot_ax, next_shot_ax)
+               if w is not None)
 
 
 def step_gain(direction):
@@ -1999,13 +2049,14 @@ SHORTCUTS_TEXT = """Picking canvas keys
   z   zoom      d   pan (drag)      h   home (full view)
   g   type a gain value
   s   save picks (pickle)
-  n   next shot (saves first)
+  n   choose a shot (dialog; saves first)
   f   filter designer
   Ctrl+S   save the canvas as an image
 
 Mouse
   wheel on the gather    zoom
   wheel on the gain bar  gain x/÷ 1.25
+  ◀ Prev / Next ▶   neighbouring shot (saves first)
 
 Everything else is in the menus / toolbar:
   Data: preprocessing, acceleration / velocity / displacement
