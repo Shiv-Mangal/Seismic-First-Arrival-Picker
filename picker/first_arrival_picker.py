@@ -815,9 +815,9 @@ FILTER_PARAMS = fdz.FilterParams(
     iir_zero_phase=False,             # IIR only: True = forward-backward (zero phase)
 
     lowcut_on=True,  lowcut_hz=10.0,  lowcut_transition_hz=20.0,  lowcut_taps=131,  lowcut_order=4,
-    # v9: high-cut 150 Hz (was 80): on Line 101 first peaks move +5 ms instead of +12 ms,
-    # onsets +2 ms (middle half +1..+5) instead of +3 (0..+11). See the designer's timing presets.
-    highcut_on=True, highcut_hz=150.0, highcut_transition_hz=60.0, highcut_taps=51,  highcut_order=4,
+    # v14: back to the original configuration, 10-80 Hz (v9-v13 used 150 Hz / 60 Hz transition;
+    # it is still one click away: filter designer > timing preset 'Wider band').
+    highcut_on=True, highcut_hz=80.0, highcut_transition_hz=40.0, highcut_taps=51,  highcut_order=4,
 
     notch_on=True,
     notches=[[199.0, 8.0]],           # [[freq Hz, Q], ...]
@@ -2369,7 +2369,7 @@ def open_pdf_manual():
 
 def show_about():
     QMessageBox.about(None, 'About the first-arrival picker',
-                      '<b>First-arrival picker</b> for refraction tomography (v13)<br><br>'
+                      '<b>First-arrival picker</b> for refraction tomography (v14)<br><br>'
                       'Manual and automatic first-break picking of SEG-Y shot gathers, with '
                       'preprocessing, filtering, reciprocity QC and export to a three-column '
                       'S G T file for travel-time tomography.<br><br>'

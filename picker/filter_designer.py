@@ -41,9 +41,10 @@ FILTER_TYPES = {
 
 TYPE_HELP = {
     'minphase_fir': ("Causal: nothing arrives before the true onset, but every causal band-limit "
-                     "delays the energy. The HIGH-CUT sets the delay (Line 101: 80 Hz -> first "
-                     "peaks +12 ms, 150 Hz -> +5 ms, low-cut alone -> 0 ms). Pick the first "
-                     "departure; the timing line below is measured on this shot."),
+                     "delays the energy. On Line 101 (all shots) first-break onsets move about "
+                     "+2 ms with either the 80 Hz or the 150 Hz high-cut; the 80 Hz high-cut gives a "
+                     "smoother, later wavelet. Pick the first departure; the timing line below is "
+                     "measured on this shot."),
     'zerophase_fir': ("Peaks and troughs stay put, but the wavelet becomes symmetric: low-level "
                       "energy appears BEFORE the true onset, so first-break picks come out early."),
     'iir': ("Butterworth. Causal (minimum phase) by default; tick zero-phase for a "
@@ -66,8 +67,8 @@ class FilterParams:
     lowcut_order: int = 4                  # IIR only
 
     highcut_on: bool = True                # low-pass stage
-    highcut_hz: float = 150.0              # v9: 150 Hz (was 80): peaks +5 ms instead of +12 ms
-    highcut_transition_hz: float = 60.0    # FIR only
+    highcut_hz: float = 80.0               # v14: back to the original 80 Hz default (v9-v13: 150 Hz)
+    highcut_transition_hz: float = 40.0    # FIR only
     highcut_taps: int = 51                 # FIR only (odd)
     highcut_order: int = 4                 # IIR only
 
@@ -401,18 +402,19 @@ def timing_summary(stages, fs, before=None, after=None):
 
 # presets for the designer: (button text, tooltip, settings)
 TIMING_PRESETS = [
-    ('No delay', 'Minimum-phase low-cut 10 Hz only (+ notch): Line 101 onsets 0 ms, peaks 0 ms; '
-                 'high-frequency noise stays', dict(filter_type='minphase_fir', lowcut_on=True,
-                 lowcut_hz=10.0, lowcut_transition_hz=20.0, lowcut_taps=131, highcut_on=False)),
-    ('Small delay', 'Minimum-phase 10-150 Hz (+ notch): Line 101 onsets +2 ms, peaks +5 ms',
-     dict(filter_type='minphase_fir', lowcut_on=True, lowcut_hz=10.0, lowcut_transition_hz=20.0,
-          lowcut_taps=131, highcut_on=True, highcut_hz=150.0, highcut_transition_hz=60.0,
-          highcut_taps=51)),
-    ('Strong', 'Minimum-phase 10-80 Hz (+ notch), the old default: Line 101 onsets +3 ms '
-               '(up to +11), peaks +12 ms; cleanest far offsets',
+    ('Original (default)', 'Minimum-phase 10-80 Hz (+ notch 199 Hz), the original configuration and '
+                           'the default again since v14',
      dict(filter_type='minphase_fir', lowcut_on=True, lowcut_hz=10.0, lowcut_transition_hz=20.0,
           lowcut_taps=131, highcut_on=True, highcut_hz=80.0, highcut_transition_hz=40.0,
           highcut_taps=51)),
+    ('Wider band', 'Minimum-phase 10-150 Hz (+ notch): the v9-v13 default; first peaks about 3 ms '
+                   'earlier, more high-frequency detail and noise',
+     dict(filter_type='minphase_fir', lowcut_on=True, lowcut_hz=10.0, lowcut_transition_hz=20.0,
+          lowcut_taps=131, highcut_on=True, highcut_hz=150.0, highcut_transition_hz=60.0,
+          highcut_taps=51)),
+    ('No high-cut', 'Minimum-phase low-cut 10 Hz only (+ notch): least delay; high-frequency noise stays',
+     dict(filter_type='minphase_fir', lowcut_on=True, lowcut_hz=10.0, lowcut_transition_hz=20.0,
+          lowcut_taps=131, highcut_on=False)),
 ]
 
 

@@ -17,7 +17,7 @@ table.note { background-color: #fef9e7; margin-top: 8px; margin-bottom: 10px; }
 a { color: #1f618d; }
 </style></head><body>
 <h1 id="top">First-Arrival Picker: User Manual</h1>
-<p class="sub">Version 13 · first-break picking of SEG-Y shot gathers for refraction tomography</p>
+<p class="sub">Version 14 · first-break picking of SEG-Y shot gathers for refraction tomography</p>
 
 <p>This manual explains every window of the picker, in the order you use them. Every figure was made with the picker itself on a synthetic survey (<a href="#example-data">About the example data</a>), so the numbers in the figures can be checked against known true travel times. Inside the picker, <b>Help &gt; User manual</b> (F1) opens this manual beside the canvas. F1 in any window opens the section for that window. <b>Help &gt; Open the PDF manual</b> opens this same text as a PDF.</p>
 
@@ -215,8 +215,8 @@ a { color: #1f618d; }
 <li><i>Zero-phase FIR</i>: peaks stay put, but energy leaks before the onset, so picks come out early.</li>
 <li><i>IIR Butterworth</i>: causal, or zero-phase with a forward-backward pass.</li>
 </ul></li>
-<li><b>Low-cut / high-cut</b> with transition widths, and <b>notch filters</b> (frequency and Q in a table: <i>Add notch</i>, <i>Remove selected</i>). The default is 10–150 Hz with a notch at 199 Hz for the accelerometer resonance.</li>
-<li><b>Timing presets</b>: <i>No delay</i> (low-cut only), <i>Small delay</i> (10–150 Hz, the default), <i>Strong</i> (10–80 Hz). The <b>timing line</b> reports, on the preview shot, how far the filter moves the first-break onsets and the first peaks, and the impulse delay.</li>
+<li><b>Low-cut / high-cut</b> with transition widths, and <b>notch filters</b> (frequency and Q in a table: <i>Add notch</i>, <i>Remove selected</i>). The default is the original configuration: minimum-phase 10–80 Hz (transitions 20 and 40 Hz, 131 and 51 taps) with a notch at 199 Hz (Q 8) for the accelerometer resonance.</li>
+<li><b>Timing presets</b>: <i>Original (default)</i> (10–80 Hz), <i>Wider band</i> (10–150 Hz, the v9–v13 default: more high-frequency detail, slightly earlier peaks), <i>No high-cut</i> (low-cut only). The <b>timing line</b> reports, on the preview shot, how far the filter moves the first-break onsets and the first peaks, and the impulse delay.</li>
 </ul>
 <p class="fig"><img src="images/filter_response.png" data-w="1600" alt="Filter response"><br><span class="cap">Figure 17. Response tab: realized amplitude response, impulse response and the spectrum of the shot before and after.</span></p>
 <p class="fig"><img src="images/filter_preview.png" data-w="1600" alt="Filter preview"><br><span class="cap">Figure 18. Data preview tab: the shot before (top) and after (bottom) the filter, with the shared gain control.</span></p>
@@ -268,17 +268,17 @@ a { color: #1f618d; }
 </ul>
 <p class="fig"><img src="images/canvas_autopicks.png" data-w="1600" alt="Automatic picks on the canvas"><br><span class="cap">Figure 23. Automatic picks (MER, velocity, filtered) on the canvas. They are ordinary picks: edit, delete or re-pick them by hand.</span></p>
 <h3 id="detector-choice">Choosing a detector</h3>
-<p>Because the example survey has known first-arrival times, the detectors can be scored. All results use velocity, filtered, with the default post-processing on all 11 shots (1056 receiver–shot pairs). The error is pick minus true time.</p>
+<p>Because the example survey has known first-arrival times, the detectors can be scored. All results use velocity, filtered with the default 10–80 Hz filter, with the default post-processing on all 11 shots (1056 receiver–shot pairs). The error is pick minus true time.</p>
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Detector (velocity, filtered)</th><th>Picks kept</th><th>Median error</th><th>90 % of |error| below</th></tr>
-<tr><td>Classic STA/LTA, defaults</td><td>467</td><td>+3.6 ms</td><td>8.3 ms</td></tr>
-<tr><td>Classic STA/LTA, trigger level 4</td><td>799</td><td>+4.0 ms</td><td>5.0 ms</td></tr>
-<tr><td><b>MER, defaults</b></td><td><b>970</b></td><td><b>+3.9 ms</b></td><td><b>4.9 ms</b></td></tr>
-<tr><td>Shiv's original</td><td>273</td><td>+3.0 ms</td><td>52 ms</td></tr>
+<tr><td>Classic STA/LTA, defaults</td><td>521</td><td>+3.2 ms</td><td>5.7 ms</td></tr>
+<tr><td>Classic STA/LTA, trigger level 4</td><td>797</td><td>+3.8 ms</td><td>5.2 ms</td></tr>
+<tr><td><b>MER, defaults</b></td><td><b>809</b></td><td><b>+3.5 ms</b></td><td><b>4.7 ms</b></td></tr>
+<tr><td>Shiv's original</td><td>353</td><td>+3.0 ms</td><td>7.3 ms</td></tr>
 </table>
 <ul>
 <li>On this survey MER keeps the most picks. The defaults were tuned on a field line, so try two detectors on a few shots before applying to all.</li>
-<li>The median error of +3 to +4 ms is mostly the delay of the 10–150 Hz filter. On acceleration the same detectors are about 1 ms closer. For the final times, check difficult picks on the <i>Original</i> view.</li>
+<li>The median error of +3 to +4 ms is mostly the delay of the minimum-phase 10–80 Hz filter. For the final times, check difficult picks on the <i>Original</i> view.</li>
 </ul>
 
 <h2 id="qc">12. Reciprocity and pick QC</h2>
@@ -397,7 +397,7 @@ a { color: #1f618d; }
 <tr><td>Import refuses a file.</td><td>Different sample interval, or unreadable SEG-Y. The table says which; remove it and import the rest.</td></tr>
 <tr><td>An SGT file is refused when continuing.</td><td>It does not match the imported geometry (less than 90 % of rows fit). Check that it belongs to these files and this geometry.</td></tr>
 <tr><td>Automatic picking keeps few picks.</td><td>Try MER or a higher trigger level, check the velocity window, and look at <i>Picks vs offset</i> to see which step removes them (<a href="#detector-choice">section 11</a>).</td></tr>
-<tr><td>Picks look a few ms late on filtered data.</td><td>Filter delay: see the timing line in the filter designer; use <i>Small delay</i> or <i>No delay</i>, and check on <i>Original</i>.</td></tr>
+<tr><td>Picks look a few ms late on filtered data.</td><td>Filter delay: see the timing line in the filter designer; try <i>Wider band</i> or <i>No high-cut</i>, and check on <i>Original</i>.</td></tr>
 <tr><td>Help says the manual was not found.</td><td>Keep the <code>manual</code> folder (manual.html, images, PDF) next to the .py files.</td></tr>
 </table>
 
@@ -412,6 +412,7 @@ a { color: #1f618d; }
 <tr><td>v11</td><td>Automatic picking (STA/LTA, MER, original routine; AIC; post-processing) with live preview; shot spectra.</td></tr>
 <tr><td>v12</td><td>File menu with import from the picker; trace ranges; gain in every preview; spectra corrected for the sensor response.</td></tr>
 <tr><td>v13</td><td>This manual: built into the picker (Help menu, F1, side panel) and as a PDF.</td></tr>
+<tr><td>v14</td><td>Default filter back to the original configuration (minimum-phase 10–80 Hz, notch 199 Hz); 10–150 Hz kept as the <i>Wider band</i> preset.</td></tr>
 </table>
 
 <p class="sub">Built 16 November 2026. The same text is in First_Arrival_Picker_User_Manual.pdf.</p>
