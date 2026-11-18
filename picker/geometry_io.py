@@ -187,6 +187,11 @@ class TopoSpec:
     number_col: str = ''
     sheet: str = ''
     header: object = 'auto'
+    rows: str = 'receivers'       # v18: 'receivers' (one row per trace) or 'stations' (one row per
+                                  # station along the tape: shots and receivers share the table)
+    first_position: object = None # v18 'stations': picker position (tape m) of the first row
+                                  # (None = the smallest shot or receiver position)
+    position_step: object = None  # v18 'stations': tape distance between rows (None = receiver spacing)
 
     def to_dict(self):
         return asdict(self)
@@ -200,6 +205,8 @@ class TopoSpec:
     def describe(self):
         cols = f"x='{self.x_col}'" + (f", y='{self.y_col}'" if self.y_col else ' (distance along line)') + \
                f", elevation='{self.z_col}'" + (f", number='{self.number_col}'" if self.number_col else '')
+        if self.rows == 'stations':
+            cols += ', one row per station'
         return f'{os.path.basename(self.path)} [{cols}]'
 
 
@@ -232,7 +239,10 @@ def load_topography(spec):
     z = numeric_column(df, spec.z_col, what)
     y = numeric_column(df, spec.y_col, what) if spec.y_col else None
     n = numeric_column(df, spec.number_col, what) if spec.number_col else None
-    if n is not None:
+    if n is not None and getattr(spec, 'rows', 'receivers') == 'stations':
+        if len(np.unique(n)) != len(n):                  # station positions may be fractional
+            raise ValueError(f'{what}: a station position appears more than once in "{spec.number_col}".')
+    elif n is not None:
         if np.any(np.abs(n - np.round(n)) > 1e-6):
             raise ValueError(f'{what}: the number column "{spec.number_col}" must hold whole numbers.')
         n = np.round(n).astype(int)
@@ -303,6 +313,36 @@ def shots_from_topo(topo, n_shots, recv_is_map):
         return topo.x[r], topo.y[r], topo.z[r], None
     sd = topo.x[r].astype(float)
     return sd.copy(), np.zeros(n_shots), topo.z[r], sd
+
+
+def station_table(topo, positions, step):
+    """v18: a topography with one row per STATION along the tape (shots and receivers
+    share it, e.g. SLF_Line_101_topo_0m.txt: row 1 = 0 m = shot 1, row 2 = receiver 1 ...).
+    Row positions come from the number column (station position, tape m) or from
+    first_position + row * position_step. Returns (row_positions, x, y, dist, z, lookup)
+    where lookup(p) gives the row index of position p (or -1)."""
+    sp = topo.spec
+    positions = np.asarray(positions, float)
+    stp = float(sp.position_step) if sp.position_step not in (None, '', 0) else float(step)
+    if topo.number is not None:
+        rowpos = np.asarray(topo.number, float)
+    else:
+        first = float(sp.first_position) if sp.first_position not in (None, '') else float(np.min(positions))
+        rowpos = first + np.arange(len(topo)) * stp
+    o = np.argsort(rowpos, kind='stable')
+    if topo.is_map:
+        x, y = topo.x.astype(float), topo.y.astype(float)
+        dist = np.empty(len(topo))
+        dist[o] = along_line(x[o], y[o])                 # 0 at the first station row
+    else:
+        x, y = topo.x.astype(float), np.zeros(len(topo))
+        dist = x.copy()
+    tol = 0.01 * stp
+
+    def lookup(p):
+        k = int(np.argmin(np.abs(rowpos - p)))
+        return k if abs(rowpos[k] - p) <= tol else -1
+    return rowpos, x, y, dist, topo.z.astype(float), lookup
 
 
 def shots_at_geophones(shot_pos, recv_pos, rx, ry, rdist, relev):

@@ -700,6 +700,7 @@ class Survey:
     shot_topo: object = None         # v17: TopoSpec of an external shot topography (or None)
     shots_at_geophones: bool = False # v17: shot x/y/elevation taken from the receiver at its position
     geometry_source: str = 'headers' # v17: where the coordinates came from (for the summary)
+    header_geometry: object = None   # v18: snapshot of the header geometry (apply_topography base)
 
     @property
     def n_shots(self):
@@ -850,33 +851,17 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
     nm = master.ntr
     has_coords = master.has_coords
     has_elev = master.has_elev
-    if shot_topo is not None and shots_at_geophones:
-        raise ValueError('Choose either a shot topography file or "shots at geophones", not both.')
-
-    # v17: external receiver topography replaces the headers
-    rtopo = None
-    if recv_topo is not None:
-        t = gio.load_topography(recv_topo)
-        rx_t, ry_t, rdist_t, relev_t, recv_is_map, notes = gio.receivers_from_topo(t, nm)
-        warnings.extend(notes)
-        rtopo = (rx_t, ry_t, rdist_t, relev_t)
-        has_coords = has_elev = True
-        warnings.append(f'Receiver topography from {recv_topo.describe()} (replaces the header '
-                        f'coordinates and elevations).')
-    recv_is_map = (rtopo is None) or bool(recv_topo.y_col)
-
-    # receiver geometry from the master shot
-    if rtopo is not None:
-        rx, ry, rdist = rtopo[0], rtopo[1], rtopo[2]
-        hsp = float(np.median(np.abs(np.diff(rdist)))) if nm > 1 else 1.0
-    elif has_coords:
+    # receiver geometry from the master shot (headers; v18: a topography file is applied
+    # afterwards by apply_topography(), so it never changes the picker positions)
+    if has_coords:
         rx, ry = master.gx, master.gy
         rdist = along_line_distance(rx, ry)
         hsp = float(np.median(np.diff(rdist))) if nm > 1 else 1.0
     else:
         rx = ry = np.full(nm, np.nan)
         hsp = float('nan')
-        warnings.append('No receiver coordinates in the headers: using the manual geometry.')
+        if recv_topo is None:
+            warnings.append('No receiver coordinates in the headers: using the manual geometry.')
     spacing = geom.recv_spacing if geom.recv_spacing > 0 else (nice_spacing(hsp) if has_coords else 1.0)
     geom.recv_spacing = spacing
     if not has_coords:
@@ -896,40 +881,9 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
     # shots
     sxy = np.array([[r.sx, r.sy] for r in good])
     selev = np.array([r.selev for r in good])
-    recv_elev = rtopo[3] if rtopo is not None else (master.gelev if has_elev else np.zeros(nm))
-    sd_t = None
-    if shot_topo is not None:
-        t = gio.load_topography(shot_topo)
-        sx_t, sy_t, se_t, sd_t = gio.shots_from_topo(t, len(good), recv_is_map)
-        sxy = np.column_stack([sx_t, sy_t])
-        selev = np.asarray(se_t, float)
-        warnings.append(f'Shot topography from {shot_topo.describe()}.')
-    hdr_shots_ok = (master.has_coords and np.all(np.isfinite(sxy)) and
-                    np.ptp(sxy[:, 0]) + np.ptp(sxy[:, 1]) > 0)
+    recv_elev = master.gelev if has_elev else np.zeros(nm)
     shot_coords_ok = has_coords and np.all(np.isfinite(sxy)) and np.ptp(sxy[:, 0]) + np.ptp(sxy[:, 1]) > 0
-    if shot_topo is not None and sd_t is not None:                    # distances along the line
-        sdist = np.asarray(sd_t, float)
-        soff = np.zeros(len(good))
-        near = np.array([int(np.argmin(np.abs(rdist - d))) for d in sdist])
-        shot_coords_ok = True
-    elif rtopo is not None and not recv_is_map and shot_topo is None:
-        # receivers as distances along the line, shots from the headers: place each shot
-        # with the HEADER geometry (nearest header receiver + remaining distance), then
-        # carry it over to the file's distances
-        if hdr_shots_ok:
-            rdist_h = along_line_distance(master.gx, master.gy)
-            sd_h, soff, near = project_on_line(sxy[:, 0], sxy[:, 1], master.gx, master.gy, rdist_h)
-            sgn = 1.0 if (nm < 2 or rdist[-1] >= rdist[0]) else -1.0
-            sdist = np.array([rdist[k] + sgn * (d - rdist_h[k]) for d, k in zip(sd_h, near)])
-            sxy = np.column_stack([sdist, np.zeros(len(good))])
-            shot_coords_ok = True
-            warnings.append('Shot positions from the header source coordinates, carried over to the '
-                            'distances of the receiver topography.')
-        else:
-            sxy = np.full((len(good), 2), np.nan)
-            shot_coords_ok = False
-            sdist = soff = near = None
-    elif shot_coords_ok:
+    if shot_coords_ok:
         sdist, soff, near = project_on_line(sxy[:, 0], sxy[:, 1], rx, ry, rdist)
         far = np.where(soff > 2 * spacing)[0]
         if len(far):
@@ -938,11 +892,7 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
     else:
         sdist = soff = None
         near = None
-    if rtopo is not None and shot_topo is None and not shots_at_geophones and sdist is not None:
-        _o = np.argsort(rdist)                     # the topography replaces header elevations
-        selev = np.interp(sdist, rdist[_o], np.asarray(recv_elev, float)[_o])
-        warnings.append('Shot elevations interpolated from the receiver topography (no shot file).')
-    elif has_elev and not np.any(selev != 0) and shot_coords_ok and shot_topo is None:
+    if has_elev and not np.any(selev != 0) and shot_coords_ok:
         _o = np.argsort(rdist)
         selev = np.interp(sdist, rdist[_o], np.asarray(recv_elev, float)[_o])
         warnings.append('No source elevations in the headers: interpolated from the receivers.')
@@ -958,13 +908,6 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
         if sdist is None:
             sdist = (shot_pos - geom.first_recv_pos)
             soff = np.zeros(len(good))
-    if shots_at_geophones:                         # v17: shot coordinates from the receivers
-        _sx, _sy, _se, _sd, notes = gio.shots_at_geophones(shot_pos, recv_pos, rx, ry, rdist, recv_elev)
-        sxy = np.column_stack([_sx, _sy])
-        selev, sdist, soff = _se, _sd, np.zeros(len(good))
-        warnings.append('Shots placed at the geophone of their position (x, y and elevation from the '
-                        + ('receiver topography).' if rtopo is not None else 'receiver headers).'))
-        warnings.extend(notes)
     dup = [p for p in set(shot_pos.tolist()) if list(shot_pos).count(p) > 1]
     if dup:
         warnings.append(f"Several shots at the same position {sorted(dup)} (repeat shots?): reciprocity "
@@ -993,17 +936,143 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
                 load_existing_picks=load_existing_picks or bool(picks_source),
                 picks_source=picks_source or '', warnings=warnings, placement=placement,
                 imported=datetime.datetime.now().isoformat(timespec='seconds'),
-                file_format=(good[0].file_format if file_format == 'auto' else file_format),
-                recv_topo=recv_topo, shot_topo=shot_topo, shots_at_geophones=bool(shots_at_geophones),
-                geometry_source=('topography file' if rtopo is not None else 'headers'))
+                file_format=(good[0].file_format if file_format == 'auto' else file_format))
     sv.record_path = os.path.splitext(sv.pkl_path)[0].replace('_picks', '') + '_import.json'
-    a, b = line_axis(np.column_stack([rx, ry])) if (has_coords and recv_is_map) else (None, None)
+    a, b = line_axis(np.column_stack([rx, ry])) if has_coords else (None, None)
     if a is not None:
         az = (np.degrees(np.arctan2(b[0], b[1])) + 360) % 180
         warnings.append(f'Line: {rdist[-1]:.1f} m along the receivers (sqrt(dE^2 + dN^2)), azimuth '
                         f'{az:.1f} deg from north; receivers up to '
                         f'{np.abs(cross_line(np.column_stack([rx, ry]), a, b)).max():.2f} m off the straight line.')
+    sv.header_geometry = _geometry_snapshot(sv)           # v18: what the headers say
+    if recv_topo is not None or shot_topo is not None or shots_at_geophones:
+        apply_topography(sv, recv_topo, shot_topo, shots_at_geophones)
     return sv
+
+
+_GEOM_FIELDS = ('recv_xy', 'recv_elev', 'recv_dist', 'shot_xy', 'shot_elev', 'shot_dist', 'shot_offline',
+                'has_coords', 'has_elev', 'header_spacing')
+
+
+def _geometry_snapshot(sv):
+    return {k: (np.array(getattr(sv, k), copy=True) if isinstance(getattr(sv, k), np.ndarray)
+                else getattr(sv, k)) for k in _GEOM_FIELDS}
+
+
+def apply_topography(sv, recv_topo=None, shot_topo=None, shots_at_geophones=False):
+    """
+    v18: replace the coordinates and elevations of an imported Survey with topography
+    tables -- at import or at any later time. Picker positions (recv_pos, shot_pos),
+    the data and the picks are never changed. Always starts from the header geometry,
+    so applying again replaces the earlier topography; with no tables at all the
+    header geometry is restored.
+
+    recv_topo : TopoSpec (rows='receivers': one row per trace, or 'stations': one row
+                per tape station -- shots then take their rows too)
+    shot_topo : TopoSpec, one row per shot (or a shot-number column)
+    shots_at_geophones : shots take x / y / elevation of the receiver at their position
+    Returns the notes (also appended to sv.warnings). Raises ValueError.
+    """
+    if shot_topo is not None and shots_at_geophones:
+        raise ValueError('Choose either a shot topography file or "shots at geophones", not both.')
+    base = getattr(sv, 'header_geometry', None) or _geometry_snapshot(sv)
+    sv.header_geometry = base
+    rp = np.asarray(sv.recv_pos, float)
+    spos = np.asarray(sv.shot_pos, float)
+    nm, nsh = len(rp), len(spos)
+    step = float(np.median(np.diff(np.sort(rp)))) if nm > 1 else 1.0
+    b_rdist = np.asarray(base['recv_dist'], float)
+    b_sdist = np.asarray(base['shot_dist'], float)
+    b_rxy, b_sxy = np.asarray(base['recv_xy'], float), np.asarray(base['shot_xy'], float)
+    notes = []
+    st_lookup = None
+    # ---------------- receivers ----------------
+    if recv_topo is not None:
+        t = gio.load_topography(recv_topo)
+        is_map = t.is_map
+        if recv_topo.rows == 'stations':
+            rowpos, tx, ty, tdist, tz, st_lookup = gio.station_table(t, np.r_[rp, spos], step)
+            ri = np.array([st_lookup(p) for p in rp])
+            miss = rp[ri < 0]
+            if len(miss):
+                raise ValueError(f'{os.path.basename(recv_topo.path)}: no station row for receiver position(s) '
+                                 f'{", ".join(f"{m:g}" for m in miss[:10])}{" ..." if len(miss) > 10 else ""} '
+                                 f'(rows cover {rowpos.min():g}-{rowpos.max():g} m). Check the first position '
+                                 f'and the step.')
+            rx, ry, rdist, relev = tx[ri], ty[ri], tdist[ri], tz[ri]
+            notes.append(f'Station topography: {len(t)} rows at positions {rowpos.min():g}-{rowpos.max():g} m '
+                         f'(receivers and shots take the row at their position).')
+        else:
+            rx, ry, rdist, relev, is_map, n2 = gio.receivers_from_topo(t, nm)
+            notes += n2
+        notes.insert(0, f'Receiver topography from {recv_topo.describe()} (replaces the header coordinates '
+                        f'and elevations).')
+        has_coords = has_elev = True
+    else:
+        rx, ry = b_rxy[:, 0], b_rxy[:, 1]
+        rdist, relev = b_rdist, np.asarray(base['recv_elev'], float)
+        is_map, has_coords, has_elev = base['has_coords'], base['has_coords'], base['has_elev']
+    # ---------------- shots ----------------
+    soff = np.zeros(nsh)
+    if shot_topo is not None:
+        t = gio.load_topography(shot_topo)
+        sx, sy, selev, sd = gio.shots_from_topo(t, nsh, is_map)
+        if sd is None:
+            sd, soff, _near = project_on_line(sx, sy, rx, ry, rdist)
+        sdist = np.asarray(sd, float)
+        notes.append(f'Shot topography from {shot_topo.describe()}.')
+    elif shots_at_geophones:
+        sx, sy, selev, sdist, n2 = gio.shots_at_geophones(spos, rp, rx, ry, rdist, relev)
+        notes.append('Shots placed at the geophone of their position (x, y and elevation from the '
+                     + ('receiver topography).' if recv_topo is not None else 'receiver headers).'))
+        notes += n2
+    elif st_lookup is not None and all(st_lookup(p) >= 0 for p in spos):
+        si = np.array([st_lookup(p) for p in spos])
+        sx, sy, sdist, selev = tx[si], ty[si], tdist[si], tz[si]
+        notes.append('Shots take the station row at their position.')
+    elif recv_topo is not None:
+        # carry the header shot placement over: nearest header receiver + the remaining distance
+        if st_lookup is not None:
+            notes.append('Some shot positions are not in the station table: shots placed from the headers.')
+        near = np.array([int(np.argmin(np.abs(b_rdist - d))) for d in b_sdist])
+        sgn = 1.0 if (nm < 2 or (rdist[-1] - rdist[0]) * (b_rdist[-1] - b_rdist[0]) >= 0) else -1.0
+        if is_map and base['has_coords'] and np.all(np.isfinite(b_sxy)):
+            sx, sy = b_sxy[:, 0], b_sxy[:, 1]
+            sdist, soff, _n = project_on_line(sx, sy, rx, ry, rdist)
+        else:
+            sdist = np.array([rdist[k] + sgn * (d - b_rdist[k]) for d, k in zip(b_sdist, near)])
+            sx, sy = (sdist.copy(), np.zeros(nsh)) if not is_map else (b_sxy[:, 0], b_sxy[:, 1])
+        o = np.argsort(rdist)
+        selev = np.interp(sdist, rdist[o], np.asarray(relev, float)[o])
+        notes.append('Shot positions from the header geometry, carried over to the receiver topography; '
+                     'shot elevations interpolated from it.')
+    else:
+        sx, sy = b_sxy[:, 0], b_sxy[:, 1]
+        sdist, selev = b_sdist, np.asarray(base['shot_elev'], float)
+        soff = np.asarray(base['shot_offline'], float)
+    sv.recv_xy = np.column_stack([rx, ry]).astype(float)
+    sv.recv_elev = np.asarray(relev, float)
+    sv.recv_dist = np.asarray(rdist, float)
+    sv.shot_xy = np.column_stack([sx, sy]).astype(float)
+    sv.shot_elev = np.asarray(selev, float)
+    sv.shot_dist = np.asarray(sdist, float)
+    sv.shot_offline = np.asarray(soff, float)
+    sv.has_coords, sv.has_elev = bool(has_coords), bool(has_elev)
+    if recv_topo is not None and nm > 1:
+        sv.header_spacing = float(np.median(np.abs(np.diff(sv.recv_dist))))
+    else:
+        sv.header_spacing = base['header_spacing']
+    sv.recv_topo, sv.shot_topo, sv.shots_at_geophones = recv_topo, shot_topo, bool(shots_at_geophones)
+    sv.geometry_source = ('topography file' if (recv_topo is not None or shot_topo is not None)
+                          else 'headers (shots at geophones)' if shots_at_geophones else 'headers')
+    if not notes:
+        notes = ['Header geometry restored (no topography).']
+    sv.warnings = [w for w in sv.warnings if not w.startswith(('Receiver topography from', 'Shot topography from',
+                                                               'Station topography', 'Shots placed at',
+                                                               'Shots take the station', 'Shot positions from the header geometry',
+                                                               'Header geometry restored'))]
+    sv.warnings.extend(notes)
+    return notes
 
 
 def import_files(files, quantity, progress=None, **kw):
@@ -1529,11 +1598,42 @@ if _HAVE_QT:
                 self.cb_hdr.addItem(t, v)
             self.cb_hdr.currentIndexChanged.connect(lambda *_: self._reload())
             f.addRow('First row is a header', self.cb_hdr)
+            self.cb_rows = QComboBox()                       # v18
+            self.cb_rows.addItem('One row per receiver (trace)', 'receivers')
+            self.cb_rows.addItem('One row per station along the tape (shots and receivers)', 'stations')
+            self.cb_rows.setToolTip('Station table: one row per tape position, e.g. 0, 1, 2 … 170 m with the '
+                                    'first shot at 0 m and receivers from 1 m. Receivers AND shots take '
+                                    'the row at their position.')
+            self.cb_rows.currentIndexChanged.connect(self._rows_changed)
+            self.lab_rows = QLabel('Rows')
+            f.addRow(self.lab_rows, self.cb_rows)
+            row2 = QHBoxLayout()
+            self.ed_first = QLineEdit()
+            self.ed_first.setPlaceholderText('auto')
+            self.ed_first.setMaximumWidth(80)
+            self.ed_first.setToolTip('Tape position (m) of the first row; auto = the smallest shot or '
+                                     'receiver position (0 m when the first shot is at 0 m)')
+            self.ed_step = QLineEdit()
+            self.ed_step.setPlaceholderText('auto')
+            self.ed_step.setMaximumWidth(80)
+            self.ed_step.setToolTip('Tape distance between rows (m); auto = the receiver spacing')
+            for w, lab in ((self.ed_first, 'first row at'), (self.ed_step, 'm,  step')):
+                row2.addWidget(QLabel(lab))
+                row2.addWidget(w)
+                w.editingFinished.connect(self._changed)
+            row2.addWidget(QLabel('m'))
+            row2.addStretch(1)
+            self.w_stations = QWidget()
+            row2.setContentsMargins(0, 0, 0, 0)
+            self.w_stations.setLayout(row2)
+            f.addRow(self.w_stations)
+            self.hint = None                                   # (n_receivers, positions) for auto-detection
             self.cb_x, self.cb_y, self.cb_z, self.cb_n = QComboBox(), QComboBox(), QComboBox(), QComboBox()
             f.addRow('x (easting or distance)', self.cb_x)
             f.addRow('y (northing)', self.cb_y)
             f.addRow('Elevation', self.cb_z)
-            f.addRow(f'{what.capitalize()} number', self.cb_n)
+            self.lab_n = QLabel(f'{what.capitalize()} number')
+            f.addRow(self.lab_n, self.cb_n)
             self.cb_n.setToolTip('Optional. Receivers: trace number (1 = first trace). Shots: shot number '
                                  'in the file list (1 = first file). Without it, row i is ' + what + ' i.')
             for cb in (self.cb_x, self.cb_y, self.cb_z, self.cb_n):
@@ -1543,6 +1643,31 @@ if _HAVE_QT:
             self.lbl.setStyleSheet('color: #555;')
             f.addRow(self.lbl)
             self._show_sheet(False)
+            for w in (self.cb_rows, self.lab_rows):
+                w.setVisible(what == 'receiver')
+            self.w_stations.setVisible(False)
+
+        def set_hint(self, n_receivers, positions):
+            """Tell the widget the receiver count and all station positions (tape m), so a
+            table with one row per station is recognised automatically."""
+            self.hint = (int(n_receivers), np.asarray(positions, float))
+
+        def _rows_changed(self, *_):
+            st = self.cb_rows.currentData() == 'stations'
+            self.w_stations.setVisible(st)
+            self.lab_n.setText('Station position (tape m)' if st else f'{self.what.capitalize()} number')
+            self._changed()
+
+        def _auto_rows(self):
+            if self.what != 'receiver' or self.hint is None or self._df is None:
+                return
+            n, pos = self.hint
+            if len(self._df) == n:
+                return
+            step = float(np.median(np.diff(np.unique(pos)))) if len(np.unique(pos)) > 1 else 1.0
+            n_st = int(round((pos.max() - pos.min()) / step)) + 1 if len(pos) else 0
+            if len(self._df) == n_st:
+                self.cb_rows.setCurrentIndex(1)
 
         def _show_sheet(self, on):
             self.cb_sheet.setVisible(on)
@@ -1597,6 +1722,8 @@ if _HAVE_QT:
                         cb.setCurrentIndex(max(0, i))
             finally:
                 self._loading = False
+            if guess:
+                self._auto_rows()
             self._changed()
 
         def _changed(self, *_):
@@ -1608,6 +1735,11 @@ if _HAVE_QT:
                 sp = self.spec()
                 kind = ('map coordinates (x, y): distance along the line computed from them'
                         if sp and sp.y_col else 'x = distance along the line, used as it is')
+                if sp and sp.rows == 'stations':
+                    kind += '; one row per station (receivers and shots take the row at their position)'
+                elif self.hint is not None and self.what == 'receiver' and n != self.hint[0]:
+                    kind += (f'. <span style="color:#c0392b;">{n} rows but {self.hint[0]} receivers: '
+                             f'one row per station?</span>')
                 self.lbl.setText(f'{n} rows; columns: {prev}{" …" if len(self._df.columns) > 6 else ""}.<br>'
                                  f'{kind}.')
                 self.lbl.setTextFormat(Qt.RichText)
@@ -1618,10 +1750,19 @@ if _HAVE_QT:
             path = self.ed.text().strip()
             if not path or self._df is None or not self.cb_x.currentData() or not self.cb_z.currentData():
                 return None
+            def num(ed):
+                try:
+                    return float(ed.text().strip().replace(',', '.')) if ed.text().strip() else None
+                except ValueError:
+                    return None
+            stations = self.what == 'receiver' and self.cb_rows.currentData() == 'stations'
             return gio.TopoSpec(path=path, x_col=self.cb_x.currentData(), y_col=self.cb_y.currentData() or '',
                                 z_col=self.cb_z.currentData(), number_col=self.cb_n.currentData() or '',
                                 sheet=self.cb_sheet.currentText() if self.cb_sheet.isVisible() else '',
-                                header=self.cb_hdr.currentData())
+                                header=self.cb_hdr.currentData(),
+                                rows='stations' if stations else 'receivers',
+                                first_position=num(self.ed_first) if stations else None,
+                                position_step=num(self.ed_step) if stations else None)
 
         def set_spec(self, sp):
             if sp is None:
@@ -1634,9 +1775,225 @@ if _HAVE_QT:
             self.load(sp.path)
             if sp.sheet:
                 self.cb_sheet.setCurrentText(sp.sheet)
+            self.cb_rows.setCurrentIndex(1 if getattr(sp, 'rows', 'receivers') == 'stations' else 0)
+            self.ed_first.setText('' if sp.first_position in (None, '') else f'{sp.first_position:g}')
+            self.ed_step.setText('' if sp.position_step in (None, '') else f'{sp.position_step:g}')
             for cb, v in ((self.cb_x, sp.x_col), (self.cb_y, sp.y_col), (self.cb_z, sp.z_col),
                           (self.cb_n, sp.number_col)):
                 cb.setCurrentIndex(max(0, cb.findData(v)))
+
+    class TopographyPanel(QWidget):
+        """v18: receiver topography + shot placement (+ optional header writing); used by the
+        import window and by the stand-alone Topography window."""
+
+        def __init__(self, on_change=None, with_header_write=True, parent=None):
+            super().__init__(parent)
+            self.on_change = on_change
+            v = QVBoxLayout(self)
+            v.setContentsMargins(0, 0, 0, 0)
+            self.chk_rtopo = QCheckBox('Receivers from a topography file')
+            self.chk_rtopo.toggled.connect(self._changed)
+            v.addWidget(self.chk_rtopo)
+            self.w_rtopo = TopoFileWidget('receiver', on_change=self._changed)
+            v.addWidget(self.w_rtopo)
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Shots:'))
+            self.rb_st_hdr = QRadioButton('From the headers')
+            self.rb_st_file = QRadioButton('From a file')
+            self.rb_st_geo = QRadioButton('At the geophones')
+            self.rb_st_geo.setToolTip('Each shot takes x, y and elevation of the receiver at its position; '
+                                      'a shot beyond the spread is extrapolated from the end receivers')
+            self.grp_st = QButtonGroup(self)
+            for rb in (self.rb_st_hdr, self.rb_st_file, self.rb_st_geo):
+                self.grp_st.addButton(rb)
+                row.addWidget(rb)
+            self.rb_st_hdr.setChecked(True)
+            for rb in (self.rb_st_hdr, self.rb_st_file, self.rb_st_geo):
+                rb.toggled.connect(self._changed)
+            row.addStretch(1)
+            v.addLayout(row)
+            self.w_stopo = TopoFileWidget('shot', on_change=self._changed)
+            v.addWidget(self.w_stopo)
+            self.chk_hdrwrite = None
+            if with_header_write:
+                self.chk_hdrwrite = QCheckBox('Also write the geometry into the trace headers of the data files')
+                self.chk_hdrwrite.setToolTip('The original files are first copied to '
+                                             'original_headers_backup_<date>_<time> in the data folder. '
+                                             'Only header bytes change; the samples are not touched.')
+                v.addWidget(self.chk_hdrwrite)
+            self._ready = True
+            self._changed()
+
+        def set_hint(self, n_receivers, positions):
+            self.w_rtopo.set_hint(n_receivers, positions)
+
+        def _changed(self, *_):
+            if not getattr(self, '_ready', False):
+                return
+            self.w_rtopo.setVisible(self.chk_rtopo.isChecked())
+            self.w_stopo.setVisible(self.rb_st_file.isChecked())
+            stations = self.chk_rtopo.isChecked() and self.w_rtopo.cb_rows.currentData() == 'stations'
+            self.rb_st_hdr.setText('From the station rows' if stations else 'From the headers')
+            if self.on_change is not None:
+                self.on_change()
+
+        def settings(self):
+            """(recv TopoSpec or None, shot TopoSpec or None, shots_at_geophones); raises
+            ValueError when a chosen file is incomplete."""
+            rt = self.w_rtopo.spec() if self.chk_rtopo.isChecked() else None
+            st = self.w_stopo.spec() if self.rb_st_file.isChecked() else None
+            if self.chk_rtopo.isChecked() and rt is None:
+                raise ValueError('Receiver topography: choose the file and its x and elevation columns.')
+            if self.rb_st_file.isChecked() and st is None:
+                raise ValueError('Shot topography: choose the file and its x and elevation columns.')
+            return rt, st, self.rb_st_geo.isChecked()
+
+        def write_headers(self):
+            return self.chk_hdrwrite is not None and self.chk_hdrwrite.isChecked()
+
+        def set_settings(self, recv_topo=None, shot_topo=None, shots_at_geophones=False):
+            self.chk_rtopo.setChecked(recv_topo is not None)
+            if recv_topo is not None:
+                self.w_rtopo.set_spec(recv_topo)
+            if shot_topo is not None:
+                self.rb_st_file.setChecked(True)
+                self.w_stopo.set_spec(shot_topo)
+            elif shots_at_geophones:
+                self.rb_st_geo.setChecked(True)
+            else:
+                self.rb_st_hdr.setChecked(True)
+            self._changed()
+
+    class TopographyDialog(QDialog):
+        """v18: File > Topography… -- apply a topography to the imported survey at any time.
+        The picks and picker positions never change; only coordinates and elevations."""
+
+        def __init__(self, survey, on_apply, parent=None):
+            super().__init__(parent)
+            self.setWindowTitle('Topography and geometry')
+            self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
+            self.sv = survey
+            self.on_apply = on_apply          # callable(rt, st, at_geo, write_headers) -> notes
+            self.applied = False
+            lay = QHBoxLayout(self)
+            left = QVBoxLayout()
+            intro = QLabel('Replace the coordinates and elevations of the receivers and shots with a '
+                           'topography table. The picks and the picker positions are not changed; the '
+                           'offset view, the geometry window and the export use the new values. '
+                           '<i>Restore header geometry</i> undoes it.')
+            intro.setWordWrap(True)
+            left.addWidget(intro)
+            self.panel = TopographyPanel(on_change=self._preview)
+            self.panel.set_hint(len(survey.recv_pos), np.r_[survey.recv_pos, survey.shot_pos])
+            left.addWidget(self.panel)
+            self.lbl = QLabel()
+            self.lbl.setWordWrap(True)
+            self.lbl.setTextFormat(Qt.RichText)
+            left.addWidget(self.lbl)
+            left.addStretch(1)
+            row = QHBoxLayout()
+            b = QPushButton('Help')
+            b.clicked.connect(lambda: self._help())
+            row.addWidget(b)
+            row.addStretch(1)
+            self.btn_restore = QPushButton('Restore header geometry')
+            self.btn_restore.clicked.connect(self._restore)
+            row.addWidget(self.btn_restore)
+            self.btn_apply = QPushButton('Apply')
+            self.btn_apply.setDefault(True)
+            self.btn_apply.clicked.connect(self._apply)
+            row.addWidget(self.btn_apply)
+            b = QPushButton('Close')
+            b.clicked.connect(self.accept)
+            row.addWidget(b)
+            left.addLayout(row)
+            w = QWidget()
+            w.setLayout(left)
+            sc = QScrollArea()
+            sc.setWidgetResizable(True)
+            sc.setWidget(w)
+            sc.setMinimumWidth(620)
+            lay.addWidget(sc)
+            from matplotlib.figure import Figure as _Fig
+            try:
+                from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as _FC
+            except ImportError:
+                from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as _FC
+            self.fig = _Fig(figsize=(6, 5), constrained_layout=True)
+            self.canvas = _FC(self.fig)
+            lay.addWidget(self.canvas, 1)
+            self.panel.set_settings(survey.recv_topo, survey.shot_topo, survey.shots_at_geophones)
+            self.resize(1400, 820)
+            self._preview()
+
+        def _help(self):
+            try:
+                import help_manual as hlp
+                hlp.open_help(self, 'topography')
+            except Exception:
+                pass
+
+        def _trial(self):
+            import copy
+            rt, st, ag = self.panel.settings()
+            sv = copy.copy(self.sv)
+            sv.warnings = list(self.sv.warnings)
+            notes = apply_topography(sv, rt, st, ag)
+            return sv, notes
+
+        def _preview(self):
+            if not hasattr(self, 'canvas'):           # called while the window is being built
+                return
+            self.fig.clear()
+            ax1, ax2 = self.fig.subplots(2, 1)
+            base = getattr(self.sv, 'header_geometry', None) or _geometry_snapshot(self.sv)
+            try:
+                sv, notes = self._trial()
+                ok = True
+            except Exception as e:
+                sv, notes, ok = None, [str(e)], False
+            ax1.plot(self.sv.recv_pos, base['recv_elev'], '.', color='#aaa', ms=4, label='headers: receivers')
+            ax1.plot(self.sv.shot_pos, base['shot_elev'], 'v', color='#aaa', ms=6, label='headers: shots')
+            if sv is not None:
+                ax1.plot(sv.recv_pos, sv.recv_elev, '.-', color='#1f77b4', ms=4, lw=0.8, label='new: receivers')
+                ax1.plot(sv.shot_pos, sv.shot_elev, 'v', color='#d62728', ms=7, label='new: shots')
+                ax2.plot(sv.recv_pos, sv.recv_dist - np.asarray(base['recv_dist'], float), '.-', color='#1f77b4',
+                         ms=3, lw=0.8, label='receivers')
+                ax2.plot(sv.shot_pos, sv.shot_dist - np.asarray(base['shot_dist'], float), 'v', color='#d62728',
+                         label='shots')
+            ax1.set_ylabel('Elevation (m)')
+            ax1.legend(fontsize='small', ncol=2)
+            ax1.set_title('Elevation against tape position (picker position, m)')
+            ax2.set_xlabel('Tape position (m)')
+            ax2.set_ylabel('x new − x headers (m)')
+            ax2.set_title('Change of the distance along the line')
+            ax2.axhline(0, color='k', lw=0.5)
+            self.canvas.draw_idle()
+            col = '#555' if ok else '#c0392b'
+            self.lbl.setText(f'<span style="color:{col};">' + '<br>'.join(f'• {n}' for n in notes) + '</span>')
+            self.btn_apply.setEnabled(ok)
+
+        def _apply(self):
+            try:
+                rt, st, ag = self.panel.settings()
+                notes = self.on_apply(rt, st, ag, self.panel.write_headers())
+            except Exception as e:
+                QMessageBox.critical(self, 'Topography', str(e))
+                return
+            self.applied = True
+            QMessageBox.information(self, 'Topography applied', '\n'.join(notes or ['Done.']))
+            self._preview()
+
+        def _restore(self):
+            try:
+                notes = self.on_apply(None, None, False, False)
+            except Exception as e:
+                QMessageBox.critical(self, 'Topography', str(e))
+                return
+            self.applied = True
+            self.panel.set_settings(None, None, False)
+            QMessageBox.information(self, 'Topography', '\n'.join(notes or ['Header geometry restored.']))
+            self._preview()
 
     class ImportDialog(QDialog):
         """
@@ -1813,47 +2170,22 @@ if _HAVE_QT:
                 w.valueChanged.connect(self._geom_preview)
             left.addWidget(g)
 
-            # v17: external topography
+            # v17/v18: external topography (the same panel as File > Topography…)
             g = QGroupBox('3b. Topography file (optional: replaces the header coordinates)')
             v = QVBoxLayout(g)
-            self.chk_rtopo = QCheckBox('Receivers from a topography file')
-            self.chk_rtopo.toggled.connect(self._topo_changed)
-            v.addWidget(self.chk_rtopo)
-            self.w_rtopo = TopoFileWidget('receiver', on_change=self._geom_preview)
-            v.addWidget(self.w_rtopo)
-            row = QHBoxLayout()
-            row.addWidget(QLabel('Shots:'))
-            self.rb_st_hdr = QRadioButton('From the headers')
-            self.rb_st_file = QRadioButton('From a file')
-            self.rb_st_geo = QRadioButton('At the geophones')
-            self.rb_st_geo.setToolTip('Each shot takes x, y and elevation of the receiver at its position '
-                                      '(shot positions from the headers or the manual geometry); a shot '
-                                      'beyond the spread is extrapolated from the end receivers')
-            self.grp_st = QButtonGroup(self)
-            for rb in (self.rb_st_hdr, self.rb_st_file, self.rb_st_geo):
-                self.grp_st.addButton(rb)
-                row.addWidget(rb)
-                rb.toggled.connect(self._topo_changed)
-            self.rb_st_hdr.setChecked(True)
-            row.addStretch(1)
-            v.addLayout(row)
-            self.w_stopo = TopoFileWidget('shot', on_change=self._geom_preview)
-            v.addWidget(self.w_stopo)
-            left.addWidget(g)
-            g = QGroupBox('3c. Write the geometry into the data files (optional)')
-            v = QVBoxLayout(g)
-            self.chk_hdrwrite = QCheckBox('Write shot and receiver coordinates, elevations and offsets '
-                                          'into the trace headers')
-            self.chk_hdrwrite.setToolTip('Done when you press Import. The original files are first copied '
-                                         'to original_headers_backup_<date>_<time> in the data folder. '
-                                         'Only header bytes change; the samples are not touched.')
-            v.addWidget(self.chk_hdrwrite)
-            lab = QLabel('Changes the original files. They are copied to a backup folder '
-                         '(original_headers_backup_<date>_<time>) in the data folder first.')
+            self.topo_panel = TopographyPanel(on_change=self._topo_changed, with_header_write=True)
+            v.addWidget(self.topo_panel)
+            lab = QLabel('The header-writing option changes the original files: they are copied to a backup '
+                         'folder (original_headers_backup_<date>_<time>) in the data folder first. A topography '
+                         'can also be applied later, from File > Topography… in the picker.')
             lab.setWordWrap(True)
             lab.setStyleSheet('color: #555;')
             v.addWidget(lab)
             left.addWidget(g)
+            tp = self.topo_panel                  # names kept from v17
+            self.chk_rtopo, self.w_rtopo, self.w_stopo = tp.chk_rtopo, tp.w_rtopo, tp.w_stopo
+            self.rb_st_hdr, self.rb_st_file, self.rb_st_geo = tp.rb_st_hdr, tp.rb_st_file, tp.rb_st_geo
+            self.chk_hdrwrite = tp.chk_hdrwrite
 
             # time
             g = QGroupBox('4. Time zero')
@@ -2014,17 +2346,18 @@ if _HAVE_QT:
             return self.file_fmt()
 
         def _topo_changed(self, *args):
-            if not hasattr(self, 'w_stopo'):
+            if not hasattr(self, 'topo_panel'):
                 return
-            self.w_rtopo.setVisible(self.chk_rtopo.isChecked())
-            self.w_stopo.setVisible(self.rb_st_file.isChecked())
             self._geom_preview()
 
         def topo_settings(self):
             """(recv TopoSpec or None, shot TopoSpec or None, shots_at_geophones)."""
-            rt = self.w_rtopo.spec() if self.chk_rtopo.isChecked() else None
-            st = self.w_stopo.spec() if self.rb_st_file.isChecked() else None
-            return rt, st, self.rb_st_geo.isChecked()
+            try:
+                return self.topo_panel.settings()
+            except ValueError:
+                rt = self.w_rtopo.spec() if self.chk_rtopo.isChecked() else None
+                st = self.w_stopo.spec() if self.rb_st_file.isChecked() else None
+                return rt, st, self.rb_st_geo.isChecked()
 
         def _dspin(self, lo, hi, val, dec):
             s = QDoubleSpinBox()
@@ -2260,6 +2593,15 @@ if _HAVE_QT:
             good = [r for r in self.records if r.ok]
             if not good:
                 return
+            try:                                  # v18: positions for station-table detection
+                g = self._geom_settings()
+                key = (len(good), g.mode, g.first_recv_pos, g.recv_spacing, g.first_shot_pos, g.shot_spacing)
+                if getattr(self, '_hint_key', None) != key:
+                    sv0 = import_survey(good, 'acceleration', geometry=g, load_existing_picks=False)
+                    self.topo_panel.set_hint(len(sv0.recv_pos), np.r_[sv0.recv_pos, sv0.shot_pos])
+                    self._hint_key = key
+            except Exception:
+                pass
             try:
                 sv = self._assemble(dry=True)
             except Exception as e:
@@ -2457,16 +2799,7 @@ if _HAVE_QT:
             self.sp_gap.setValue(g.gap_insert_index)
             self.chk_delay.setChecked(r.get('use_header_delay', True))
             (self.rb_fmt_su if r.get('file_format') == 'su' else self.rb_fmt_segy).setChecked(True)   # v17
-            self.chk_rtopo.setChecked(r.get('recv_topo') is not None)
-            if r.get('recv_topo') is not None:
-                self.w_rtopo.set_spec(r['recv_topo'])
-            if r.get('shot_topo') is not None:
-                self.rb_st_file.setChecked(True)
-                self.w_stopo.set_spec(r['shot_topo'])
-            elif r.get('shots_at_geophones'):
-                self.rb_st_geo.setChecked(True)
-            else:
-                self.rb_st_hdr.setChecked(True)
+            self.topo_panel.set_settings(r.get('recv_topo'), r.get('shot_topo'), r.get('shots_at_geophones'))
             if r.get('pkl'):
                 self.ed_out.setText(os.path.dirname(r['pkl']))
                 self.ed_pkl.setText(os.path.basename(r['pkl']))

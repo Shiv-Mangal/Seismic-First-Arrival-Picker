@@ -1,0 +1,11 @@
+numpy
+scipy
+pandas
+matplotlib
+PyQt5
+obspy
+segypy
+bruges
+openpyxl      # .xlsx topography files
+xlrd          # .xls topography files
+# optional: pygimli  (the export reads pyGIMLi files back with pyGIMLi when it is installed)

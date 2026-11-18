@@ -29,7 +29,8 @@ MANUAL_PDF = os.path.join(MANUAL_DIR, 'First_Arrival_Picker_User_Manual.pdf')
 
 SECTION_TITLES = {
     'workflow': 'Overview and workflow', 'starting': 'Installing and starting',
-    'import': 'Importing SEG-Y and SU data', 'canvas': 'The picking canvas', 'menus': 'Menus and toolbar',
+    'import': 'Importing SEG-Y and SU data',
+    'topography': 'Topography and the x origin', 'canvas': 'The picking canvas', 'menus': 'Menus and toolbar',
     'picking': 'Picking by hand', 'traces-axes-gain': 'Traces, axes and gain',
     'preprocessing': 'Preprocessing', 'filter': 'Filter designer', 'delete-picks': 'Deleting picks and undo',
     'autopick': 'Automatic picking', 'qc': 'Reciprocity and pick QC', 'geometry': 'Survey geometry',

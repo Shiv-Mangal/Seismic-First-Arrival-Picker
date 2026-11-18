@@ -262,6 +262,17 @@ def restore_deleted(final_picks_dict, record):
         final_picks_dict[key] = m[None, :, :]
 
 
+TOLERANCE_SHORT = (
+    '<b>Station match tolerance</b>: a shot and a receiver count as the same station when they are at most '
+    'this far apart. It decides which shot pairs are reciprocal (Δt, checkerboard, flags) and where the blue '
+    '× reciprocity-guider marks appear on the picker canvas. <i>Auto</i> (½ receiver spacing) pairs exact '
+    'stations only. Raise it to about one spacing to include a shot between receivers or just beyond the '
+    'spread (e.g. a shot at 0 m with the first receiver at 1 m); that pair\'s Δt then also contains the travel '
+    'time across the gap (1 m ≈ 1–3 ms at 300–1000 m/s). <i>True distance</i> measures along the line '
+    '(headers or topography) instead of the tape positions.')
+TOLERANCE_HELP = TOLERANCE_SHORT.replace('<b>', '').replace('</b>', '').replace('<i>', '').replace('</i>', '')
+
+
 def draw_abs_matrix(fig, ax, result, current_shot=None, cbar=None, compact=False):
     """|dt| checkerboard (shot x partner shot); returns the colour bar."""
     import matplotlib
@@ -292,6 +303,13 @@ def draw_abs_matrix(fig, ax, result, current_shot=None, cbar=None, compact=False
     ax.set_yticks(ticks)
     ax.set_xlabel('Partner shot no.')
     ax.set_ylabel('Shot no.')
+    # v18: shots with no receiver within the tolerance have no pairs at all: hatch them
+    off = result.shots.loc[result.shots['reason'].astype(str).str.contains('not on a receiver'), 'index'].values + 1
+    for c in off:
+        ax.add_patch(matplotlib.patches.Rectangle((0.5, c - 0.5), n, 1, fill=False, hatch='///',
+                                                  ec='#9e9e9e', lw=0))
+        ax.add_patch(matplotlib.patches.Rectangle((c - 0.5, 0.5), 1, n, fill=False, hatch='///',
+                                                  ec='#9e9e9e', lw=0))
     fl = result.flagged()['index'].values + 1
     if len(fl):
         ax.scatter(np.full(len(fl), 0.5), fl, marker='>', color='#c0392b', s=40 if not compact else 25,
@@ -309,7 +327,7 @@ try:
     from PyQt5.QtCore import Qt, QTimer
     from PyQt5.QtGui import QColor, QBrush
     from PyQt5.QtWidgets import (
-        QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton,
+        QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton, QComboBox,
         QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QWidget, QFileDialog,
         QApplication, QMessageBox, QAbstractItemView, QCheckBox, QSplitter, QShortcut)
     from PyQt5.QtGui import QKeySequence
@@ -357,8 +375,10 @@ if _HAVE_QT:
         """
 
         def __init__(self, get_inputs, on_open_shot=None, threshold_ms=2.0, parent=None,
-                     on_picks_changed=None):
+                     on_picks_changed=None, on_match_changed=None):
             super().__init__(parent)
+            self.on_match_changed = on_match_changed      # v18: callback(tol_m or None, 'tape'|'distance')
+            self._syncing = False
             self.setWindowTitle('Reciprocity and pick QC')
             self.on_picks_changed = on_picks_changed      # callback(set of shot indices)
             self._undo, self._redo = [], []
@@ -376,6 +396,7 @@ if _HAVE_QT:
             self.on_open_shot = on_open_shot
             self.result = None
             self._build(threshold_ms)
+            self._sync_match()
             screen = QApplication.primaryScreen()
             if screen is not None:
                 g = screen.availableGeometry()
@@ -413,11 +434,33 @@ if _HAVE_QT:
             b_ref = QPushButton('Refresh')
             b_ref.clicked.connect(self.refresh)
             top.addWidget(b_ref)
+            top.addSpacing(24)                                   # v18: station match tolerance
+            top.addWidget(QLabel('Station match tolerance'))
+            self.sp_tol = QDoubleSpinBox()
+            self.sp_tol.setRange(0.0, 100.0)
+            self.sp_tol.setDecimals(2)
+            self.sp_tol.setSingleStep(0.25)
+            self.sp_tol.setSuffix(' m')
+            self.sp_tol.setSpecialValueText('auto (½ spacing)')
+            self.sp_tol.setToolTip(TOLERANCE_HELP)
+            self.sp_tol.valueChanged.connect(lambda *_: self._match_changed())
+            top.addWidget(self.sp_tol)
+            self.cb_match = QComboBox()
+            self.cb_match.addItem('on tape positions', 'tape')
+            self.cb_match.addItem('on true distance along the line', 'distance')
+            self.cb_match.setToolTip(TOLERANCE_HELP)
+            self.cb_match.currentIndexChanged.connect(lambda *_: self._match_changed())
+            top.addWidget(self.cb_match)
             top.addStretch(1)
             b_exp = QPushButton('Export CSV…')
             b_exp.clicked.connect(self._export)
             top.addWidget(b_exp)
             lay.addLayout(top)
+            self.lbl_tol = QLabel(TOLERANCE_SHORT)
+            self.lbl_tol.setWordWrap(True)
+            self.lbl_tol.setTextFormat(Qt.RichText)
+            self.lbl_tol.setStyleSheet('QLabel { color: #555; }')
+            lay.addWidget(self.lbl_tol)
             self._thr_timer = QTimer(self)
             self._thr_timer.setSingleShot(True)
             self._thr_timer.setInterval(200)
@@ -682,7 +725,11 @@ if _HAVE_QT:
                 return
             self._ccbar = draw_abs_matrix(self.fig_c, self.ax_c, self.result, self.current_shot,
                                           self._ccbar, compact=True)
-            self.ax_c.set_title(f'black line on colour bar = {self.result.threshold_ms:g} ms',
+            off = self.result.shots.loc[self.result.shots['reason'].astype(str).str.contains('not on a receiver'),
+                                        'shot_no'].values
+            extra = (f'\nhatched: shot {", ".join(str(int(v)) for v in off)} has no receiver within '
+                     f'{self.result.summary["tol"]:g} m (no pairs)' if len(off) else '')
+            self.ax_c.set_title(f'black line on colour bar = {self.result.threshold_ms:g} ms{extra}',
                                 fontsize='small')
             self.canvas_c.draw_idle()
 
@@ -826,6 +873,26 @@ if _HAVE_QT:
                 self.on_open_shot(a)
 
         # ---------------- refresh ----------------
+        def _sync_match(self):
+            """Show the picker's current tolerance setting."""
+            try:
+                m = self.get_inputs().get('match') or {}
+            except Exception:
+                m = {}
+            self._syncing = True
+            self.sp_tol.setValue(m.get('tol_m') or 0.0)
+            self.cb_match.setCurrentIndex(max(0, self.cb_match.findData(m.get('domain', 'tape'))))
+            self.cb_match.setEnabled(bool(m.get('distance_available', True)))
+            self._syncing = False
+
+        def _match_changed(self):
+            if self._syncing:
+                return
+            tol = self.sp_tol.value() or None
+            if self.on_match_changed is not None:
+                self.on_match_changed(tol, self.cb_match.currentData())
+            self.refresh()
+
         def live_refresh(self):
             """Called by the picker whenever picks change."""
             if self._editing:
@@ -840,7 +907,8 @@ if _HAVE_QT:
                 self.current_shot = inp.get('current_shot')
                 self.result = compute_reciprocity(inp['final_picks_dict'], inp['shot_x'],
                                                   inp['recv_x'], inp['dt_pick'],
-                                                  threshold_ms=self.sp_thr.value())
+                                                  threshold_ms=self.sp_thr.value(),
+                                                  tol=inp.get('tol'))
             except Exception as e:
                 self.lbl_summary.setText(f'<span style="color:#c0392b;"><b>Error:</b> {e}</span>')
                 return

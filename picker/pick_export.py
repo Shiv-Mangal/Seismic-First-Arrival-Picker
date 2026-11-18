@@ -60,7 +60,10 @@ class ExportSettings:
     index_origin: str = 'first_station'  # 'first_station' (shot or receiver) or 'first_receiver'
     shot_location: str = 'station'       # 'station' (shot at the geophone of its position) or 'surveyed'
     merge_tol_m: float = 0.1             # surveyed shots closer than this to a sensor share it
-    x_origin: str = 'geometry'           # 'geometry', 'min_zero', 'first_receiver_zero'
+    x_origin: str = 'tape'               # v18 'tape' (x = 0 at tape position 0 m), 'geometry',
+                                         # 'min_zero', 'first_receiver_zero'
+    write_topo: bool = True              # v18: also write <name>_topo.txt (x elevation of every sensor)
+    write_line_ends: bool = True         # v18: also write <name>_line_ends.txt (SoL / EoL map coordinates)
     skip_zero_offset: bool = True        # drop picks where shot = geophone
     shots: str = ''                      # '' = all, else e.g. '1-5, 9'
     pg_sensor_cols: str = 'xy'           # 'xy' (x, elevation) or 'xyz' (x, elevation, 0)
@@ -89,6 +92,8 @@ class ExportGeometry:
     shot_z: object
     pick_dt_s: float        # seconds per pick sample
     line: str = 'survey'
+    recv_xy: object = None  # v18: map coordinates (easting, northing) of the receivers, or None
+    shot_xy: object = None
 
     @property
     def n_shots(self):
@@ -114,9 +119,37 @@ def geometry_from_survey(survey, recv_pos=None, shot_pos=None, pick_dt_s=None, r
     if len(sx) != len(sp):
         sx = sp.copy()
         sz = np.zeros(len(sp))
+    rt = getattr(survey, 'recv_topo', None)
+    is_map = bool(getattr(survey, 'has_coords', False)) and not (rt is not None and not rt.y_col)
+    rxy = np.asarray(survey.recv_xy, float) if is_map and len(np.asarray(survey.recv_xy)) == len(rp) else None
+    sxy = np.asarray(survey.shot_xy, float) if rxy is not None and len(np.asarray(survey.shot_xy)) == len(sp) else None
+    if rxy is not None and not np.all(np.isfinite(rxy)):
+        rxy = sxy = None
     return ExportGeometry(recv_pos=rp, shot_pos=sp, recv_x=rx, recv_z=rz, shot_x=sx, shot_z=sz,
                           pick_dt_s=float(pick_dt_s if pick_dt_s else survey.dt / resample),
-                          line=getattr(survey, 'line', 'survey'))
+                          line=getattr(survey, 'line', 'survey'), recv_xy=rxy, shot_xy=sxy)
+
+
+def tape_origin_x(recv_pos, recv_x, shot_pos=(), shot_x=()):
+    """v18: the x (along the line) of tape position 0 m.
+    Field convention: picker positions are tape metres (shots at 0, 10, 20 ... m; receivers
+    from 1 m). The station AT 0 m defines x = 0: a shot or receiver there gives its own x;
+    otherwise x(0) is extrapolated linearly from the two nearest receivers."""
+    rp, rx = np.asarray(recv_pos, float), np.asarray(recv_x, float)
+    sp, sx = np.asarray(shot_pos, float), np.asarray(shot_x, float)
+    step = float(np.median(np.diff(np.sort(rp)))) if len(rp) > 1 else 1.0
+    tol = 0.01 * step
+    k = np.where(np.abs(rp) <= tol)[0]
+    if len(k):
+        return float(rx[k[0]])
+    k = np.where(np.abs(sp) <= tol)[0] if len(sp) else []
+    if len(k) and np.isfinite(sx[k[0]]):
+        return float(sx[k[0]])
+    if len(rp) < 2:
+        return float(rx[0] - rp[0]) if len(rp) else 0.0
+    o = np.argsort(np.abs(rp))[:2]
+    (p1, p2), (x1, x2) = rp[o], rx[o]
+    return float(x1 + (0.0 - p1) * (x2 - x1) / (p2 - p1))
 
 
 # =====================================================================
@@ -273,6 +306,8 @@ def sensor_table(geom, settings):
 
 
 def _x_shift(geom, settings, xs_all):
+    if settings.x_origin == 'tape':
+        return -tape_origin_x(geom.recv_pos, geom.recv_x, geom.shot_pos, geom.shot_x)
     if settings.x_origin == 'min_zero':
         return -float(np.min(xs_all))
     if settings.x_origin == 'first_receiver_zero':
@@ -291,7 +326,9 @@ class ExportResult:
     n_sensors: int = 0
     notes: list = field(default_factory=list)
     table: object = None            # (n_data, k) float array of the data rows
-    sensors: object = None          # (n_sensors, 2) x, elevation (pyGIMLi)
+    sensors: object = None          # (n_sensors, 2) x, elevation (formats 2-3)
+    x_shift: float = 0.0            # added to the geometry x (origin choice)
+    extra_files: list = field(default_factory=list)   # v18: companion files written
 
     def text(self, line_ending='lf'):
         nl = '\r\n' if line_ending == 'crlf' else '\n'
@@ -319,14 +356,16 @@ def build_export(final_picks_dict, geom, settings):
     notes = list(notes)
     if len(S) == 0:
         raise ValueError('No picks to export' + (' for these shots.' if st.shots.strip() else '.'))
-    neg = T < 0
+    neg = T <= 0                       # (pyGIMLi needs t > 0; as in convertPicks2Gimli)
     if np.any(neg):
-        notes.append(f'{int(np.sum(neg))} pick(s) before time zero were left out (check the time shift).')
+        notes.append(f'{int(np.sum(neg))} pick(s) at or before time zero were left out (check the time shift).')
         S, R, T = S[~neg], R[~neg], T[~neg]
     dl = st.delimiter
     tdec = int(st.t_decimals)
     xdec = int(st.x_decimals)
     lines = []
+    xs = zs = None
+    shift = 0.0
 
     if st.fmt == 'index':
         rn, sn, n2 = station_numbers(geom, st)
@@ -368,11 +407,13 @@ def build_export(final_picks_dict, geom, settings):
             notes.append(f'{dup} repeated shot-geophone pair(s) (repeat shots at one station).')
         table = np.column_stack([s_val, g_val, t_out])
         return ExportResult(lines=lines, n_data=len(S), n_shots=len(set(S.tolist())), notes=notes,
-                            table=table)
+                            table=table, sensors=None if xs is None else np.column_stack([xs, zs]),
+                            x_shift=shift)
 
     # ----- pyGIMLi -----
     n_sens = len(xs)
-    L = float(np.ptp(xs)) or 1.0
+    _sx = xs[np.unique(ssen[S])]                      # line length = first to last exported shot,
+    L = float(np.ptp(_sx)) or float(np.ptp(xs)) or 1.0   # as in convertPicks2Gimli
     off = np.abs(xs[(ssen[S])] - xs[(rsen[R])])
     lines.append(f'{n_sens} # shot/geophone points')
     lines.append('#x y' if st.pg_sensor_cols == 'xy' else '#x y z')
@@ -401,11 +442,12 @@ def build_export(final_picks_dict, geom, settings):
         lines.append('0')
     if st.pg_err:
         tab.append(err)
-        notes.append(f'err = {st.err_abs_ms:g} ms + {st.err_offset_ms:g} ms x offset / {L:.2f} m'
+        notes.append(f'err = {st.err_abs_ms:g} ms + {st.err_offset_ms:g} ms x offset / {L:.2f} m (shot span)'
                      + (f' + {st.err_rel_pct:g} % of t' if st.err_rel_pct else '')
                      + f'  ({err.min() * 1e3:.2f}-{err.max() * 1e3:.2f} ms).')
     return ExportResult(lines=lines, n_data=len(S), n_shots=len(set(S.tolist())), n_sensors=n_sens,
-                        notes=notes, table=np.column_stack(tab), sensors=np.column_stack([xs, zs]))
+                        notes=notes, table=np.column_stack(tab), sensors=np.column_stack([xs, zs]),
+                        x_shift=shift)
 
 
 def write_export(final_picks_dict, geom, settings, path=None):
@@ -424,7 +466,41 @@ def write_export(final_picks_dict, geom, settings, path=None):
     with open(tmp, 'w', newline='') as f:
         f.write(res.text(settings.line_ending))
     os.replace(tmp, path)
+    nl = '\r\n' if settings.line_ending == 'crlf' else '\n'
+    stem = os.path.splitext(path)[0]
+    if settings.write_topo and res.sensors is not None:
+        tp = stem + '_topo.txt'
+        with open(tp, 'w', newline='') as f:
+            for x, z in res.sensors:
+                f.write(f'{_fmt_num(x, 6)} {_fmt_num(z, 6)}{nl}')
+        res.extra_files.append(tp)
+    if settings.write_line_ends and res.sensors is not None:
+        le = line_ends(geom, res.x_shift, float(np.max(res.sensors[:, 0])))
+        if le is not None:
+            lp = stem + '_line_ends.txt'
+            (e0, n0), (e1, n1) = le
+            with open(lp, 'w', newline='') as f:
+                f.write(f'# Start (SoL, x = 0) and end (EoL) of the line in map coordinates{nl}')
+                f.write(f'# for spatiallyLocateVTKFile(vtk, SoL, EoL): E, N = SoL + x * unit(EoL - SoL){nl}')
+                f.write(f'SoL {e0:.2f} {n0:.2f}{nl}EoL {e1:.2f} {n1:.2f}{nl}')
+            res.extra_files.append(lp)
     return path, res
+
+
+def line_ends(geom, x_shift, x_end):
+    """v18: map coordinates of x = 0 (SoL) and x = x_end (EoL) on the straight line
+    through the receivers, for placing the inversion results (VTK) on the map. None
+    without map coordinates."""
+    if geom.recv_xy is None or len(geom.recv_xy) < 2:
+        return None
+    xy = np.asarray(geom.recv_xy, float)
+    x = np.asarray(geom.recv_x, float) + x_shift
+    c = xy.mean(axis=0)
+    u = np.linalg.svd(xy - c)[2][0]
+    if np.dot(xy[np.argmax(x)] - xy[np.argmin(x)], u) < 0:
+        u = -u
+    sol = np.mean(xy - np.outer(x, u), axis=0)
+    return (float(sol[0]), float(sol[1])), (float(sol[0] + u[0] * x_end), float(sol[1] + u[1] * x_end))
 
 
 # =====================================================================
@@ -566,6 +642,16 @@ if _HAVE_QT:
             self.cb_nl.addItem('Unix / macOS (LF)', 'lf')
             self.cb_nl.currentIndexChanged.connect(self._changed)
             f.addRow('Line endings', self.cb_nl)
+            self.chk_topo = QCheckBox('Also write <name>_topo.txt  (x elevation of every sensor)')
+            self.chk_topo.setToolTip('The topography file of the inversion script: one row per shot/geophone '
+                                     'position, x along the line and elevation, same x as the export')
+            self.chk_topo.toggled.connect(self._changed)
+            f.addRow(self.chk_topo)
+            self.chk_ends = QCheckBox('Also write <name>_line_ends.txt  (SoL / EoL map coordinates)')
+            self.chk_ends.setToolTip('Map coordinates of x = 0 and of the end of the line, for placing the '
+                                     'inversion results on the map (needs map coordinates)')
+            self.chk_ends.toggled.connect(self._changed)
+            f.addRow(self.chk_ends)
             lv.addWidget(g)
 
             g = QGroupBox('3. Columns')
@@ -629,6 +715,7 @@ if _HAVE_QT:
             self.lab_tol = QLabel('… share a geophone row within')
             f.addRow(self.lab_tol, self.sp_tol)
             self.cb_xorig = QComboBox()
+            self.cb_xorig.addItem('Tape origin: x = 0 at position 0 m (the first shot)', 'tape')
             self.cb_xorig.addItem('As in the geometry (first receiver = 0 from headers)', 'geometry')
             self.cb_xorig.addItem('Shift so the smallest x is 0', 'min_zero')
             self.cb_xorig.addItem('Shift so the first receiver is at 0', 'first_receiver_zero')
@@ -780,6 +867,8 @@ if _HAVE_QT:
             self.chk_zero.setChecked(st.pg_trailing_zero)
             self.ed_shots.setText(st.shots)
             self.chk_skip0.setChecked(st.skip_zero_offset)
+            self.chk_topo.setChecked(st.write_topo)
+            self.chk_ends.setChecked(st.write_line_ends)
             if st.path:
                 self.ed_path.setText(st.path)
             else:
@@ -805,7 +894,8 @@ if _HAVE_QT:
                 pg_err=self.chk_err.isChecked(), err_abs_ms=self.sp_eabs.value(),
                 err_offset_ms=self.sp_eoff.value(), err_rel_pct=self.sp_erel.value(),
                 pg_valid=self.chk_valid.isChecked(), pg_trailing_zero=self.chk_zero.isChecked(),
-                line_ending=self.cb_nl.currentData())
+                line_ending=self.cb_nl.currentData(), write_topo=self.chk_topo.isChecked(),
+                write_line_ends=self.chk_ends.isChecked())
 
         # ---------- reactions ----------
         def _fill_ext(self, fmt):
@@ -873,6 +963,9 @@ if _HAVE_QT:
             for w in (self.cb_shotloc, self.lab_shotloc, self.cb_xorig, self.lab_xorig, self.sp_xdec,
                       self.lab_xdec):
                 w.setVisible(not idx)
+            self.chk_topo.setVisible(not idx)
+            self.chk_ends.setVisible(not idx)
+            self.chk_ends.setEnabled(self.geom.recv_xy is not None)
             show_tol = (not idx) and st.shot_location == 'surveyed'
             self.sp_tol.setVisible(show_tol)
             self.lab_tol.setVisible(show_tol)
@@ -913,7 +1006,8 @@ if _HAVE_QT:
                 return
             LAST_SETTINGS = st.copy(path='')
             self.written = (path, res)
-            self.lbl_status.setText(f'<b>Saved</b> {path}<br>{msg}')
+            more = ''.join(f'<br>also {os.path.basename(x)}' for x in res.extra_files)
+            self.lbl_status.setText(f'<b>Saved</b> {path}{more}<br>{msg}')
             self.lbl_status.setTextFormat(Qt.RichText)
             print(f'Exported {res.n_data} picks ({st.fmt}) to {path}. {msg}')
 

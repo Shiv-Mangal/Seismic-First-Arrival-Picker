@@ -917,7 +917,8 @@ norm_data_resamp.shape
 #     segypy.wiggle(filtered_data_resamp[i,:2500,:], gain = 10)
 
 #%% Realtime Reciprocity Guider Function
-def realtime_reciprocity_guider(final_picks_dict, shot_pos, shot_no, recv_pos, ax, tol=1):
+def realtime_reciprocity_guider(final_picks_dict, shot_pos, shot_no, recv_pos, ax, tol=None,
+                                marker_x=None):
     """
     Finds reciprocity indicators for the current shot using offset-domain positions with tolerance.
 
@@ -932,7 +933,13 @@ def realtime_reciprocity_guider(final_picks_dict, shot_pos, shot_no, recv_pos, a
     Returns:
       NumPy array of reciprocity indicators or None.
     """
-    # Current shot position
+    # v18: tol = the station match tolerance of the QC window (picker positions; None =
+    # half the receiver spacing); the NEAREST pick within it is used (v17 took the first
+    # pick within 1 m, often the neighbouring receiver).
+    if tol is None:
+        _rp = np.sort(np.asarray(recv_pos, float))
+        tol = 0.5 * float(np.median(np.diff(_rp))) if len(_rp) > 1 else 0.5
+    marker_x = shot_pos if marker_x is None else marker_x
     current_shot_x = shot_pos[shot_no]
 
     # Collect all shot indices that have picks
@@ -953,13 +960,14 @@ def realtime_reciprocity_guider(final_picks_dict, shot_pos, shot_no, recv_pos, a
         # picks shape: (1, n_picks, 2) -> columns: [receiver_x, time]
         recv_x = picks[0, :, 0]
 
-        # Find if any receiver position matches current shot position within tolerance
-        matches = np.isclose(recv_x, current_shot_x, atol=tol)
-        if np.any(matches):
-            idx_match = np.where(matches)[0][0]   # take the first match
+        if shot_idx >= len(shot_pos) or len(recv_x) == 0:
+            continue
+        d = np.abs(recv_x - current_shot_x)
+        idx_match = int(np.argmin(d))
+        if d[idx_match] <= tol + 1e-9:
             time_stamp = picks[0, idx_match, 1]
             # Store the shot position (source) and the reciprocal time
-            reciprocity_indicators.append([shot_pos[shot_idx], time_stamp])
+            reciprocity_indicators.append([marker_x[shot_idx], time_stamp])
         # else: optionally ignore
 
     reciprocity_indicators = np.array(reciprocity_indicators) if reciprocity_indicators else np.array([])
@@ -1440,7 +1448,7 @@ class InputDialog(QDialog):
 def _domain_map():
     """(DomainMap or None, reason) for the current receivers."""
     try:
-        dist = np.asarray(SURVEY.recv_dist, float)
+        dist = np.asarray(SURVEY.recv_dist, float) + _tape_shift()     # v18: x = 0 at tape 0 m
     except Exception:
         dist = None
     key = (id(SURVEY), len(recv_pos), None if dist is None else float(np.nansum(dist)),
@@ -1453,6 +1461,15 @@ def _domain_map():
         except Exception as e:
             _DOMAIN_CACHE.update(key=key, map=None, err=str(e))
     return _DOMAIN_CACHE['map'], _DOMAIN_CACHE['err']
+
+
+def _tape_shift():
+    """v18: added to the geometry distances so that x = 0 at tape position 0 m (where the
+    first shot is fired); the same origin as the export's default."""
+    try:
+        return -pex.tape_origin_x(recv_pos, SURVEY.recv_dist, shot_pos, SURVEY.shot_dist)
+    except Exception:
+        return 0.0
 
 
 def _apply_x_domain(ax_):
@@ -1494,7 +1511,7 @@ def toggle_x_domain():
 
 def _shot_x_text(i):
     try:
-        return f' (x = {float(SURVEY.shot_dist[i]):.2f} m)'
+        return f' (x = {float(SURVEY.shot_dist[i]) + _tape_shift():.2f} m)'
     except Exception:
         return ''
 
@@ -1646,7 +1663,9 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
             # ----- Plot picks and reciprocity guider (always visible) -----
             plot_shot_data(shot_no, clicked_points, final_clicked_points, final_picks_dict, ax, shot_pos)
             if reciprocity_guider_enabled[0] and final_picks_dict and len(final_picks_dict) > 1:
-                realtime_reciprocity_guider(final_picks_dict, shot_pos, shot_no, recv_pos, ax)
+                _gsx, _gtol = _recip_match_geometry()
+                realtime_reciprocity_guider(final_picks_dict, _gsx, shot_no, recv_pos, ax, tol=_gtol,
+                                            marker_x=shot_pos)
 
             # ----- Record what was just added so we can clear it next rebuild -----
             overlay_artists = (
@@ -2229,14 +2248,48 @@ def apply_new_filter(params):
 # ---------------------------------------------------------------------
 # Reciprocity QC window <-> picker
 # ---------------------------------------------------------------------
+RECIPROCITY_MATCH = {'tol_m': None, 'domain': 'tape'}   # v18: QC window + canvas guider
+
+
+def _recip_match_geometry():
+    """(shot positions for matching, tolerance in picker positions) from RECIPROCITY_MATCH.
+    'tape': the shots' picker positions, tolerance in tape metres. 'distance': each shot's
+    true distance along the line mapped onto the picker positions, tolerance converted."""
+    rp = np.sort(np.asarray(recv_pos, float))
+    step = float(np.median(np.diff(rp))) if len(rp) > 1 else 1.0
+    sx = np.asarray(shot_pos, float)
+    ratio = 1.0
+    if RECIPROCITY_MATCH['domain'] == 'distance':
+        dm, _err = _domain_map()
+        if dm is not None:
+            sx = np.asarray(dm.inverse(np.asarray(SURVEY.shot_dist, float) + _tape_shift()), float)
+            ratio = abs(dm.ratio) or 1.0
+    tol_m = RECIPROCITY_MATCH['tol_m']
+    tol = 0.5 * step if not tol_m else float(tol_m) / ratio
+    return sx, tol
+
+
+def set_reciprocity_match(tol_m=None, domain='tape'):
+    """QC window: new station match tolerance (m; None = auto) and domain; redraws the guider."""
+    RECIPROCITY_MATCH['tol_m'] = tol_m
+    RECIPROCITY_MATCH['domain'] = domain if domain in ('tape', 'distance') else 'tape'
+    if fig is not None and shot_no is not None and plt.fignum_exists(fig.number):
+        # redraw after the spin-box signal returns (the guider marks follow the tolerance)
+        QTimer.singleShot(0, lambda: update_plot_with_picks()
+                          if fig is not None and plt.fignum_exists(fig.number) else None)
+
+
 def _reciprocity_inputs():
     """Latest picks and geometry for the reciprocity window (called on every refresh)."""
     factor = norm_data_resamp.shape[1] // norm_data.shape[1]    # 10 -> picks in 0.1 ms samples
+    sx, tol = _recip_match_geometry()
     return dict(final_picks_dict=final_picks_dict,
-                shot_x=shot_pos,             # shot positions, by shot index
+                shot_x=sx,                   # shot positions (for matching), by shot index
                 recv_x=recv_pos,             # receiver positions (pick x values)
                 dt_pick=1.0 / (fs * factor),
-                current_shot=shot_no)
+                current_shot=shot_no,
+                tol=tol,
+                match=dict(RECIPROCITY_MATCH, distance_available=_domain_map()[0] is not None))
 
 
 def open_reciprocity_window():
@@ -2246,7 +2299,8 @@ def open_reciprocity_window():
         recip_window = rcq.ReciprocityWindow(_reciprocity_inputs,
                                              on_open_shot=open_shot_from_reciprocity,
                                              threshold_ms=RECIPROCITY_THRESHOLD_MS,
-                                             on_picks_changed=picks_changed_from_qc)
+                                             on_picks_changed=picks_changed_from_qc,
+                                             on_match_changed=set_reciprocity_match)
         _with_help(recip_window, 'qc')
     else:
         recip_window.refresh()
@@ -2583,6 +2637,58 @@ def open_geometry_window():
         on_open_shot=lambda i: QTimer.singleShot(0, lambda: go_to_shot(i, ' from the geometry window')))
     _with_help(geometry_window, 'geometry')
     geometry_window.show()
+
+
+def open_topography_ui():
+    """v18: File > Topography… -- apply a topography table (or shots at geophones) to the
+    imported survey at any time. Picks and picker positions never change."""
+    if 'SURVEY' not in globals() or SURVEY is None:
+        QMessageBox.information(None, 'Topography', 'Import data first (File > Import).')
+        return None
+
+    def _apply(rt, st, ag, write_hdr):
+        global geometry_window
+        notes = dimp.apply_topography(SURVEY, rt, st, ag)
+        if write_hdr:
+            folder = os.path.dirname(os.path.abspath(SURVEY.files[0]))
+            if QMessageBox.question(None, 'Write geometry into the headers',
+                                    f'Write the geometry into the trace headers of {len(SURVEY.files)} file(s) '
+                                    f'in\n{folder}?\n\nThey are copied to original_headers_backup_<date>_<time> '
+                                    f'there first.') == QMessageBox.Yes:
+                dest, _rep = dimp.gio.write_survey_headers(SURVEY)
+                notes.append(f'Geometry written into the trace headers; originals backed up in {dest}.')
+        try:
+            SURVEY.save_record()                       # repeat imports keep the topography
+        except Exception as e:
+            print(f'Import record not updated: {e}')
+        _DOMAIN_CACHE.clear()
+        print('Topography:', ' | '.join(notes))
+        if geometry_window is not None:                # redraw with the new geometry (same SURVEY)
+            try:
+                geometry_window._fill_summary()
+                geometry_window.update_state(shot_no, _picked_shot_indices())
+            except RuntimeError:                       # window was deleted
+                geometry_window = None
+        if fig is not None and shot_no is not None and plt.fignum_exists(fig.number):
+            update_plot_with_picks()
+        try:
+            if recip_window is not None and recip_window.isVisible():
+                recip_window.refresh()
+        except RuntimeError:
+            pass
+        return notes
+
+    parent = None
+    try:
+        parent = fig.canvas.manager.window if fig is not None and plt.fignum_exists(fig.number) else None
+    except Exception:
+        pass
+    dlg = dimp.TopographyDialog(SURVEY, _apply, parent=parent)
+    _with_help(dlg, 'topography')
+    dlg.exec_()
+    applied = dlg.applied
+    dlg.deleteLater()
+    return applied
 
 
 def refresh_geometry_window():
@@ -3219,6 +3325,8 @@ def install_app_menus(fig):
     m_file.addAction('Repeat an import (import record .json)...', import_from_record)
     m_file.addSeparator()
     m_file.addAction('Save picks  (s)', _run_from_menu(_save_picks_menu))
+    a = m_file.addAction('Topography (apply a topography file)...', open_topography_ui)   # v18
+    a.setShortcut(QKeySequence('Ctrl+T'))
     a = m_file.addAction('Export picks for inversion (SGT / pyGIMLi)...', open_export_ui)    # v17
     a.setShortcut(QKeySequence('Ctrl+E'))
     m_file.addAction('Save canvas image...', save_canvas_image)
@@ -3227,6 +3335,7 @@ def install_app_menus(fig):
 
     m_data = mb.addMenu('&Data')
     m_data.addAction('Survey geometry / topography...', open_geometry_window)
+    m_data.addAction('Apply a topography file...  (Ctrl+T)', open_topography_ui)      # v18
     m_data.addSeparator()
     m_data.addAction('Preprocessing (integration, time shift, trace kills)...',
                      _run_from_menu(open_preprocessing_ui))
@@ -3313,6 +3422,7 @@ def install_app_menus(fig):
     for title, func in (('Import SEG-Y / SU data...', import_new_data),
                         ('Export picks for inversion (SGT / pyGIMLi)...', open_export_ui),
                         ('Survey geometry / topography...', open_geometry_window),
+                        ('Apply a topography file...', open_topography_ui),
                         ('Preprocessing...', _run_from_menu(open_preprocessing_ui)),
                         ('Filter designer...', _run_from_menu(open_filter_designer_ui)),
                         ('Reciprocity and pick QC...', open_reciprocity_window),
