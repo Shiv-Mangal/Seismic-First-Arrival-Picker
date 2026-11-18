@@ -36,7 +36,15 @@ from dataclasses import dataclass, field, asdict
 
 import numpy as np
 
+import geometry_io as gio                  # v17: external topography, header writing
+
 SEGY_EXTENSIONS = ('.segy', '.sgy')
+SU_EXTENSIONS = ('.su',)
+FILE_FORMATS = ('segy', 'su')              # v17: SEG-Y (.segy/.sgy) or Seismic Unix (.su)
+
+
+def extensions_for(fmt='segy'):
+    return SU_EXTENSIONS if fmt == 'su' else SEGY_EXTENSIONS
 QUANTITIES = ('acceleration', 'velocity', 'displacement')
 IMPORT_RECORD_VERSION = 1
 
@@ -49,13 +57,15 @@ def natural_sort_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', str(s))]
 
 
-def is_segy(path):
-    return os.path.isfile(path) and path.lower().endswith(SEGY_EXTENSIONS)
+def is_segy(path, fmt=None):
+    exts = SEGY_EXTENSIONS + SU_EXTENSIONS if fmt is None else extensions_for(fmt)
+    return os.path.isfile(path) and path.lower().endswith(exts)
 
 
-def find_segy_files(folder, recursive=False, pattern='*'):
-    """All .segy / .sgy files in `folder` whose name matches `pattern`
-    (shell wildcards, case-insensitive), in natural order."""
+def find_segy_files(folder, recursive=False, pattern='*', fmt='segy'):
+    """All .segy / .sgy files (fmt='segy') or .su files (fmt='su') in `folder`
+    whose name matches `pattern` (shell wildcards, case-insensitive), in natural order."""
+    exts = extensions_for(fmt)
     pattern = (pattern or '*').strip() or '*'
     found = []
     if not folder or not os.path.isdir(folder):
@@ -64,7 +74,7 @@ def find_segy_files(folder, recursive=False, pattern='*'):
     for root, _dirs, names in walker:
         for n in names:
             full = os.path.join(root, n)
-            if n.lower().endswith(SEGY_EXTENSIONS) and fnmatch.fnmatch(n.lower(), pattern.lower()) \
+            if n.lower().endswith(exts) and fnmatch.fnmatch(n.lower(), pattern.lower()) \
                     and os.path.isfile(full):
                 found.append(os.path.normpath(full))
     found.sort(key=natural_sort_key)
@@ -181,6 +191,7 @@ class ShotRecord:
     elev_scalar: int = 0
     textual: str = ''
     quantity_hint: str = None
+    file_format: str = 'segy'      # v17: 'segy' or 'su'
     spec_f: object = None          # Hz (v11: amplitude spectrum of the shot)
     spec_a: object = None          # mean amplitude spectrum over live traces
     read_s: float = 0.0
@@ -519,13 +530,27 @@ def draw_spectra(ax_s, ax_b, f, spectra, labels, highlight=(), db=True, logf=Fal
     return spectrum_peak_hint(f, raw_avg) if view.mode == 'raw' and not view.exclude else ''
 
 
-def read_shot(path):
-    """Read one SEG-Y shot gather with ObsPy. Never raises: errors go to .error."""
+def file_format(path, fmt='auto'):
+    """'segy' or 'su' (v17): explicit choice, else by extension (.su = Seismic Unix)."""
+    if fmt in FILE_FORMATS:
+        return fmt
+    return 'su' if str(path).lower().endswith(SU_EXTENSIONS) else 'segy'
+
+
+def read_shot(path, fmt='auto'):
+    """Read one SEG-Y (.segy/.sgy) or Seismic Unix (.su) shot gather with ObsPy.
+    fmt: 'auto' (by extension), 'segy' or 'su'. Never raises: errors go to .error."""
     rec = ShotRecord(path=os.path.normpath(path), name=os.path.basename(path))
     t0 = time.time()
     try:
-        from obspy.io.segy.core import _read_segy
-        st = _read_segy(path)
+        kind = file_format(path, fmt)
+        rec.file_format = kind
+        if kind == 'su':
+            from obspy.io.segy.core import _read_su
+            st = _read_su(path)
+        else:
+            from obspy.io.segy.core import _read_segy
+            st = _read_segy(path)
         if len(st.traces) == 0:
             raise ValueError('no traces in file')
         lens = {len(tr.data) for tr in st.traces}
@@ -533,15 +558,17 @@ def read_shot(path):
         data = np.zeros((ns, len(st.traces)), dtype=np.float64)
         for j, tr in enumerate(st.traces):
             data[:len(tr.data), j] = tr.data
-        th0 = st.traces[0].stats.segy.trace_header
-        bh = st.stats.binary_file_header
+        _hk = 'su' if kind == 'su' else 'segy'
+        th0 = getattr(st.traces[0].stats, _hk).trace_header
+        _sst = getattr(st, 'stats', None)                        # SU streams have no file headers
+        bh = getattr(_sst, 'binary_file_header', None)
         us = int(getattr(th0, 'sample_interval_in_ms_for_this_trace', 0) or 0)
-        if us <= 0:
+        if us <= 0 and bh is not None:
             us = int(getattr(bh, 'sample_interval_in_microseconds', 0) or 0)
         dt = us * 1e-6 if us > 0 else float(st.traces[0].stats.delta)
         cs = int(getattr(th0, 'scalar_to_be_applied_to_all_coordinates', 0) or 0)
         es = int(getattr(th0, 'scalar_to_be_applied_to_all_elevations_and_depths', 0) or 0)
-        H = [tr.stats.segy.trace_header for tr in st.traces]
+        H = [getattr(tr.stats, _hk).trace_header for tr in st.traces]
         gx = _apply_scalar([h.group_coordinate_x for h in H], cs)
         gy = _apply_scalar([h.group_coordinate_y for h in H], cs)
         ge = _apply_scalar([h.receiver_group_elevation for h in H], es)
@@ -553,7 +580,7 @@ def read_shot(path):
         rec.gx, rec.gy, rec.gelev = gx, gy, ge
         rec.ffid = int(getattr(th0, 'original_field_record_number', 0) or 0)
         rec.coord_scalar, rec.elev_scalar = cs, es
-        rec.textual = _decode_textual(getattr(st.stats, 'textual_file_header', b''))
+        rec.textual = _decode_textual(getattr(_sst, 'textual_file_header', b'') or b'')
         rec.quantity_hint = guess_quantity(rec.textual)
         if len(lens) > 1:
             rec.error = f'traces have different lengths {sorted(lens)}; short ones zero-padded'
@@ -668,6 +695,11 @@ class Survey:
     warnings: list = field(default_factory=list)
     placement: dict = field(default_factory=dict)   # shot index -> master column of each trace
     imported: str = ''
+    file_format: str = 'segy'        # v17: 'segy' or 'su'
+    recv_topo: object = None         # v17: TopoSpec of an external receiver topography (or None)
+    shot_topo: object = None         # v17: TopoSpec of an external shot topography (or None)
+    shots_at_geophones: bool = False # v17: shot x/y/elevation taken from the receiver at its position
+    geometry_source: str = 'headers' # v17: where the coordinates came from (for the summary)
 
     @property
     def n_shots(self):
@@ -717,6 +749,10 @@ class Survey:
                     recv_pos=[float(v) for v in self.recv_pos],
                     shot_pos=[float(v) for v in self.shot_pos],
                     pkl=self.pkl_path, sgt=self.sgt_path, picks_source=self.picks_source,
+                    file_format=self.file_format,
+                    recv_topo=self.recv_topo.to_dict() if self.recv_topo else None,
+                    shot_topo=self.shot_topo.to_dict() if self.shot_topo else None,
+                    shots_at_geophones=bool(self.shots_at_geophones),
                     warnings=list(self.warnings))
 
     def save_record(self, path=None):
@@ -734,7 +770,18 @@ def load_record(path):
         r = json.load(f)
     r['geometry'] = GeometrySettings(**{k: v for k, v in r.get('geometry', {}).items()
                                         if k in GeometrySettings.__dataclass_fields__})
+    r['recv_topo'] = gio.TopoSpec.from_dict(r.get('recv_topo'))       # v17
+    r['shot_topo'] = gio.TopoSpec.from_dict(r.get('shot_topo'))
+    r.setdefault('shots_at_geophones', False)
+    r.setdefault('file_format', 'auto')
     return r
+
+
+def record_import_kwargs(r):
+    """Keyword arguments for import_files() that repeat a loaded record (v17)."""
+    return dict(geometry=r['geometry'], use_header_delay=r.get('use_header_delay', True),
+                file_format=r.get('file_format', 'auto'), recv_topo=r.get('recv_topo'),
+                shot_topo=r.get('shot_topo'), shots_at_geophones=r.get('shots_at_geophones', False))
 
 
 def _place_traces(rec, master, geom, spacing, warnings):
@@ -767,11 +814,16 @@ def _place_traces(rec, master, geom, spacing, warnings):
 
 
 def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
-                  sgt_path=None, use_header_delay=True, load_existing_picks=True, picks_source=''):
+                  sgt_path=None, use_header_delay=True, load_existing_picks=True, picks_source='',
+                  recv_topo=None, shot_topo=None, shots_at_geophones=False, file_format='auto'):
     """
     Build a Survey from ShotRecords (read_shot results, in shot order).
     Unreadable records are skipped with a warning. Raises ValueError if nothing
     usable is left or the sample intervals differ.
+
+    v17: recv_topo / shot_topo (geometry_io.TopoSpec) replace the header coordinates
+    and elevations everywhere; shots_at_geophones=True places every shot at the
+    receiver of its picker position (x, y, elevation from the receivers).
     """
     if quantity not in QUANTITIES:
         raise ValueError(f"Choose the data type (one of {', '.join(QUANTITIES)}).")
@@ -784,7 +836,7 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
         elif r.error:
             warnings.append(f'{r.name}: {r.error}')
     if not good:
-        raise ValueError('None of the files could be read as SEG-Y.')
+        raise ValueError('None of the files could be read as SEG-Y or SU.')
     dts = sorted({round(r.dt * 1e6) for r in good})
     if len(dts) > 1:
         raise ValueError(f"Files have different sample intervals ({', '.join(f'{d / 1e3:g} ms' for d in dts)}); "
@@ -798,9 +850,26 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
     nm = master.ntr
     has_coords = master.has_coords
     has_elev = master.has_elev
+    if shot_topo is not None and shots_at_geophones:
+        raise ValueError('Choose either a shot topography file or "shots at geophones", not both.')
+
+    # v17: external receiver topography replaces the headers
+    rtopo = None
+    if recv_topo is not None:
+        t = gio.load_topography(recv_topo)
+        rx_t, ry_t, rdist_t, relev_t, recv_is_map, notes = gio.receivers_from_topo(t, nm)
+        warnings.extend(notes)
+        rtopo = (rx_t, ry_t, rdist_t, relev_t)
+        has_coords = has_elev = True
+        warnings.append(f'Receiver topography from {recv_topo.describe()} (replaces the header '
+                        f'coordinates and elevations).')
+    recv_is_map = (rtopo is None) or bool(recv_topo.y_col)
 
     # receiver geometry from the master shot
-    if has_coords:
+    if rtopo is not None:
+        rx, ry, rdist = rtopo[0], rtopo[1], rtopo[2]
+        hsp = float(np.median(np.abs(np.diff(rdist)))) if nm > 1 else 1.0
+    elif has_coords:
         rx, ry = master.gx, master.gy
         rdist = along_line_distance(rx, ry)
         hsp = float(np.median(np.diff(rdist))) if nm > 1 else 1.0
@@ -827,8 +896,40 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
     # shots
     sxy = np.array([[r.sx, r.sy] for r in good])
     selev = np.array([r.selev for r in good])
+    recv_elev = rtopo[3] if rtopo is not None else (master.gelev if has_elev else np.zeros(nm))
+    sd_t = None
+    if shot_topo is not None:
+        t = gio.load_topography(shot_topo)
+        sx_t, sy_t, se_t, sd_t = gio.shots_from_topo(t, len(good), recv_is_map)
+        sxy = np.column_stack([sx_t, sy_t])
+        selev = np.asarray(se_t, float)
+        warnings.append(f'Shot topography from {shot_topo.describe()}.')
+    hdr_shots_ok = (master.has_coords and np.all(np.isfinite(sxy)) and
+                    np.ptp(sxy[:, 0]) + np.ptp(sxy[:, 1]) > 0)
     shot_coords_ok = has_coords and np.all(np.isfinite(sxy)) and np.ptp(sxy[:, 0]) + np.ptp(sxy[:, 1]) > 0
-    if shot_coords_ok:
+    if shot_topo is not None and sd_t is not None:                    # distances along the line
+        sdist = np.asarray(sd_t, float)
+        soff = np.zeros(len(good))
+        near = np.array([int(np.argmin(np.abs(rdist - d))) for d in sdist])
+        shot_coords_ok = True
+    elif rtopo is not None and not recv_is_map and shot_topo is None:
+        # receivers as distances along the line, shots from the headers: place each shot
+        # with the HEADER geometry (nearest header receiver + remaining distance), then
+        # carry it over to the file's distances
+        if hdr_shots_ok:
+            rdist_h = along_line_distance(master.gx, master.gy)
+            sd_h, soff, near = project_on_line(sxy[:, 0], sxy[:, 1], master.gx, master.gy, rdist_h)
+            sgn = 1.0 if (nm < 2 or rdist[-1] >= rdist[0]) else -1.0
+            sdist = np.array([rdist[k] + sgn * (d - rdist_h[k]) for d, k in zip(sd_h, near)])
+            sxy = np.column_stack([sdist, np.zeros(len(good))])
+            shot_coords_ok = True
+            warnings.append('Shot positions from the header source coordinates, carried over to the '
+                            'distances of the receiver topography.')
+        else:
+            sxy = np.full((len(good), 2), np.nan)
+            shot_coords_ok = False
+            sdist = soff = near = None
+    elif shot_coords_ok:
         sdist, soff, near = project_on_line(sxy[:, 0], sxy[:, 1], rx, ry, rdist)
         far = np.where(soff > 2 * spacing)[0]
         if len(far):
@@ -837,8 +938,13 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
     else:
         sdist = soff = None
         near = None
-    if has_elev and not np.any(selev != 0) and shot_coords_ok:
-        selev = np.interp(sdist, rdist, master.gelev)
+    if rtopo is not None and shot_topo is None and not shots_at_geophones and sdist is not None:
+        _o = np.argsort(rdist)                     # the topography replaces header elevations
+        selev = np.interp(sdist, rdist[_o], np.asarray(recv_elev, float)[_o])
+        warnings.append('Shot elevations interpolated from the receiver topography (no shot file).')
+    elif has_elev and not np.any(selev != 0) and shot_coords_ok and shot_topo is None:
+        _o = np.argsort(rdist)
+        selev = np.interp(sdist, rdist[_o], np.asarray(recv_elev, float)[_o])
         warnings.append('No source elevations in the headers: interpolated from the receivers.')
 
     if geom.mode == 'headers' and shot_coords_ok:
@@ -852,6 +958,13 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
         if sdist is None:
             sdist = (shot_pos - geom.first_recv_pos)
             soff = np.zeros(len(good))
+    if shots_at_geophones:                         # v17: shot coordinates from the receivers
+        _sx, _sy, _se, _sd, notes = gio.shots_at_geophones(shot_pos, recv_pos, rx, ry, rdist, recv_elev)
+        sxy = np.column_stack([_sx, _sy])
+        selev, sdist, soff = _se, _sd, np.zeros(len(good))
+        warnings.append('Shots placed at the geophone of their position (x, y and elevation from the '
+                        + ('receiver topography).' if rtopo is not None else 'receiver headers).'))
+        warnings.extend(notes)
     dup = [p for p in set(shot_pos.tolist()) if list(shot_pos).count(p) > 1]
     if dup:
         warnings.append(f"Several shots at the same position {sorted(dup)} (repeat shots?): reciprocity "
@@ -870,7 +983,7 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
     sv = Survey(files=[r.path for r in good], data=data, dt=dt, quantity=q, delay_ms=delays,
                 shot_xy=sxy, shot_elev=selev,
                 recv_xy=np.column_stack([rx, ry]),
-                recv_elev=(master.gelev if has_elev else np.zeros(nm)),
+                recv_elev=np.asarray(recv_elev, float),
                 recv_dist=rdist, shot_dist=np.asarray(sdist, float),
                 shot_offline=np.asarray(soff, float), recv_pos=np.asarray(recv_pos, float),
                 shot_pos=np.asarray(shot_pos, float), header_spacing=hsp, geometry=geom,
@@ -879,9 +992,12 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
                 sgt_path=sgt_path or names['sgt'], use_header_delay=use_header_delay,
                 load_existing_picks=load_existing_picks or bool(picks_source),
                 picks_source=picks_source or '', warnings=warnings, placement=placement,
-                imported=datetime.datetime.now().isoformat(timespec='seconds'))
+                imported=datetime.datetime.now().isoformat(timespec='seconds'),
+                file_format=(good[0].file_format if file_format == 'auto' else file_format),
+                recv_topo=recv_topo, shot_topo=shot_topo, shots_at_geophones=bool(shots_at_geophones),
+                geometry_source=('topography file' if rtopo is not None else 'headers'))
     sv.record_path = os.path.splitext(sv.pkl_path)[0].replace('_picks', '') + '_import.json'
-    a, b = line_axis(np.column_stack([rx, ry])) if has_coords else (None, None)
+    a, b = line_axis(np.column_stack([rx, ry])) if (has_coords and recv_is_map) else (None, None)
     if a is not None:
         az = (np.degrees(np.arctan2(b[0], b[1])) + 360) % 180
         warnings.append(f'Line: {rdist[-1]:.1f} m along the receivers (sqrt(dE^2 + dN^2)), azimuth '
@@ -891,10 +1007,13 @@ def import_survey(records, quantity, geometry=None, out_dir=None, pkl_path=None,
 
 
 def import_files(files, quantity, progress=None, **kw):
-    """Read + assemble in one call (script mode). progress(i, n, record) is optional."""
+    """Read + assemble in one call (script mode). progress(i, n, record) is optional.
+    kw: everything import_survey() takes (v17: file_format, recv_topo, shot_topo,
+    shots_at_geophones)."""
     recs = []
+    fmt = kw.get('file_format', 'auto')
     for i, f in enumerate(files):
-        r = read_shot(f)
+        r = read_shot(f, fmt)
         recs.append(r)
         if progress is not None:
             progress(i, len(files), r)
@@ -1378,6 +1497,147 @@ if _HAVE_QT:
     _COLS = ['#', 'File', 'Traces', 'Samples', 'dt (ms)', 'Delay (ms)', 'Source X', 'Source Y',
              'Elev (m)', 'Type (text hdr)', 'Status']
 
+
+    class TopoFileWidget(QWidget):
+        """v17: choose a topography table (csv / txt / xls / xlsx) and its columns."""
+        NONE_Y = '(none: x is the distance along the line)'
+        NONE_N = '(none: one row per {what}, in order)'
+
+        def __init__(self, what='receiver', on_change=None, parent=None):
+            super().__init__(parent)
+            self.what = what
+            self.on_change = on_change
+            self._df = None
+            self._loading = False
+            f = QFormLayout(self)
+            f.setContentsMargins(0, 0, 0, 0)
+            row = QHBoxLayout()
+            self.ed = QLineEdit()
+            self.ed.setPlaceholderText('csv, txt, dat, xls or xlsx')
+            self.ed.editingFinished.connect(lambda: self.load(self.ed.text().strip()))
+            row.addWidget(self.ed, 1)
+            b = QPushButton('Browse…')
+            b.clicked.connect(self._browse)
+            row.addWidget(b)
+            f.addRow('File', row)
+            self.cb_sheet = QComboBox()
+            self.cb_sheet.currentIndexChanged.connect(lambda *_: self._reload())
+            self.lab_sheet = QLabel('Sheet')
+            f.addRow(self.lab_sheet, self.cb_sheet)
+            self.cb_hdr = QComboBox()
+            for t, v in (('Automatic', 'auto'), ('Yes: column names', True), ('No: numbers only', False)):
+                self.cb_hdr.addItem(t, v)
+            self.cb_hdr.currentIndexChanged.connect(lambda *_: self._reload())
+            f.addRow('First row is a header', self.cb_hdr)
+            self.cb_x, self.cb_y, self.cb_z, self.cb_n = QComboBox(), QComboBox(), QComboBox(), QComboBox()
+            f.addRow('x (easting or distance)', self.cb_x)
+            f.addRow('y (northing)', self.cb_y)
+            f.addRow('Elevation', self.cb_z)
+            f.addRow(f'{what.capitalize()} number', self.cb_n)
+            self.cb_n.setToolTip('Optional. Receivers: trace number (1 = first trace). Shots: shot number '
+                                 'in the file list (1 = first file). Without it, row i is ' + what + ' i.')
+            for cb in (self.cb_x, self.cb_y, self.cb_z, self.cb_n):
+                cb.currentIndexChanged.connect(self._changed)
+            self.lbl = QLabel()
+            self.lbl.setWordWrap(True)
+            self.lbl.setStyleSheet('color: #555;')
+            f.addRow(self.lbl)
+            self._show_sheet(False)
+
+        def _show_sheet(self, on):
+            self.cb_sheet.setVisible(on)
+            self.lab_sheet.setVisible(on)
+
+        def _browse(self):
+            p, _ = QFileDialog.getOpenFileName(self, f'{self.what.capitalize()} topography', self.ed.text(),
+                                               'Tables (*.csv *.txt *.dat *.tsv *.prn *.xls *.xlsx);;All files (*)')
+            if p:
+                self.ed.setText(p)
+                self.load(p)
+
+        def load(self, path):
+            self._loading = True
+            try:
+                sheets = gio.excel_sheets(path) if path else []
+                self.cb_sheet.clear()
+                for sh in sheets:
+                    self.cb_sheet.addItem(str(sh))
+                self._show_sheet(bool(sheets))
+            finally:
+                self._loading = False
+            self._reload(guess=True)
+
+        def _reload(self, guess=False):
+            if self._loading:
+                return
+            path = self.ed.text().strip()
+            self._df = None
+            cols = []
+            if path:
+                try:
+                    self._df = gio.read_table(path, sheet=self.cb_sheet.currentText() or None,
+                                              header=self.cb_hdr.currentData())
+                    cols = list(self._df.columns)
+                except Exception as e:
+                    self.lbl.setText(f'<span style="color:#c0392b;">{e}</span>')
+            keep = [cb.currentText() for cb in (self.cb_x, self.cb_y, self.cb_z, self.cb_n)]
+            self._loading = True
+            try:
+                for cb, none in ((self.cb_x, None), (self.cb_y, self.NONE_Y), (self.cb_z, None),
+                                 (self.cb_n, self.NONE_N.format(what=self.what))):
+                    cb.clear()
+                    if none:
+                        cb.addItem(none, '')
+                    for c in cols:
+                        cb.addItem(c, c)
+                if cols:
+                    gx, gy, gz, gn = gio.guess_columns(cols) if guess else keep
+                    for cb, v in zip((self.cb_x, self.cb_y, self.cb_z, self.cb_n), (gx, gy, gz, gn)):
+                        i = cb.findData(v) if v else 0
+                        cb.setCurrentIndex(max(0, i))
+            finally:
+                self._loading = False
+            self._changed()
+
+        def _changed(self, *_):
+            if self._loading:
+                return
+            if self._df is not None:
+                n = len(self._df)
+                prev = ', '.join(self._df.columns[:6])
+                sp = self.spec()
+                kind = ('map coordinates (x, y): distance along the line computed from them'
+                        if sp and sp.y_col else 'x = distance along the line, used as it is')
+                self.lbl.setText(f'{n} rows; columns: {prev}{" …" if len(self._df.columns) > 6 else ""}.<br>'
+                                 f'{kind}.')
+                self.lbl.setTextFormat(Qt.RichText)
+            if self.on_change is not None:
+                self.on_change()
+
+        def spec(self):
+            path = self.ed.text().strip()
+            if not path or self._df is None or not self.cb_x.currentData() or not self.cb_z.currentData():
+                return None
+            return gio.TopoSpec(path=path, x_col=self.cb_x.currentData(), y_col=self.cb_y.currentData() or '',
+                                z_col=self.cb_z.currentData(), number_col=self.cb_n.currentData() or '',
+                                sheet=self.cb_sheet.currentText() if self.cb_sheet.isVisible() else '',
+                                header=self.cb_hdr.currentData())
+
+        def set_spec(self, sp):
+            if sp is None:
+                return
+            self.ed.setText(sp.path)
+            i = self.cb_hdr.findData(sp.header)
+            self._loading = True
+            self.cb_hdr.setCurrentIndex(max(0, i))
+            self._loading = False
+            self.load(sp.path)
+            if sp.sheet:
+                self.cb_sheet.setCurrentText(sp.sheet)
+            for cb, v in ((self.cb_x, sp.x_col), (self.cb_y, sp.y_col), (self.cb_z, sp.z_col),
+                          (self.cb_n, sp.number_col)):
+                cb.setCurrentIndex(max(0, cb.findData(v)))
+
     class ImportDialog(QDialog):
         """
         Import shot gathers. Files are read as soon as they are added (the table
@@ -1387,7 +1647,7 @@ if _HAVE_QT:
         def __init__(self, parent=None, start_folder='', pattern='*', quantity=None,
                      geometry=None, files=None):
             super().__init__(parent)
-            self.setWindowTitle('Import seismic data (SEG-Y)')
+            self.setWindowTitle('Import seismic data (SEG-Y / SU)')
             self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
             self.records = []
             self.survey = None
@@ -1415,8 +1675,22 @@ if _HAVE_QT:
             left = QVBoxLayout(controls)
 
             # files
-            g = QGroupBox('1. Files (one SEG-Y file per shot: .segy / .sgy)')
+            g = QGroupBox('1. Files (one file per shot)')
             v = QVBoxLayout(g)
+            row = QHBoxLayout()                       # v17: SEG-Y or Seismic Unix
+            row.addWidget(QLabel('Format'))
+            self.rb_fmt_segy = QRadioButton('SEG-Y (.segy / .sgy)')
+            self.rb_fmt_su = QRadioButton('Seismic Unix (.su)')
+            self.grp_fmt = QButtonGroup(self)
+            self.grp_fmt.addButton(self.rb_fmt_segy)
+            self.grp_fmt.addButton(self.rb_fmt_su)
+            self.rb_fmt_segy.setChecked(True)
+            self.rb_fmt_su.setToolTip('SU files: 240-byte trace headers, no textual/binary header; '
+                                      'little- or big-endian is detected')
+            row.addWidget(self.rb_fmt_segy)
+            row.addWidget(self.rb_fmt_su)
+            row.addStretch(1)
+            v.addLayout(row)
             row = QHBoxLayout()
             row.addWidget(QLabel('Folder'))
             self.ed_folder = QLineEdit()
@@ -1429,14 +1703,14 @@ if _HAVE_QT:
             row.addWidget(QLabel('Name filter'))
             self.ed_pattern = QLineEdit(pattern or '*')
             self.ed_pattern.setToolTip('Shell wildcards, e.g. *_stacked* or S_STACK_*; '
-                                       'only .segy / .sgy files are listed')
+                                       'only files of the chosen format are listed')
             row.addWidget(self.ed_pattern, 1)
             self.chk_recursive = QCheckBox('Include sub-folders')
             row.addWidget(self.chk_recursive)
             v.addLayout(row)
             row = QHBoxLayout()
             b = QPushButton('Read folder (batch)')
-            b.setToolTip('Read every matching .segy / .sgy file in the folder')
+            b.setToolTip('Read every matching file of the chosen format in the folder')
             b.clicked.connect(self._read_folder)
             row.addWidget(b)
             b = QPushButton('Add files…')
@@ -1537,6 +1811,48 @@ if _HAVE_QT:
             self.cb_place.currentIndexChanged.connect(self._geom_changed)
             for w in (self.sp_r0, self.sp_rdx, self.sp_s0, self.sp_sdx, self.sp_gap):
                 w.valueChanged.connect(self._geom_preview)
+            left.addWidget(g)
+
+            # v17: external topography
+            g = QGroupBox('3b. Topography file (optional: replaces the header coordinates)')
+            v = QVBoxLayout(g)
+            self.chk_rtopo = QCheckBox('Receivers from a topography file')
+            self.chk_rtopo.toggled.connect(self._topo_changed)
+            v.addWidget(self.chk_rtopo)
+            self.w_rtopo = TopoFileWidget('receiver', on_change=self._geom_preview)
+            v.addWidget(self.w_rtopo)
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Shots:'))
+            self.rb_st_hdr = QRadioButton('From the headers')
+            self.rb_st_file = QRadioButton('From a file')
+            self.rb_st_geo = QRadioButton('At the geophones')
+            self.rb_st_geo.setToolTip('Each shot takes x, y and elevation of the receiver at its position '
+                                      '(shot positions from the headers or the manual geometry); a shot '
+                                      'beyond the spread is extrapolated from the end receivers')
+            self.grp_st = QButtonGroup(self)
+            for rb in (self.rb_st_hdr, self.rb_st_file, self.rb_st_geo):
+                self.grp_st.addButton(rb)
+                row.addWidget(rb)
+                rb.toggled.connect(self._topo_changed)
+            self.rb_st_hdr.setChecked(True)
+            row.addStretch(1)
+            v.addLayout(row)
+            self.w_stopo = TopoFileWidget('shot', on_change=self._geom_preview)
+            v.addWidget(self.w_stopo)
+            left.addWidget(g)
+            g = QGroupBox('3c. Write the geometry into the data files (optional)')
+            v = QVBoxLayout(g)
+            self.chk_hdrwrite = QCheckBox('Write shot and receiver coordinates, elevations and offsets '
+                                          'into the trace headers')
+            self.chk_hdrwrite.setToolTip('Done when you press Import. The original files are first copied '
+                                         'to original_headers_backup_<date>_<time> in the data folder. '
+                                         'Only header bytes change; the samples are not touched.')
+            v.addWidget(self.chk_hdrwrite)
+            lab = QLabel('Changes the original files. They are copied to a backup folder '
+                         '(original_headers_backup_<date>_<time>) in the data folder first.')
+            lab.setWordWrap(True)
+            lab.setStyleSheet('color: #555;')
+            v.addWidget(lab)
             left.addWidget(g)
 
             # time
@@ -1684,6 +2000,31 @@ if _HAVE_QT:
             outer.addLayout(row)
             self._geom_changed()
             self._mode_changed()
+            self._topo_changed()
+
+        # ---------------- v17: format + topography ----------------
+        def file_fmt(self):
+            return 'su' if self.rb_fmt_su.isChecked() else 'segy'
+
+        def _read_fmt(self, path):
+            """Known extension decides; otherwise the format switch."""
+            low = path.lower()
+            if low.endswith(SU_EXTENSIONS) or low.endswith(SEGY_EXTENSIONS):
+                return 'auto'
+            return self.file_fmt()
+
+        def _topo_changed(self, *args):
+            if not hasattr(self, 'w_stopo'):
+                return
+            self.w_rtopo.setVisible(self.chk_rtopo.isChecked())
+            self.w_stopo.setVisible(self.rb_st_file.isChecked())
+            self._geom_preview()
+
+        def topo_settings(self):
+            """(recv TopoSpec or None, shot TopoSpec or None, shots_at_geophones)."""
+            rt = self.w_rtopo.spec() if self.chk_rtopo.isChecked() else None
+            st = self.w_stopo.spec() if self.rb_st_file.isChecked() else None
+            return rt, st, self.rb_st_geo.isChecked()
 
         def _dspin(self, lo, hi, val, dec):
             s = QDoubleSpinBox()
@@ -1718,17 +2059,23 @@ if _HAVE_QT:
             if not os.path.isdir(folder):
                 QMessageBox.warning(self, 'Folder not found', f'Not a folder:\n{folder}')
                 return
-            files = find_segy_files(folder, self.chk_recursive.isChecked(), self.ed_pattern.text())
+            fmt = self.file_fmt()
+            files = find_segy_files(folder, self.chk_recursive.isChecked(), self.ed_pattern.text(), fmt=fmt)
             if not files:
-                QMessageBox.information(self, 'No SEG-Y files',
-                                        f'No .segy / .sgy files matching "{self.ed_pattern.text()}" in\n{folder}')
+                exts = ' / '.join(extensions_for(fmt))
+                QMessageBox.information(self, 'No files',
+                                        f'No {exts} files matching "{self.ed_pattern.text()}" in\n{folder}'
+                                        + ('\n\n(Seismic Unix files? Choose Format: Seismic Unix.)'
+                                           if fmt == 'segy' else ''))
                 return
             self._last_folder = folder
             self.add_files(files, replace=True)
 
         def _browse_files(self):
-            files, _ = QFileDialog.getOpenFileNames(self, 'SEG-Y shot files', self._last_folder,
-                                                    'SEG-Y (*.segy *.sgy *.SEGY *.SGY);;All files (*)')
+            filt = ('Seismic Unix (*.su *.SU);;SEG-Y (*.segy *.sgy *.SEGY *.SGY);;All files (*)'
+                    if self.file_fmt() == 'su' else
+                    'SEG-Y (*.segy *.sgy *.SEGY *.SGY);;Seismic Unix (*.su *.SU);;All files (*)')
+            files, _ = QFileDialog.getOpenFileNames(self, 'Shot files', self._last_folder, filt)
             if files:
                 self._last_folder = os.path.dirname(files[0])
                 self.add_files(files)
@@ -1748,7 +2095,7 @@ if _HAVE_QT:
             try:
                 byname = {os.path.normcase(os.path.abspath(r.path)): r for r in self.records}
                 for i, f in enumerate(new):
-                    r = read_shot(f)
+                    r = read_shot(f, self._read_fmt(f))
                     byname[os.path.normcase(os.path.abspath(f))] = r
                     self.records = [byname[os.path.normcase(os.path.abspath(p))] for p in allpaths
                                     if os.path.normcase(os.path.abspath(p)) in byname]
@@ -1920,7 +2267,8 @@ if _HAVE_QT:
                 self.lbl_geom.setTextFormat(Qt.RichText)
                 return
             sp = sv.shot_pos
-            txt = (f'Header receiver spacing {sv.header_spacing:.3f} m → nominal '
+            src = 'Topography-file' if sv.geometry_source != 'headers' else 'Header'
+            txt = (f'{src} receiver spacing {sv.header_spacing:.3f} m → nominal '
                    f'{sv.geometry.recv_spacing:g} m; receivers {sv.recv_pos[0]:g} … {sv.recv_pos[-1]:g} m.<br>'
                    f'Shot positions: {", ".join(f"{v:g}" for v in sp[:12])}{" …" if len(sp) > 12 else ""}')
             self.lbl_geom.setText(txt)
@@ -2108,6 +2456,17 @@ if _HAVE_QT:
             self.cb_place.setCurrentIndex(['coordinates', 'end', 'index'].index(g.trace_placement))
             self.sp_gap.setValue(g.gap_insert_index)
             self.chk_delay.setChecked(r.get('use_header_delay', True))
+            (self.rb_fmt_su if r.get('file_format') == 'su' else self.rb_fmt_segy).setChecked(True)   # v17
+            self.chk_rtopo.setChecked(r.get('recv_topo') is not None)
+            if r.get('recv_topo') is not None:
+                self.w_rtopo.set_spec(r['recv_topo'])
+            if r.get('shot_topo') is not None:
+                self.rb_st_file.setChecked(True)
+                self.w_stopo.set_spec(r['shot_topo'])
+            elif r.get('shots_at_geophones'):
+                self.rb_st_geo.setChecked(True)
+            else:
+                self.rb_st_hdr.setChecked(True)
             if r.get('pkl'):
                 self.ed_out.setText(os.path.dirname(r['pkl']))
                 self.ed_pkl.setText(os.path.basename(r['pkl']))
@@ -2132,10 +2491,16 @@ if _HAVE_QT:
                 out_dir = os.path.dirname(pkl)
             else:
                 pkl, sgt, out_dir = self._pkl_path() or None, self._sgt_path() or None, self.ed_out.text().strip() or None
+            rt, stp, at_geo = self.topo_settings()
+            if self.chk_rtopo.isChecked() and rt is None:
+                raise ValueError('Receiver topography: choose the file and its x and elevation columns.')
+            if self.rb_st_file.isChecked() and stp is None:
+                raise ValueError('Shot topography: choose the file and its x and elevation columns.')
             return import_survey(self.records, q, geometry=self._geom_settings(), out_dir=out_dir,
                                  pkl_path=pkl, sgt_path=sgt,
                                  use_header_delay=self.chk_delay.isChecked(),
-                                 load_existing_picks=bool(src), picks_source=src or '')
+                                 load_existing_picks=bool(src), picks_source=src or '',
+                                 recv_topo=rt, shot_topo=stp, shots_at_geophones=at_geo)
 
         def _do_import(self):
             if not any(r.ok for r in self.records):
@@ -2188,9 +2553,42 @@ if _HAVE_QT:
                 except Exception as e:
                     QMessageBox.critical(self, 'SGT file does not fit', str(e))
                     return
+            if self.chk_hdrwrite.isChecked() and not self._write_headers(sv):
+                return
             self.survey = sv
             self._closing_ok = True
             self.accept()
+
+        def _write_headers(self, sv):
+            """v17: back up the files, then write the geometry into their headers."""
+            folder = os.path.dirname(os.path.abspath(sv.files[0]))
+            if QMessageBox.question(
+                    self, 'Write geometry into the headers',
+                    f'This changes the trace headers of {len(sv.files)} file(s) in\n{folder}\n\n'
+                    f'They are copied to a new folder original_headers_backup_<date>_<time> there first. '
+                    f'Only header bytes change (coordinates, elevations, offsets and their scalars).\n\n'
+                    f'Continue?') != QMessageBox.Yes:
+                return False
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                self.progress.setMaximum(len(sv.files))
+
+                def prog(i, n, f):
+                    self.progress.setValue(i + 1)
+                    QApplication.processEvents()
+                dest, report = gio.write_survey_headers(sv, backup=True, progress=prog)
+            except Exception as e:
+                QApplication.restoreOverrideCursor()
+                QMessageBox.critical(self, 'Header writing failed',
+                                     f'{e}\n\nThe originals are in the backup folder (if it was made); '
+                                     f'files written before the error carry the new headers.')
+                return False
+            QApplication.restoreOverrideCursor()
+            sv.warnings.append(f'Geometry written into the trace headers of {len(sv.files)} file(s); '
+                               f'originals backed up in {dest}.')
+            QMessageBox.information(self, 'Headers written',
+                                    f'{len(report)} file(s) updated.\nBackup of the originals:\n{dest}')
+            return True
 
         def closeEvent(self, ev):
             """Closing the window (X) with valid files and a data type = Import."""

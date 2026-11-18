@@ -100,6 +100,12 @@ LOAD_EXISTING_PICKS = True      # script mode: continue from the auto-named pick
 EXISTING_PICKS_FILE = None      # script mode: a .pkl or SGT .txt to continue from (overrides the names)
 AUTO_CONTINUE_TO_PICKER = True  # v10: running only the import cell (Ctrl+Enter) carries on through
                                 # preprocessing and filtering to the shot dialog
+# v17 script mode (the import window has these as controls):
+SEISMIC_FILE_FORMAT = 'segy'    # 'segy' (.segy/.sgy) or 'su' (Seismic Unix .su)
+RECEIVER_TOPOGRAPHY = None      # e.g. dict(path='.../receivers.xlsx', x_col='Easting', y_col='Northing',
+                                #           z_col='Elevation', number_col='')  (y_col='' = x is distance)
+SHOT_TOPOGRAPHY = None          # same keys; number_col = shot number in file order
+SHOTS_AT_GEOPHONES = False      # True: shots take x/y/elevation of the receiver at their position
 
 # %% Loading seismic data (v8: data_importer.py) into an array (n_shots, n_samples, n_traces)
 """
@@ -155,9 +161,9 @@ if IMPORT_RECORD_FILE:
     _rec = dimp.load_record(IMPORT_RECORD_FILE)
     print(f"Repeating the import in {IMPORT_RECORD_FILE} ({len(_rec['files'])} files)")
     SURVEY = dimp.import_files(_rec['files'], _rec['quantity'], progress=_print_import_progress,
-                               geometry=_rec['geometry'], pkl_path=_rec.get('pkl') or None,
+                               pkl_path=_rec.get('pkl') or None,
                                sgt_path=_rec.get('sgt') or None,
-                               use_header_delay=_rec.get('use_header_delay', True),
+                               **dimp.record_import_kwargs(_rec),            # v17: + format, topography
                                load_existing_picks=LOAD_EXISTING_PICKS,
                                picks_source=_rec['pkl'] if _rec.get('pkl') and os.path.isfile(_rec['pkl'])
                                else (_rec.get('picks_source') or ''))
@@ -169,10 +175,11 @@ elif USE_IMPORT_DIALOG:
     if SURVEY is None:
         raise SystemExit("Import cancelled: no data loaded. Run this cell again to import.")
 else:
-    _files = dimp.find_segy_files(segy_data_path, pattern=search_string_for_segy_files)
+    _files = dimp.find_segy_files(segy_data_path, pattern=search_string_for_segy_files,
+                                  fmt=SEISMIC_FILE_FORMAT)
     if not _files:
-        raise FileNotFoundError(f"No .segy/.sgy files matching '{search_string_for_segy_files}' "
-                                f"in {segy_data_path}")
+        raise FileNotFoundError(f"No {' / '.join(dimp.extensions_for(SEISMIC_FILE_FORMAT))} files matching "
+                                f"'{search_string_for_segy_files}' in {segy_data_path}")
     if DATA_QUANTITY not in dimp.QUANTITIES:
         raise ValueError("Script mode: set DATA_QUANTITY to 'acceleration', 'velocity' or "
                          "'displacement' (what the SEG-Y files contain).")
@@ -188,7 +195,11 @@ else:
     SURVEY = dimp.import_files(_files, DATA_QUANTITY, progress=_print_import_progress,
                                pkl_path=_pk, sgt_path=_sg,
                                load_existing_picks=LOAD_EXISTING_PICKS,
-                               picks_source=EXISTING_PICKS_FILE or '')
+                               picks_source=EXISTING_PICKS_FILE or '',
+                               file_format=SEISMIC_FILE_FORMAT,                  # v17
+                               recv_topo=dimp.gio.TopoSpec.from_dict(RECEIVER_TOPOGRAPHY),
+                               shot_topo=dimp.gio.TopoSpec.from_dict(SHOT_TOPOGRAPHY),
+                               shots_at_geophones=SHOTS_AT_GEOPHONES)
 
 # ---- everything downstream uses these (same names as before) ----
 def _adopt_survey(sv):
@@ -1149,6 +1160,15 @@ RECIPROCITY_THRESHOLD_MS = 2.0         # flag shots whose median |reciprocal err
 import pick_tools as ptl               # delete picks dialog, plotted traces, gain control (same folder)
 import auto_pickers as apk             # v11: automatic picking (STA/LTA family + post-processing)
 import help_manual as hlp              # v13: user manual (Help menu, F1, PDF)
+import xdomain as xdm                  # v17: index / offset x axis
+import pick_export as pex              # v17: export picks (SGT, x positions, pyGIMLi)
+importlib.reload(xdm)
+importlib.reload(pex)
+X_DOMAIN = ['index']                   # v17: 'index' (picker positions) or 'offset' (distance along line)
+_DOMAIN_CACHE = {}
+radio_domain = None                    # canvas X AXIS radio
+domain_rax = None
+_domain_actions = {}                   # menu actions (checked = active domain)
 importlib.reload(apk)
 AUTOPICK_PARAMS = apk.AutoPickParams()  # last settings used (saved with the picks)
 AUTOPICK_UNDO = []                      # undo stack for automatic picking
@@ -1258,7 +1278,8 @@ mpl.rcParams['keymap.fullscreen'] = [k for k in mpl.rcParams['keymap.fullscreen'
 # v15: every picker key must belong to the picker only. Matplotlib binds 'r' and 'h' to its
 # own Home (jump to the first view of the toolbar history - often an old zoom from picking),
 # 'g' to the grid, and others; remove the picker's keys from every matplotlib key map.
-_PICKER_KEYS = {'m', 'r', 'u', 'h', 'z', 'd', 'g', 's', 'n', 'f', 'ctrl+s', 'cmd+s', 'ctrl+o', 'ctrl+d',
+_PICKER_KEYS = {'m', 'r', 'u', 'h', 'z', 'd', 'g', 's', 'n', 'f', 'x', 'ctrl+s', 'cmd+s', 'ctrl+o', 'ctrl+d',
+                'ctrl+e',
                 'ctrl+z', 'ctrl+y', 'ctrl+Z', 'ctrl+shift+z', 'cmd+z', 'cmd+y'}
 for _km in [k for k in mpl.rcParams if k.startswith('keymap.')]:
     _v = mpl.rcParams[_km]
@@ -1412,6 +1433,72 @@ class InputDialog(QDialog):
                                   str(ve), QMessageBox.Ok)
 
 
+# ---------------------------------------------------------------------
+# v17: index / offset x axis (xdomain.py). Picks always stay in picker positions;
+# the offset view only draws the x axis at true distances along the line.
+# ---------------------------------------------------------------------
+def _domain_map():
+    """(DomainMap or None, reason) for the current receivers."""
+    try:
+        dist = np.asarray(SURVEY.recv_dist, float)
+    except Exception:
+        dist = None
+    key = (id(SURVEY), len(recv_pos), None if dist is None else float(np.nansum(dist)),
+           float(np.sum(np.asarray(recv_pos, float))))
+    if _DOMAIN_CACHE.get('key') != key:
+        try:
+            if dist is None or len(dist) != len(recv_pos):
+                raise ValueError('the receiver distances do not match the plotted receivers')
+            _DOMAIN_CACHE.update(key=key, map=xdm.DomainMap(recv_pos, dist), err=None)
+        except Exception as e:
+            _DOMAIN_CACHE.update(key=key, map=None, err=str(e))
+    return _DOMAIN_CACHE['map'], _DOMAIN_CACHE['err']
+
+
+def _apply_x_domain(ax_):
+    """Set the axis scale for X_DOMAIN; returns ('index' | 'offset', map or None)."""
+    dm, _err = _domain_map()
+    dom = X_DOMAIN[0] if dm is not None else 'index'
+    xdm.apply_domain(ax_, dom, dm)
+    return dom, dm
+
+
+def set_x_domain(domain, redraw=True):
+    """Canvas radio / menu / 'x' key: show the gather against receiver positions ('index')
+    or true distance along the line ('offset'; gaps and irregular spacing to scale)."""
+    if domain == 'offset':
+        dm, err = _domain_map()
+        if dm is None:
+            QMessageBox.warning(None, 'Offset view', f'The offset view needs the receiver distances along '
+                                f'the line (headers or a topography file): {err}.')
+            domain = 'index'
+    changed = X_DOMAIN[0] != domain
+    X_DOMAIN[0] = domain
+    for k, a in _domain_actions.items():
+        try:
+            a.setChecked(k == domain)
+        except Exception:
+            pass
+    if domain == 'offset':
+        dm, _ = _domain_map()
+        print(f"Offset view: x = distance along the line ({dm.describe_gaps()}).")
+    # (the canvas is redrawn on a change, which rebuilds the radio with the right button;
+    #  never call radio_domain.set_active here: it fires the radio callback again)
+    if changed and redraw and fig is not None and plt.fignum_exists(fig.number):
+        update_plot_with_picks()
+
+
+def toggle_x_domain():
+    set_x_domain('index' if X_DOMAIN[0] == 'offset' else 'offset')
+
+
+def _shot_x_text(i):
+    try:
+        return f' (x = {float(SURVEY.shot_dist[i]):.2f} m)'
+    except Exception:
+        return ''
+
+
 def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0.5, x=recv_pos_index, t=[], gain=1, type='VA', color='black', ntmax=1e+9):
     global rax1, rax2, radio_data, radio_reverse, previous_zoom_state, gain_text, gain_slider, gain_slider_ax
     global rax3, radio_quantity, gain_minus_ax, gain_plus_ax, gain_minus_btn, gain_plus_btn
@@ -1478,9 +1565,19 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
                 traces = np.clip(traces, -lim, lim)
             traces[0, :] = traces[-1, :] = 0
 
+            # v17: in the offset view the swing is laid out in metres along the line and
+            # mapped back to picker positions, so a trace next to a gap keeps its shape
+            _odm = _domain_map()[0] if X_DOMAIN[0] == 'offset' else None
+            if _odm is not None:
+                def place(xi, tr):
+                    return _odm.inverse(_odm.forward(xi) + tr * _odm.ratio)
+            else:
+                def place(xi, tr):
+                    return xi + tr
+
             # One LineCollection instead of one Line2D per trace: much faster to
             # build and redraw (gain slider, polarity/data toggles).
-            segs = [np.column_stack([x_indices[i] + traces[:, i], t])
+            segs = [np.column_stack([place(x_indices[i], traces[:, i]), t])
                     for i in range(traces.shape[1])]
             lc = LineCollection(segs, colors=color, linewidths=lwidth)
             lc.set_visible(visible)
@@ -1493,7 +1590,7 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
                 for i in range(traces.shape[1]):
                     xi = x_indices[i]
                     tr_pos = (np.clip(traces[:, i], None, 0) if neg else np.clip(traces[:, i], 0, None))
-                    xs = np.concatenate([np.full(len(t), xi), xi + tr_pos[::-1]])
+                    xs = np.concatenate([np.full(len(t), xi), place(xi, tr_pos[::-1])])
                     ys = np.concatenate([t, t[::-1]])
                     verts.append(np.column_stack([xs, ys]))
                 poly = PolyCollection(verts, facecolors=color, edgecolors='none', linewidths=0)
@@ -1566,8 +1663,16 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
 
             # ----- Axes styling (copied from original plot_data) -----
             ax.grid(True, alpha=0.3, linestyle='--', linewidth=1.0)
-            ax.set_xlabel('Receiver position (m)', fontsize='x-large', labelpad=8,
+            _dom, _dm = _apply_x_domain(ax)               # v17: index / offset x axis
+            ax.set_xlabel('Distance along the line (m)  [offset view]' if _dom == 'offset'
+                          else 'Receiver position (m)', fontsize='x-large', labelpad=8,
                           fontweight='bold', fontfamily='sans-serif')
+            if _dom == 'offset' and first_build[0]:
+                for _k, (_a, _b, _g) in enumerate(_dm.gaps):     # receivers missing: shade the gap
+                    _da, _db = sorted(_dm.forward([_a, _b]))       # (in metres, then back to positions)
+                    _x0, _x1 = _dm.inverse([_da + 0.5 * _dm.sp_d, _db - 0.5 * _dm.sp_d])
+                    ax.axvspan(min(_x0, _x1), max(_x0, _x1), color='#f5b041', alpha=0.25,
+                               zorder=0, lw=0, label='No receivers' if _k == 0 else None)
             try:                      # v12: label left, clear of the gain slider on narrow screens
                 ax.xaxis.get_label().set_horizontalalignment('left')
                 ax.xaxis.get_label().set_x(0.0)
@@ -1580,12 +1685,17 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
             else:
                 ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f'{v:g}'))
                 ylab = f'Time sample ({1 / spm:g} ms)'
-            ax.format_coord = lambda xx, yy: (f'receiver {xx:.1f} m   t = {yy / spm:.1f} ms   '
-                                              f'(sample {yy:.0f})')
+            if _dom == 'offset':
+                ax.format_coord = lambda xx, yy: (f'x = {float(_dm.forward(xx)):.2f} m (receiver position '
+                                                  f'{xx:.1f})   t = {yy / spm:.1f} ms   (sample {yy:.0f})')
+            else:
+                ax.format_coord = lambda xx, yy: (f'receiver {xx:.1f} m   t = {yy / spm:.1f} ms   '
+                                                  f'(sample {yy:.0f})')
             ax.set_ylabel(ylab, fontsize='x-large', labelpad=8,
                           fontweight='bold', fontfamily='sans-serif')
             ax.set_title(f'Shot No {shot_no + 1} at Receiver Position Index {shot_pos[shot_no]}'
-                         f'  |  {ACTIVE_QUANTITY.capitalize()}'
+                         + (_shot_x_text(shot_no) if _dom == 'offset' else '')
+                         + f'  |  {ACTIVE_QUANTITY.capitalize()}'
                          f'\nFiltered view: {FILTER_PARAMS.summary()}',
                          fontsize='x-large', pad=10, fontweight='bold', fontfamily='sans-serif')
 
@@ -1841,6 +1951,35 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
         prev_shot_btn.on_clicked(lambda _evt: step_shot(-1))
         next_shot_btn.on_clicked(lambda _evt: step_shot(+1))
 
+        # ----- v17: X AXIS radio (index / offset domain) under Prev / Next -----
+        global radio_domain, domain_rax
+        domain_rax = plt.axes([0.9200, 0.080, 0.06, 0.115], facecolor='#f8f9fa')
+        for spine in domain_rax.spines.values():
+            spine.set_edgecolor('#7f8c8d')
+            spine.set_linewidth(1)
+        domain_rax.text(0.5, 0.95, 'X AXIS', transform=domain_rax.transAxes,
+                        fontsize='medium', fontweight='bold', ha='center', va='top',
+                        fontfamily='sans-serif', color='#2c3e50')
+        _dm_ok = _domain_map()[0] is not None
+        radio_domain = RadioButtons(domain_rax, ('Index', 'Offset'),
+                                    active=1 if (X_DOMAIN[0] == 'offset' and _dm_ok) else 0,
+                                    activecolor='#3498db')
+        for _lab in radio_domain.labels:
+            _lab.set_fontsize('medium')
+            _lab.set_fontweight('bold')
+            _lab.set_fontfamily('sans-serif')
+            _lab.set_color('#34495e')
+        if not _dm_ok:
+            radio_domain.labels[1].set_color('#aab7b8')     # no distances: offset view unavailable
+
+        def _domain_clicked(label):
+            want = 'offset' if label == 'Offset' else 'index'
+            if want == X_DOMAIN[0]:
+                return                                     # already showing it
+            from PyQt5.QtCore import QTimer               # redraw after the click returns
+            QTimer.singleShot(0, lambda: set_x_domain(want))
+        radio_domain.on_clicked(_domain_clicked)
+
 # Main plotting function attached with zoom listener function
 previous_radio_button_state = None
 
@@ -1965,7 +2104,7 @@ def update_plot_with_picks():
                    globals().get('gain_slider'), globals().get('recip_button'),
                    globals().get('radio_quantity'), globals().get('gain_minus_btn'),
                    globals().get('gain_plus_btn'), globals().get('prev_shot_btn'),
-                   globals().get('next_shot_btn')):
+                   globals().get('next_shot_btn'), globals().get('radio_domain')):
             if _w is not None:
                 try:
                     _w.disconnect_events()
@@ -2741,6 +2880,8 @@ SHORTCUTS_TEXT = """Picking canvas keys
   s   save picks (pickle)
   n   choose a shot (dialog; saves first)
   f   filter designer
+  x   x axis: receiver index <-> offset (distance along the line)
+  Ctrl+E   export picks for inversion (SGT / x positions / pyGIMLi)
   Ctrl+S   save the canvas as an image
   Ctrl+O   import SEG-Y data (File menu)
   Ctrl+D   plotted traces, time axis and gain
@@ -2752,12 +2893,12 @@ Mouse
   ◀ Prev / Next ▶   neighbouring shot (saves first)
 
 Everything else is in the menus / toolbar:
-  File: import SEG-Y data, repeat an import, save picks, canvas image
+  File: import SEG-Y / SU data, repeat an import, save picks, export picks, canvas image
   Data: survey geometry / topography (double-click a shot to open it),
         preprocessing, acceleration / velocity / displacement
   Processing: filter designer
   Picks: undo / redo, delete picks (one receiver or ranges), automatic picking, save
-  Traces, axes & gain: trace ranges (e.g. 1-20, 50-60), time window, gain
+  Traces, axes & gain: trace ranges (e.g. 1-20, 50-60), time window, gain, X axis index / offset
   QC: reciprocity and pick QC (all picks on one canvas; Delete mode, Ctrl+Z / Ctrl+Y)
   Help: user manual (F1), PDF manual"""
 
@@ -2999,9 +3140,9 @@ def import_from_record(path=None):
     try:
         rec = dimp.load_record(path)
         sv = dimp.import_files(rec['files'], rec['quantity'], progress=_print_import_progress,
-                               geometry=rec['geometry'], pkl_path=rec.get('pkl') or None,
+                               pkl_path=rec.get('pkl') or None,
                                sgt_path=rec.get('sgt') or None,
-                               use_header_delay=rec.get('use_header_delay', True),
+                               **dimp.record_import_kwargs(rec),             # v17: + format, topography
                                load_existing_picks=True,
                                picks_source=rec['pkl'] if rec.get('pkl') and os.path.isfile(rec['pkl'])
                                else (rec.get('picks_source') or ''))
@@ -3030,6 +3171,30 @@ def close_picker():
         print("Picker closed; picks saved. Run the cells below the picker to export the SGT file.")
 
 
+def open_export_ui():
+    """File > Export picks for inversion (v17): SGT station numbers, SGT x positions or pyGIMLi."""
+    global final_picks_dict
+    try:
+        finalize_and_process_picks()                  # unfinished clicks / strokes count
+    except Exception:
+        pass
+    if final_pick_gather_multi_seed is not None and shot_no is not None:
+        final_picks_dict[f'final_picks_for_shot_no_{shot_no}'] = final_pick_gather_multi_seed
+    try:
+        geom = pex.geometry_from_survey(SURVEY, recv_pos=recv_pos, shot_pos=shot_pos,
+                                        pick_dt_s=1.0 / (_samples_per_ms() * 1e3))
+    except Exception as e:
+        QMessageBox.critical(None, 'Export picks', f'No geometry for the export: {e}')
+        return None
+    parent = None
+    try:
+        parent = fig.canvas.manager.window if fig is not None and plt.fignum_exists(fig.number) else None
+    except Exception:
+        pass
+    return pex.open_export_dialog(final_picks_dict, geom, folder=reciprocity_report_directory,
+                                  parent=parent)
+
+
 def install_app_menus(fig):
     """Add menus and a tools toolbar to the picker's Qt window (no-op on other backends)."""
     global _quantity_actions
@@ -3048,12 +3213,14 @@ def install_app_menus(fig):
 
     from PyQt5.QtGui import QKeySequence
     m_file = mb.addMenu('&File')                       # v12
-    a = m_file.addAction('Import SEG-Y data...', import_new_data)
+    a = m_file.addAction('Import SEG-Y / SU data...', import_new_data)
     a.setShortcut(QKeySequence('Ctrl+O'))
     a.setToolTip('Open the import window; the picks of this session are saved first')
     m_file.addAction('Repeat an import (import record .json)...', import_from_record)
     m_file.addSeparator()
     m_file.addAction('Save picks  (s)', _run_from_menu(_save_picks_menu))
+    a = m_file.addAction('Export picks for inversion (SGT / pyGIMLi)...', open_export_ui)    # v17
+    a.setShortcut(QKeySequence('Ctrl+E'))
     m_file.addAction('Save canvas image...', save_canvas_image)
     m_file.addSeparator()
     m_file.addAction('Close picker (saves picks)', close_picker)
@@ -3086,6 +3253,7 @@ def install_app_menus(fig):
                       _run_from_menu(lambda: open_delete_picks_ui('range')))
     m_picks.addSeparator()
     m_picks.addAction('Save picks  (s)', _run_from_menu(_save_picks_menu))
+    m_picks.addAction('Export picks for inversion (SGT / pyGIMLi)...  (Ctrl+E)', open_export_ui)
     m_picks.addSeparator()
     m_auto = m_picks.addMenu('Automatic picking')
     m_auto.addAction('STA/LTA (settings + preview)...', open_autopick_stalta)
@@ -3104,6 +3272,19 @@ def install_app_menus(fig):
     m_g.addSeparator()
     for _gv in (1, 3.5, 10, 30):
         m_g.addAction(f'Gain ×{_gv:g}', lambda _c=False, v=_gv: _gain_menu_set(v))
+    m_view.addSeparator()
+    global _domain_actions                               # v17: index / offset x axis
+    m_x = m_view.addMenu('X axis')
+    grp_x = QActionGroup(win)
+    _domain_actions = {}
+    for _k, _t in (('index', 'Receiver index (picker positions)  (x)'),
+                   ('offset', 'Offset: distance along the line, gaps to scale  (x)')):
+        _a = m_x.addAction(_t)
+        _a.setCheckable(True)
+        _a.setChecked(X_DOMAIN[0] == _k)
+        _a.triggered.connect(lambda _c=False, k=_k: set_x_domain(k))
+        grp_x.addAction(_a)
+        _domain_actions[_k] = _a
     m_view.addSeparator()
     m_view.addAction('Go to the plotted window (h)', lambda: (reset_to_full_view()))
     m_qc = mb.addMenu('&QC')
@@ -3129,7 +3310,8 @@ def install_app_menus(fig):
     tools.setText('Tools \u25be')
     tools.setPopupMode(QToolButton.InstantPopup)
     menu = QMenu(tools)
-    for title, func in (('Import SEG-Y data...', import_new_data),
+    for title, func in (('Import SEG-Y / SU data...', import_new_data),
+                        ('Export picks for inversion (SGT / pyGIMLi)...', open_export_ui),
                         ('Survey geometry / topography...', open_geometry_window),
                         ('Preprocessing...', _run_from_menu(open_preprocessing_ui)),
                         ('Filter designer...', _run_from_menu(open_filter_designer_ui)),
@@ -3188,6 +3370,9 @@ def install_app_menus(fig):
         _f.setPointSizeF(_f.pointSizeF() * 1.5)
         _a.setFont(_f)
     tb.addAction('\U0001F4BE Save picks', _run_from_menu(_save_picks_menu))
+    _a_exp = tb.addAction('\u21e7 Export', open_export_ui)             # v17: beside Save picks
+    _a_exp.setToolTip('Export picks for inversion: SGT (station numbers or x positions) or pyGIMLi (Ctrl+E)')
+    _a_exp.setObjectName('export_action')
     tb.addSeparator()
     tb.addAction('\u2753 Help', lambda: show_manual(None, toggle=True))      # v13
     win.addToolBarBreak()
@@ -3910,6 +4095,8 @@ def on_key(event):
         redo_pick_edit()
         restore_zoom()
 
+    elif event.key == 'x':                     # v17: index <-> offset x axis
+        toggle_x_domain()
     elif event.key == 'h':
         reset_cursor_and_toolbar()
         mode[0] = 'Home'
