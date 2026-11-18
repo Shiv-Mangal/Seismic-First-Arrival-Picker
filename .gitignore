@@ -1,0 +1,26 @@
+# --- real field data never goes in this repository ---
+*.segy
+*.sgy
+*.SEGY
+*.SGY
+*.su
+*.SU
+# synthetic example survey only:
+!example_data/*.segy
+# picks, exports and outputs of picking sessions
+*.pkl
+*_picks*.txt
+*_SGT*.txt
+*_SGT*.csv
+*_pygimli*.txt
+*_pygimli*.dat
+*_import.json
+picks/
+original_headers_backup_*/
+# Python / editors
+__pycache__/
+*.py[cod]
+.spyproject/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
