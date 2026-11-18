@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox,
     QCheckBox, QPushButton, QMessageBox, QInputDialog, QApplication
 )
+from PyQt5.QtCore import QTimer
 
 import time
 
@@ -476,50 +477,103 @@ def time_shift(datafile, delta_t, dt):
     return data_shifted
 
 
-# Applying Time Shift
-apply_tshift = 'yes'
+# ---------------------------------------------------------------------
+# OLD time shift / bruges integration (kept for reference; replaced below)
+# ---------------------------------------------------------------------
+# # Applying Time Shift
+# apply_tshift = 'yes'
+#
+# delta_t = -0.05  # Time shift in seconds
+# dt = .001  # sample rate of node data
+#
+# # Time shift with fft
+# if apply_tshift.lower() == 'yes':
+#
+#     norm_data_time_shifted = []
+#     for i in range(len(norm_data)):
+#
+#         data_shifted = time_shift(norm_data[i], delta_t, dt)
+#         norm_data_time_shifted.append(data_shifted)
+#
+#     norm_data_time_shifted = np.array(norm_data_time_shifted)
+#     norm_data = norm_data_time_shifted
+#
+#
+#
+# # Integration to velocity data
+#
+# apply_filter = 'yes'
+# ormsby_length = 0.4 # length of filter operator in seconds
+# f1 = 8; f2=15; f3=120; f4=200
+# sampling_rate = 0.001
+# integrate_to_velocity = 'no'
+#
+#
+# if integrate_to_velocity.lower() == 'yes':
+#
+#
+#     norm_data_vel = []
+#
+#     for i in range(len(norm_data)):
+#
+#         w, t = bruges.filters.ormsby(duration=ormsby_length, dt=sampling_rate, f=[f1, f2, f3, f4])
+#         data_filt = bruges.filters.convolve(norm_data[i], w, axis=0, verbose=False)
+#         data_filt2 = bruges.filters.convolve(data_filt, w, axis=0, verbose=False) # Filter twice
+#         vel_data = cumulative_trapezoid(data_filt2, axis=0, initial=0)
+#         norm_data_vel.append(vel_data)
+#
+#     norm_data_vel = np.array(norm_data_vel)
+#
 
-delta_t = -0.05  # Time shift in seconds
-dt = .001  # sample rate of node data
 
-# Time shift with fft
-if apply_tshift.lower() == 'yes':
+apply_tshift = 'yes'     # used as the starting time-shift setting below
+delta_t = -0.05          # s
 
-    norm_data_time_shifted = []
-    for i in range(len(norm_data)):
+# ---------------------------------------------------------------------
+# NEW: preprocess_designer.py (same folder). Trace kills -> demean ->
+# integrate/differentiate (+ minimum-phase low-cut after each integration)
+# -> time shift -> mute -> per-trace RMS normalization.
+# In the picker: Data menu > Preprocessing... (or the toolbar button) opens the
+# interactive version; the DATA QUANTITY radio switches acc/vel/disp.
+# ---------------------------------------------------------------------
+import importlib
+try:
+    _here = os.path.dirname(os.path.abspath(__file__))
+except NameError:                     # running cells in Spyder/IPython
+    _here = os.getcwd()
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+import preprocess_designer as ppz
+importlib.reload(ppz)
 
-        data_shifted = time_shift(norm_data[i], delta_t, dt)
-        norm_data_time_shifted.append(data_shifted)
+# Sample interval from the SEG-Y headers (the picker's 0.1 ms pick units assume 1 ms data)
+dt = ppz.segy_sample_interval(full_filenames[0], default=0.001)
+if abs(dt - 0.001) > 1e-9:
+    print(f"WARNING: data sample interval is {dt * 1e3:g} ms, but the picker's pick units "
+          f"(0.1 ms after x10 resampling) assume 1 ms data.")
 
-    norm_data_time_shifted = np.array(norm_data_time_shifted)
-    norm_data = norm_data_time_shifted
+PREPROC_PARAMS = ppz.PreprocParams(
+    input_quantity='acceleration',    # what the loaded SEG-Y files contain:
+                                      # 'acceleration' | 'velocity' | 'displacement'
+    convert=False,                    # True: also integrate/differentiate at start-up
+    demean=True,                      # demean before integration (Steve's v6)
+    lowcut_on=True, lowcut_hz=15.0, lowcut_transition_hz=20.0,   # after EACH integration
+    lowcut_taps=0, lowcut_atten_db=60.0,                         # 0 taps = auto size
+    time_shift_on=(apply_tshift.lower() == 'yes'), delta_t_ms=delta_t * 1e3,
+    mute_on=False, mute_ms=0.0,
+    normalize=True,                   # per-trace RMS (as before)
+    kill_all=[],                      # trace columns (0-based) zeroed on every shot
+    kill_shots={},                    # {shot index: [trace columns]}
+)
+PREPROC_PRESET_FILE = None            # e.g. 'my_preprocessing.json' (includes trace kills)
+if PREPROC_PRESET_FILE:
+    PREPROC_PARAMS = ppz.PreprocParams.load_json(PREPROC_PRESET_FILE)
+    print(f"Loaded preprocessing preset {PREPROC_PRESET_FILE}")
 
-
-
-# Integration to velocity data
-
-apply_filter = 'yes'
-ormsby_length = 0.4 # length of filter operator in seconds
-f1 = 8; f2=15; f3=120; f4=200
-sampling_rate = 0.001
-integrate_to_velocity = 'no'
-
-
-if integrate_to_velocity.lower() == 'yes':
-
-    
-    norm_data_vel = []
-
-    for i in range(len(norm_data)):
-        
-        w, t = bruges.filters.ormsby(duration=ormsby_length, dt=sampling_rate, f=[f1, f2, f3, f4])
-        data_filt = bruges.filters.convolve(norm_data[i], w, axis=0, verbose=False)
-        data_filt2 = bruges.filters.convolve(data_filt, w, axis=0, verbose=False) # Filter twice
-        vel_data = cumulative_trapezoid(data_filt2, axis=0, initial=0)
-        norm_data_vel.append(vel_data)
-
-    norm_data_vel = np.array(norm_data_vel)
-    
+# {quantity: (n_shots, n_samples, n_traces)}; only the input quantity unless convert=True
+QUANTITY_DATA = ppz.run_preprocessing(shot_gather_array, dt, PREPROC_PARAMS)
+ACTIVE_QUANTITY = PREPROC_PARAMS.input_quantity
+norm_data = QUANTITY_DATA[ACTIVE_QUANTITY]
 
 #%% Filtering (filter_designer.py): minimum-phase FIR / zero-phase FIR / IIR + notch(es)
 """
@@ -545,7 +599,7 @@ if _here not in sys.path:
 import filter_designer as fdz
 importlib.reload(fdz)                 # pick up edits to filter_designer.py without restarting
 
-fs = 1000                             # Hz (sampling rate of norm_data)
+fs = 1.0 / dt                         # Hz (sampling rate of norm_data, from the SEG-Y header)
 
 FILTER_PARAMS = fdz.FilterParams(
     filter_type='minphase_fir',       # 'minphase_fir' | 'zerophase_fir' | 'iir'
@@ -615,8 +669,9 @@ def resample_2D_gather(data, sampling_interval):
     return resamp_data
 
 
-filtered_data_resamp = resample_2D_gather(data=filtered_data, sampling_interval=10)
-norm_data_resamp = resample_2D_gather(data=norm_data, sampling_interval=10)
+RESAMPLE_FACTOR = 10    # x10 -> 0.1 ms pick samples for 1 ms data
+filtered_data_resamp = resample_2D_gather(data=filtered_data, sampling_interval=RESAMPLE_FACTOR)
+norm_data_resamp = resample_2D_gather(data=norm_data, sampling_interval=RESAMPLE_FACTOR)
 norm_data_resamp.shape
 
 #resamp_data[0]
@@ -852,6 +907,16 @@ import importlib
 import reciprocity_analyzer as rcq
 importlib.reload(rcq)                  # pick up edits without restarting the kernel
 RECIPROCITY_THRESHOLD_MS = 2.0         # flag shots whose median |reciprocal error| exceeds this
+import pick_tools as ptl               # void picks on a trace (same folder)
+importlib.reload(ptl)
+rax3 = None                            # DATA QUANTITY radio axes
+radio_quantity = None
+gain_minus_ax = gain_plus_ax = None    # gain step buttons
+gain_minus_btn = gain_plus_btn = None
+_quantity_actions = {}                 # menu actions (checked = active quantity)
+last_void = None                       # undo record for the last 'void picks'
+_last_cursor_x = None                  # receiver under the mouse (default for void picks)
+GAIN_MIN, GAIN_MAX = 0.1, 50.0         # gain slider range (log scale)
 recip_window = None                    # the pop-out window (kept alive while open)
 recip_button = None                    # canvas button (kept alive: matplotlib widgets need a reference)
 recip_button_ax = None
@@ -993,6 +1058,9 @@ class InputDialog(QDialog):
         self.filterButton = QPushButton("Design filter...")
         self.filterButton.clicked.connect(self.onDesignFilter)
         layout.addWidget(self.filterButton)
+        self.preprocButton = QPushButton("Preprocessing (integration, time shift, trace kills)...")
+        self.preprocButton.clicked.connect(self.onPreprocess)
+        layout.addWidget(self.preprocButton)
 
         self.submitButton = QPushButton("Submit")
         self.submitButton.clicked.connect(self.onSubmit)
@@ -1009,6 +1077,16 @@ class InputDialog(QDialog):
         except ValueError:
             preview_shot = 0
         open_filter_designer_ui(preview_shot, parent=self)
+        self.filterLabel.setText(f"Filter: {FILTER_PARAMS.summary()}")
+
+    def onPreprocess(self):
+        try:
+            preview_shot = int(self.lineEdit.text()) - 1
+            if not 0 <= preview_shot < len(norm_data):
+                raise ValueError
+        except ValueError:
+            preview_shot = 0
+        open_preprocessing_ui(preview_shot=preview_shot, parent=self)
         self.filterLabel.setText(f"Filter: {FILTER_PARAMS.summary()}")
 
     def onSubmit(self):
@@ -1041,6 +1119,7 @@ class InputDialog(QDialog):
 
 def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0.5, x=recv_pos_index, t=[], gain=1, type='VA', color='black', ntmax=1e+9):
     global rax1, rax2, radio_data, radio_reverse, previous_zoom_state, gain_text, gain_slider, gain_slider_ax
+    global rax3, radio_quantity, gain_minus_ax, gain_plus_ax, gain_minus_btn, gain_plus_btn
 
     '''Original wiggle function faster'''
 
@@ -1190,6 +1269,7 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
             ax.set_ylabel('Time Sample (10th of ms)', fontsize='x-large', labelpad=8,
                           fontweight='bold', fontfamily='sans-serif')
             ax.set_title(f'Shot No {shot_no + 1} at Receiver Position Index {shot_pos[shot_no]}'
+                         f'  |  {ACTIVE_QUANTITY.capitalize()}'
                          f'\nFiltered view: {FILTER_PARAMS.summary()}',
                          fontsize='x-large', pad=10, fontweight='bold', fontfamily='sans-serif')
 
@@ -1334,35 +1414,65 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
         radio_data.on_clicked(update_data)
         radio_reverse.on_clicked(update_reverse)
 
-        # ----- Gain Slider (unchanged) -----
-        gain_slider_ax = plt.axes([0.60, 0.035, 0.28, 0.030], facecolor='#f8f9fa')
+        # ----- DATA QUANTITY radio: acceleration / velocity / displacement -----
+        rax3 = plt.axes([0.9200, 0.42, 0.075, 0.16], facecolor='#f8f9fa')
+        for spine in rax3.spines.values():
+            spine.set_edgecolor('#7f8c8d')
+            spine.set_linewidth(1)
+        rax3.text(0.5, 0.95, 'QUANTITY', transform=rax3.transAxes,
+                  fontsize='medium', fontweight='bold', ha='center', va='top',
+                  fontfamily='sans-serif', color='#2c3e50')
+        _qlabels = ('Acceleration', 'Velocity', 'Displacement')   # full names: used as keys
+        radio_quantity = RadioButtons(rax3, _qlabels,
+                                      active=_qlabels.index(ACTIVE_QUANTITY.capitalize()),
+                                      activecolor='#3498db')
+        _style_quantity_radio()
+        radio_quantity.on_clicked(on_quantity_clicked)
+
+        # ----- Gain slider: log scale (fine control at low gain), ticks, - / + -----
+        gain_slider_ax = plt.axes([0.62, 0.040, 0.22, 0.022], facecolor='#ecf0f1')
+        gain_slider_ax.set_navigate(False)
         for spine in gain_slider_ax.spines.values():
-            spine.set_edgecolor('#2c3e50')
-            spine.set_linewidth(1.5)
-
-        gain_slider = Slider(
-            ax=gain_slider_ax,
-            label='Gain',
-            valmin=0.1,
-            valmax=50.0,
-            valinit=gain_factor[0],
-            valstep=0.1,
-            color='#3498db',
-        )
-
-        gain_slider.label.set_fontsize('large')
+            spine.set_visible(False)
+        _lmin, _lmax = np.log10(GAIN_MIN), np.log10(GAIN_MAX)
+        _g0 = float(np.clip(gain_factor[0], GAIN_MIN, GAIN_MAX))
+        _slider_kw = dict(ax=gain_slider_ax, label='GAIN', valmin=_lmin, valmax=_lmax,
+                          valinit=np.log10(_g0), color='#3498db')
+        try:                                    # matplotlib >= 3.5: styled track + handle
+            gain_slider = Slider(**_slider_kw, track_color='#d6dbdf', initcolor='none',
+                                 handle_style={'facecolor': 'white', 'edgecolor': '#2c3e50',
+                                               'size': 16})
+        except TypeError:                       # older matplotlib: plain slider
+            gain_slider = Slider(**_slider_kw)
+        gain_slider.label.set_fontsize('medium')
         gain_slider.label.set_fontweight('bold')
-        gain_slider.label.set_fontfamily('sans-serif')
         gain_slider.label.set_color('#2c3e50')
+        # label left of the - button, value right of the + button (figure-fraction layout)
+        _ax_x0, _ax_w = 0.62, 0.22
+        gain_slider.label.set_position(((0.590 - _ax_x0) / _ax_w, 0.5))
+        gain_slider.label.set_horizontalalignment('right')
+        gain_slider.valtext.set_position(((0.872 - _ax_x0) / _ax_w, 0.5))
+        gain_slider.valtext.set_horizontalalignment('left')
         gain_slider.valtext.set_fontsize('large')
         gain_slider.valtext.set_fontweight('bold')
-        gain_slider.valtext.set_fontfamily('sans-serif')
-        gain_slider.valtext.set_color('#2c3e50')
+        gain_slider.valtext.set_color('#2980b9')
+        gain_slider.valtext.set_text(f'\u00d7{_g0:.2f}')
+        # decade ticks under the track
+        for _tv in (0.1, 0.3, 1, 3, 10, 30):
+            if GAIN_MIN <= _tv <= GAIN_MAX:
+                _lx = np.log10(_tv)
+                gain_slider_ax.plot([_lx, _lx], [-0.15, 0.0], color='#7f8c8d', lw=1,
+                                    clip_on=False, transform=gain_slider_ax.get_xaxis_transform())
+                gain_slider_ax.text(_lx, -0.55, f'{_tv:g}', transform=gain_slider_ax.get_xaxis_transform(),
+                                    ha='center', va='top', fontsize='x-small', color='#7f8c8d',
+                                    clip_on=False)
 
         def update_gain_slider(val):
             nonlocal gain
-            gain_factor[0] = val
-            rebuild_all(val)
+            g = float(10 ** val)
+            gain_factor[0] = g
+            gain_slider.valtext.set_text(f'\u00d7{g:.2f}')
+            rebuild_all(g)
             if gain_text:
                 try:
                     gain_text.set_text(f'GAIN: {gain_factor[0]:.2f}')
@@ -1371,9 +1481,21 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
 
         gain_slider.on_changed(update_gain_slider)
 
+        # - / + buttons: step the gain by x1.25
+        gain_minus_ax = plt.axes([0.596, 0.036, 0.018, 0.030])
+        gain_plus_ax = plt.axes([0.846, 0.036, 0.018, 0.030])
+        gain_minus_btn = Button(gain_minus_ax, '\u2212', color='#eaf2f8', hovercolor='#aed6f1')
+        gain_plus_btn = Button(gain_plus_ax, '+', color='#eaf2f8', hovercolor='#aed6f1')
+        for _b in (gain_minus_btn, gain_plus_btn):
+            _b.label.set_fontsize('large')
+            _b.label.set_fontweight('bold')
+            _b.label.set_color('#2c3e50')
+        gain_minus_btn.on_clicked(lambda _e: step_gain(-1))
+        gain_plus_btn.on_clicked(lambda _e: step_gain(+1))
+
         # ----- Reciprocity QC button (under the radio buttons) -----
         global recip_button, recip_button_ax
-        recip_button_ax = plt.axes([0.9200, 0.52, 0.06, 0.06])
+        recip_button_ax = plt.axes([0.9200, 0.33, 0.06, 0.06])
         recip_button = Button(recip_button_ax, 'Reciprocity\nQC', color='#eaf2f8',
                               hovercolor='#aed6f1')
         recip_button.label.set_fontsize('medium')
@@ -1417,6 +1539,7 @@ def plot_shot():
     fig, ax = plt.subplots(figsize=(16, 10))  # initial size only; window is maximized below
     fig.patch.set_facecolor('white')
     maximize_figure(fig)
+    install_app_menus(fig)          # Data / Processing / Picks / QC / Help menus + toolbar
     
     # Adjust layout to prevent clipping
     plt.subplots_adjust(left=0.10, right=0.90, top=0.92, bottom=0.12)
@@ -1507,7 +1630,9 @@ def update_plot_with_picks():
         # Disconnect the old widgets first: newer matplotlib keeps their canvas
         # callbacks alive after fig.clear(), and they then crash on every redraw.
         for _w in (globals().get('radio_data'), globals().get('radio_reverse'),
-                   globals().get('gain_slider'), globals().get('recip_button')):
+                   globals().get('gain_slider'), globals().get('recip_button'),
+                   globals().get('radio_quantity'), globals().get('gain_minus_btn'),
+                   globals().get('gain_plus_btn')):
             if _w is not None:
                 try:
                     _w.disconnect_events()
@@ -1674,6 +1799,320 @@ def open_shot_from_reciprocity(idx):
     print(f"Opened shot no. {shot_no + 1} (index {shot_no}) from the reciprocity window.")
 
 
+# ---------------------------------------------------------------------
+# Widget helpers
+# ---------------------------------------------------------------------
+_recent_dialogs = []
+
+
+def _keep_dialog(dlg):
+    """Keep the last closed dialogs alive briefly: deleting one while its plots still
+    have a redraw queued prints 'canvas has been deleted' errors in the console."""
+    _recent_dialogs.append(dlg)
+    del _recent_dialogs[:-2]
+
+
+def _is_widget_axes(a):
+    """True for the slider / radio / button axes (never picked on)."""
+    if a is None:
+        return False
+    return any(a is w for w in (gain_slider_ax, rax1, rax2, rax3, recip_button_ax,
+                                gain_minus_ax, gain_plus_ax) if w is not None)
+
+
+def step_gain(direction):
+    """- / + buttons and mouse wheel on the slider: gain x/÷ 1.25."""
+    if gain_slider is None:
+        return
+    lo, hi = np.log10(GAIN_MIN), np.log10(GAIN_MAX)
+    gain_slider.set_val(float(np.clip(gain_slider.val + direction * np.log10(1.25), lo, hi)))
+
+
+def _style_quantity_radio():
+    """Colour the quantity radio: active = blue, not computed yet = grey."""
+    if radio_quantity is None:
+        return
+    circles = getattr(radio_quantity, 'buttons', getattr(radio_quantity, 'circles', []))
+    for i, lab in enumerate(radio_quantity.labels):
+        q = lab.get_text().lower()
+        avail = QUANTITY_DATA.get(q) is not None
+        lab.set_fontsize('medium')
+        lab.set_fontweight('bold')
+        lab.set_color('#34495e' if avail else '#aab7b8')
+        lab.set_fontstyle('normal' if avail else 'italic')
+        lab.set_position((0.22, lab.get_position()[1]))
+    for i, c in enumerate(circles):        # older matplotlib: Circle patches
+        try:
+            c.set_radius(0.07)
+            c.set_edgecolor('#2c3e50')
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------
+# Data quantity (acceleration / velocity / displacement)
+# ---------------------------------------------------------------------
+def set_active_quantity(q, redraw=True):
+    """Show quantity q: re-filter with the current filter, resample, redraw."""
+    global ACTIVE_QUANTITY, norm_data, filtered_data, filter_stages
+    global norm_data_resamp, filtered_data_resamp, seismic_data, filtered_seismic_data
+    if QUANTITY_DATA.get(q) is None:
+        raise ValueError(f"{q} has not been computed (Data > Preprocessing...).")
+    t0 = time.time()
+    ACTIVE_QUANTITY = q
+    norm_data = QUANTITY_DATA[q]
+    filter_stages = fdz.build_filter_chain(FILTER_PARAMS, fs)
+    filtered_data = fdz.apply_filter_chain(norm_data, filter_stages, time_axis=1, verbose=False)
+    n_out = norm_data.shape[1] * RESAMPLE_FACTOR
+    norm_data_resamp = scipy.signal.resample(norm_data, n_out, axis=1)
+    filtered_data_resamp = scipy.signal.resample(filtered_data, n_out, axis=1)
+    seismic_data, filtered_seismic_data = norm_data_resamp, filtered_data_resamp
+    for qq, act in _quantity_actions.items():
+        act.setChecked(qq == q)
+    print(f"Showing {q} ({time.time() - t0:.1f} s).")
+    if redraw and fig is not None and shot_no is not None and plt.fignum_exists(fig.number):
+        update_plot_with_picks()
+
+
+def on_quantity_clicked(label):
+    """Radio callback. Deferred, so the radio isn't rebuilt inside its own callback."""
+    q = label.lower()
+    if q == ACTIVE_QUANTITY:
+        return
+    QTimer.singleShot(0, lambda: request_quantity(q))
+
+
+def _revert_quantity_radio():
+    if radio_quantity is not None:
+        idx = [l.get_text().lower() for l in radio_quantity.labels].index(ACTIVE_QUANTITY)
+        radio_quantity.set_active(idx)        # callback sees q == ACTIVE_QUANTITY: no-op
+        _style_quantity_radio()
+        fig.canvas.draw_idle()
+    for qq, act in _quantity_actions.items():
+        act.setChecked(qq == ACTIVE_QUANTITY)
+
+
+def request_quantity(q):
+    """Switch to q; if it hasn't been computed, offer to open the preprocessing dialog."""
+    if QUANTITY_DATA.get(q) is not None:
+        finalize_and_process_picks()
+        set_active_quantity(q)
+        return
+    ans = QMessageBox.question(
+        None, 'Not converted yet',
+        f"You haven't converted the data to {q} yet.\n\n"
+        f"Do you want to go to the interactive preprocessing (integration) window?\n"
+        f"Yes: open it now.   No: keep picking on {ACTIVE_QUANTITY}.",
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+    if ans == QMessageBox.Yes:
+        open_preprocessing_ui(target=q)
+        if QUANTITY_DATA.get(q) is not None:
+            finalize_and_process_picks()
+            set_active_quantity(q)
+            return
+        print(f"{q} still not computed; staying on {ACTIVE_QUANTITY}.")
+    _revert_quantity_radio()
+
+
+# ---------------------------------------------------------------------
+# Preprocessing dialog <-> picker
+# ---------------------------------------------------------------------
+def apply_preprocessing(params):
+    """Re-run preprocessing on all shots, keep the shown quantity if still available."""
+    global PREPROC_PARAMS, QUANTITY_DATA
+    t0 = time.time()
+    new = ppz.run_preprocessing(shot_gather_array, dt, params)
+    PREPROC_PARAMS = params.copy()
+    QUANTITY_DATA = new
+    q = ACTIVE_QUANTITY if ACTIVE_QUANTITY in new else params.input_quantity
+    set_active_quantity(q, redraw=False)
+    print(f"Preprocessing applied in {time.time() - t0:.1f} s.")
+    if fig is not None and shot_no is not None and plt.fignum_exists(fig.number):
+        update_plot_with_picks()
+
+
+def open_preprocessing_ui(preview_shot=None, parent=None, target=None):
+    """Open the preprocessing dialog (target: the quantity you were trying to show)."""
+    if preview_shot is None:
+        preview_shot = shot_no if shot_no is not None else 0
+    start = PREPROC_PARAMS.copy()
+    note = ''
+    if target is not None and target != start.input_quantity:
+        start.convert = True                  # pre-tick conversion: that's why we're here
+        note = (f"To show {target}, the data must be converted. 'Compute acceleration, velocity "
+                f"AND displacement' is ticked; check the low-cut and spectra, then press OK.")
+    dlg = ppz.PreprocessDialog(start, shot_gather_array, dt, x=recv_pos, shot=preview_shot,
+                               on_apply=apply_preprocessing, wiggle_gain=gain_factor[0],
+                               wiggle_clip=CLIP_FRACTION,
+                               preview_ms=no_of_samples_to_plot / RESAMPLE_FACTOR * dt * 1e3,
+                               note=note, parent=parent)
+    dlg.exec_()
+    _keep_dialog(dlg)
+
+
+# ---------------------------------------------------------------------
+# Void picks on a trace
+# ---------------------------------------------------------------------
+def open_void_picks_ui():
+    global last_void, final_pick_gather_multi_seed, pending_picks
+    if shot_no is None:
+        print("Open a shot first.")
+        return
+    finalize_and_process_picks()
+    dlg = ptl.VoidPicksDialog(final_picks_dict, recv_pos, shot_no,
+                              dt_pick_ms=dt * 1e3 / RESAMPLE_FACTOR, default_x=_last_cursor_x)
+    if dlg.exec_() != QDialog.Accepted:
+        return
+    tol = 0.5 * float(np.min(np.diff(np.sort(recv_pos))))
+    removed = ptl.void_picks(final_picks_dict, dlg.x0, tol, dlg.shots)
+    key = f'final_picks_for_shot_no_{shot_no}'
+    if key in removed:                         # keep the working copy of this shot in step
+        final_pick_gather_multi_seed = final_picks_dict[key]
+    last_void = removed
+    scope = 'all shots' if dlg.shots is None else f'shot {shot_no + 1}'
+    print(f"Voided {sum(v.shape[1] for v in removed.values())} pick(s) at receiver "
+          f"{dlg.x0:g} on {scope}. Picks > Undo last void restores them; 's' saves.")
+    update_plot_with_picks()
+
+
+def undo_last_void():
+    global last_void, final_pick_gather_multi_seed
+    if not last_void:
+        print("Nothing to undo.")
+        return
+    ptl.restore_picks(final_picks_dict, last_void)
+    key = f'final_picks_for_shot_no_{shot_no}'
+    if key in last_void:
+        final_pick_gather_multi_seed = final_picks_dict[key]
+    print(f"Restored {sum(v.shape[1] for v in last_void.values())} voided pick(s).")
+    last_void = None
+    update_plot_with_picks()
+
+
+# ---------------------------------------------------------------------
+# Menu bar + toolbar on the picker window
+# ---------------------------------------------------------------------
+SHORTCUTS_TEXT = """Picking canvas keys
+  m   manual pick (click / drag)
+  r   delete picks (click two points)
+  u   undo last delete
+  z   zoom      d   pan (drag)      h   home (full view)
+  g   type a gain value
+  s   save picks (pickle)
+  n   next shot (saves first)
+  f   filter designer
+  Ctrl+S   save the canvas as an image
+
+Mouse
+  wheel on the gather    zoom
+  wheel on the gain bar  gain x/÷ 1.25
+
+Everything else is in the menus / toolbar:
+  Data: preprocessing, acceleration / velocity / displacement
+  Processing: filter designer
+  Picks: void picks on a trace, undo void, save
+  QC: reciprocity"""
+
+
+def show_shortcuts():
+    QMessageBox.information(None, 'Picker shortcuts', SHORTCUTS_TEXT)
+
+
+def _run_from_menu(func):
+    """Menu/toolbar actions: finish pending picks, run, keep the zoom."""
+    def run():
+        try:
+            if fig is not None and plt.fignum_exists(fig.number):
+                lims = (ax.get_xlim(), ax.get_ylim())
+            else:
+                lims = None
+            func()
+            if lims is not None and fig is not None and plt.fignum_exists(fig.number):
+                ax.set_xlim(lims[0])
+                ax.set_ylim(lims[1])
+                update_mode_text()
+                fig.canvas.draw_idle()
+        except Exception as e:
+            QMessageBox.critical(None, 'Error', str(e))
+            raise
+    return run
+
+
+def _save_picks_menu():
+    finalize_and_process_picks()
+    save_picks(file_path_pkl)
+    print("Picks saved.")
+
+
+def install_app_menus(fig):
+    """Add menus and a tools toolbar to the picker's Qt window (no-op on other backends)."""
+    global _quantity_actions
+    try:
+        from PyQt5.QtWidgets import QToolBar, QToolButton, QMenu, QActionGroup
+        win = fig.canvas.manager.window
+        mb = win.menuBar()
+    except Exception as e:
+        print(f"Menus not available on this backend ({e}); use the keys and canvas buttons.")
+        return
+    mb.clear()
+    win.setWindowTitle('First-arrival picker')
+
+    m_data = mb.addMenu('&Data')
+    m_data.addAction('Preprocessing (integration, time shift, trace kills)...',
+                     _run_from_menu(open_preprocessing_ui))
+    m_q = m_data.addMenu('Show quantity')
+    grp = QActionGroup(win)
+    _quantity_actions = {}
+    for q in ppz.QUANTITIES:
+        act = m_q.addAction(q.capitalize())
+        act.setCheckable(True)
+        act.setChecked(q == ACTIVE_QUANTITY)
+        act.triggered.connect(lambda _c=False, q=q: (request_quantity(q) if q != ACTIVE_QUANTITY else None))
+        grp.addAction(act)
+        _quantity_actions[q] = act
+
+    m_proc = mb.addMenu('&Processing')
+    m_proc.addAction('Filter designer...  (f)', _run_from_menu(open_filter_designer_ui))
+
+    m_picks = mb.addMenu('&Picks')
+    m_picks.addAction('Void picks on a trace...', _run_from_menu(open_void_picks_ui))
+    m_picks.addAction('Undo last void', _run_from_menu(undo_last_void))
+    m_picks.addSeparator()
+    m_picks.addAction('Save picks  (s)', _run_from_menu(_save_picks_menu))
+
+    m_qc = mb.addMenu('&QC')
+    m_qc.addAction('Reciprocity QC...', open_reciprocity_window)
+
+    m_help = mb.addMenu('&Help')
+    m_help.addAction('Keyboard and mouse shortcuts...', show_shortcuts)
+
+    # Toolbar: one-click access + a Tools drop-down
+    tb = QToolBar('Picker tools', win)
+    tb.setObjectName('picker_tools')
+    tb.setStyleSheet('QToolBar { spacing: 6px; } QToolButton { padding: 3px 8px; font-weight: bold; }')
+    tools = QToolButton(tb)
+    tools.setText('Tools \u25be')
+    tools.setPopupMode(QToolButton.InstantPopup)
+    menu = QMenu(tools)
+    for title, func in (('Preprocessing...', _run_from_menu(open_preprocessing_ui)),
+                        ('Filter designer...', _run_from_menu(open_filter_designer_ui)),
+                        ('Reciprocity QC...', open_reciprocity_window),
+                        ('Void picks on a trace...', _run_from_menu(open_void_picks_ui)),
+                        ('Undo last void', _run_from_menu(undo_last_void)),
+                        ('Shortcuts...', show_shortcuts)):
+        menu.addAction(title, func)
+    tools.setMenu(menu)
+    tb.addWidget(tools)
+    tb.addSeparator()
+    tb.addAction('\u2699 Preprocessing', _run_from_menu(open_preprocessing_ui))
+    tb.addAction('\u224b Filter', _run_from_menu(open_filter_designer_ui))
+    tb.addAction('\u21c4 Reciprocity QC', open_reciprocity_window)
+    tb.addAction('\u2702 Void picks', _run_from_menu(open_void_picks_ui))
+    tb.addAction('\U0001F4BE Save picks', _run_from_menu(_save_picks_menu))
+    win.addToolBarBreak()
+    win.addToolBar(tb)
+
+
 def open_filter_designer_ui(preview_shot=None, parent=None):
     """Open the filter designer on preview_shot (default: the shot being picked)."""
     if preview_shot is None:
@@ -1689,6 +2128,7 @@ def open_filter_designer_ui(preview_shot=None, parent=None):
         wiggle_clip=CLIP_FRACTION,
         parent=parent)
     dlg.exec_()
+    _keep_dialog(dlg)
 
 def remove_picks_between_points(points):
     """Removes picks between two points for the current shot."""
@@ -1859,6 +2299,11 @@ def snap_y_to_sample(y_click):
     
 def on_scroll(event):
     global previous_zoom_state
+    if event.inaxes is not None and event.inaxes is gain_slider_ax:
+        step_gain(+1 if event.button == 'up' else -1)
+        return
+    if _is_widget_axes(event.inaxes):
+        return
     x_min, x_max = ax.get_xlim()
     y_min, y_max = ax.get_ylim()
 
@@ -1886,7 +2331,7 @@ def on_mouse_press(event):
     if event.inaxes is None:
         return
 
-    if event.inaxes is gain_slider_ax or event.inaxes in (rax1, rax2):
+    if _is_widget_axes(event.inaxes):
         mouse_pressed = False
         return
 
@@ -1952,7 +2397,7 @@ def on_mouse_move(event):
     #    This prevents crosshairs or picking logic from being
     #    triggered by movements over these widgets.
     # -------------------------------------------------------------
-    if event.inaxes is gain_slider_ax or event.inaxes in (rax1, rax2):
+    if _is_widget_axes(event.inaxes):
         mouse_pressed = False   # extra safety
         return
 
@@ -1968,6 +2413,9 @@ def on_mouse_move(event):
     # -------------------------------------------------------------
     # Now we are guaranteed to be on the seismic axes (ax).
     # -------------------------------------------------------------
+
+    global _last_cursor_x
+    _last_cursor_x = event.xdata          # default receiver for Picks > Void picks
 
     # Crosshair logic – create once, update later.
     if crosshair[0] is None:
@@ -2052,7 +2500,7 @@ def on_click(event):
     global delete_visual_line, delete_point_markers
 
     # Ignore clicks outside the main axes
-    if event.inaxes is None or event.inaxes in [rax1, rax2] or event.inaxes is gain_slider_ax:
+    if event.inaxes is None or _is_widget_axes(event.inaxes):
         return
 
     x, y = event.xdata, event.ydata

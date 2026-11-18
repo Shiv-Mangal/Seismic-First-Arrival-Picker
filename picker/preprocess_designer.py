@@ -543,9 +543,10 @@ if _HAVE_QT:
 
             self.fig_spec = Figure(dpi=dpi, constrained_layout=True)
             self.canvas_spec = FigureCanvas(self.fig_spec)
-            self.ax_spec = self.fig_spec.add_subplot(2, 1, 1)
-            self.ax_lc = self.fig_spec.add_subplot(2, 2, 3)
-            self.ax_lcimp = self.fig_spec.add_subplot(2, 2, 4)
+            gs = self.fig_spec.add_gridspec(2, 2, height_ratios=[1.7, 1])
+            self.ax_spec = self.fig_spec.add_subplot(gs[0, :])
+            self.ax_lc = self.fig_spec.add_subplot(gs[1, 0])
+            self.ax_lcimp = self.fig_spec.add_subplot(gs[1, 1])
             spec_tab = QWidget()
             sl = QVBoxLayout(spec_tab)
             sl.setContentsMargins(2, 2, 2, 2)
@@ -781,8 +782,9 @@ if _HAVE_QT:
             ax.set_ylim(-80, 5)
             ax.set_xlabel('Frequency (Hz, log)')
             ax.set_ylabel('dB re. each curve\'s peak')
-            ax.set_title(f'Shot {self.shot + 1}: average spectrum. Integration tilts the spectrum '
-                         f'-6 dB/octave toward low frequencies; the low-cut removes that drift.')
+            ax.set_title(f'Shot {self.shot + 1}: average spectrum before / after integration '
+                         f'(each integration adds +6 dB/octave toward low frequencies)',
+                         fontsize='medium')
             ax.grid(alpha=0.3, which='both')
             ax.legend(fontsize='small', loc='lower left')
 
@@ -796,7 +798,7 @@ if _HAVE_QT:
                 self.ax_lc.axvline(p.lowcut_hz, color='r', ls='--', lw=1)
                 self.ax_lc.set_xlim(0, min(self.fs / 2, 4 * p.lowcut_hz + p.lowcut_transition_hz))
                 self.ax_lc.set_ylim(-100, 5)
-                self.ax_lc.set_title(f'Low-cut realized response ({n} taps)')
+                self.ax_lc.set_title(f'Low-cut realized response ({n} taps)', fontsize='medium')
                 self.ax_lc.set_xlabel('Frequency (Hz)')
                 self.ax_lc.set_ylabel('dB')
                 self.ax_lc.grid(alpha=0.3)
@@ -804,7 +806,7 @@ if _HAVE_QT:
                 self.ax_lcimp.plot(t, h, 'k', lw=1)
                 self.ax_lcimp.axvline(0, color='r', ls='--', lw=1)
                 self.ax_lcimp.set_xlim(-5, min(t[-1], 150))
-                self.ax_lcimp.set_title('Low-cut impulse response (causal: nothing before 0)')
+                self.ax_lcimp.set_title('Low-cut impulse response (causal)', fontsize='medium')
                 self.ax_lcimp.set_xlabel('Time (ms)')
                 self.ax_lcimp.grid(alpha=0.3)
             else:
