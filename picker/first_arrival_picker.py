@@ -1137,6 +1137,10 @@ import reciprocity_analyzer as rcq
 importlib.reload(rcq)                  # pick up edits without restarting the kernel
 RECIPROCITY_THRESHOLD_MS = 2.0         # flag shots whose median |reciprocal error| exceeds this
 import pick_tools as ptl               # void picks on a trace (same folder)
+import auto_pickers as apk             # v11: automatic picking (STA/LTA family + post-processing)
+importlib.reload(apk)
+AUTOPICK_PARAMS = apk.AutoPickParams()  # last settings used (saved with the picks)
+AUTOPICK_UNDO = []                      # undo stack for automatic picking
 importlib.reload(ptl)
 rax3 = None                            # DATA QUANTITY radio axes
 radio_quantity = None
@@ -2077,6 +2081,109 @@ def open_reciprocity_window():
     recip_window.activateWindow()
 
 
+# ===================== Automatic picking (v11) =====================
+def autopick_data(shot, quantity, filtered):
+    """One shot at pick resolution (resampled x RESAMPLE_FACTOR): (data, dt_pick)."""
+    dt_pick = dt / RESAMPLE_FACTOR
+    if quantity == ACTIVE_QUANTITY:                    # already prepared for the canvas
+        d = filtered_seismic_data[shot] if filtered else seismic_data[shot]
+        return np.asarray(d, float), dt_pick
+    if quantity not in QUANTITY_DATA:
+        raise ValueError(f"{quantity} is not computed: open Preprocessing first.")
+    d = QUANTITY_DATA[quantity][shot]
+    if filtered:
+        d = fdz.apply_filter_chain(d[None], filter_stages, time_axis=1, verbose=False,
+                                   pre_shift_s=filter_pre_shift(), fs=fs)[0]
+    return scipy.signal.resample(d, d.shape[0] * RESAMPLE_FACTOR, axis=0), dt_pick
+
+
+def _existing_picks_ms(shot):
+    a = final_picks_dict.get(f'final_picks_for_shot_no_{shot}')
+    if a is None:
+        return None
+    a = np.asarray(a, float).reshape(-1, 2)
+    return a[:, 0], a[:, 1] * dt / RESAMPLE_FACTOR * 1e3
+
+
+def apply_autopicks(results, write_mode, params):
+    """Write automatic picks into final_picks_dict (undo-able), redraw, save."""
+    global final_pick_gather_multi_seed, AUTOPICK_PARAMS
+    try:
+        reset_cursor_and_toolbar()
+    except Exception:
+        pass
+    if shot_no is not None:
+        finalize_and_process_picks()                  # keep anything picked by hand first
+    spm = _samples_per_ms()
+    undo = {}
+    n_written = 0
+    for s_, r in results.items():
+        key = f'final_picks_for_shot_no_{s_}'
+        undo[key] = None if key not in final_picks_dict else np.array(final_picks_dict[key], copy=True)
+        ok = np.isfinite(r['t_ms'])
+        new = np.column_stack([np.asarray(recv_pos, float)[ok], np.round(r['t_ms'][ok] * spm)])
+        if write_mode == 'fill' and key in final_picks_dict:
+            old = np.asarray(final_picks_dict[key], float).reshape(-1, 2)
+            new = new[~np.isin(np.round(new[:, 0], 6), np.round(old[:, 0], 6))]
+            new = np.concatenate([old, new])
+        new = new[np.argsort(new[:, 0], kind='stable')]
+        n_written += int(ok.sum())
+        final_picks_dict[key] = new[None, :, :]
+    AUTOPICK_UNDO.append(undo)
+    AUTOPICK_PARAMS = params.copy()
+    if shot_no is not None and shot_no in results:
+        final_pick_gather_multi_seed = None
+        if fig is not None and plt.fignum_exists(fig.number):
+            update_plot_with_picks()
+    try:
+        save_picks(file_path_pkl)
+    except Exception as e:
+        print(f"Saving after automatic picking failed: {e}")
+    refresh_reciprocity_window()
+    refresh_geometry_window()
+    msg = f"Automatic picks written on {len(results)} shot(s) ({write_mode}); undo: Auto-pick > Undo last auto-pick."
+    print(msg)
+    return msg
+
+
+def undo_last_autopick():
+    global final_pick_gather_multi_seed
+    if not AUTOPICK_UNDO:
+        print("No automatic picking to undo.")
+        return
+    undo = AUTOPICK_UNDO.pop()
+    for key, old in undo.items():
+        if old is None:
+            final_picks_dict.pop(key, None)
+        else:
+            final_picks_dict[key] = old
+    if shot_no is not None and f'final_picks_for_shot_no_{shot_no}' in undo:
+        final_pick_gather_multi_seed = None
+        if fig is not None and plt.fignum_exists(fig.number):
+            update_plot_with_picks()
+    save_picks(file_path_pkl)
+    refresh_reciprocity_window()
+    refresh_geometry_window()
+    print(f"Undid the last automatic picking ({len(undo)} shot(s) restored).")
+
+
+def open_autopick_stalta():
+    """Auto-pick > STA/LTA: settings with a live preview, then apply."""
+    p = AUTOPICK_PARAMS.copy()
+    if p.quantity not in QUANTITY_DATA:
+        p.quantity = ACTIVE_QUANTITY
+    dlg = apk.StaLtaDialog(p, autopick_data, len(seismic_data), shot_pos, recv_pos,
+                           current_shot=shot_no or 0, available_quantities=list(QUANTITY_DATA),
+                           existing_picks=_existing_picks_ms, on_apply=apply_autopicks,
+                           parent=fig.canvas.manager.window if fig is not None else None)
+    _keep_dialog(dlg)
+    dlg.exec_()
+
+
+def _autopick_planned(name):
+    QMessageBox.information(None, 'Automatic picking', f'{name} is planned; the menu is ready for it.')
+
+
 def picks_changed_from_qc(shots):
     """
     Picks were deleted / restored in the Reciprocity and pick QC window (v10).
@@ -2508,6 +2615,10 @@ def install_app_menus(fig):
     m_picks.addAction('Undo last void', _run_from_menu(undo_last_void))
     m_picks.addSeparator()
     m_picks.addAction('Save picks  (s)', _run_from_menu(_save_picks_menu))
+    m_picks.addSeparator()
+    m_auto = m_picks.addMenu('Automatic picking')
+    m_auto.addAction('STA/LTA (settings + preview)...', open_autopick_stalta)
+    m_auto.addAction('Undo last auto-pick', undo_last_autopick)
 
     m_view = mb.addMenu('&View')
     m_view.addAction('Display settings (time axis, window, traces, fill)...', open_display_settings)
@@ -2544,6 +2655,17 @@ def install_app_menus(fig):
     tb.addAction('\u224b Filter', _run_from_menu(open_filter_designer_ui))
     tb.addAction('\u21c4 Reciprocity && pick QC', open_reciprocity_window)
     tb.addAction('\u2702 Void picks', _run_from_menu(open_void_picks_ui))
+    auto = QToolButton(tb)                    # v11: automatic picking drop-down
+    auto.setText('\u2728 Auto-pick \u25be')
+    auto.setPopupMode(QToolButton.InstantPopup)
+    am = QMenu(auto)
+    am.addAction('STA/LTA (settings + preview)...', open_autopick_stalta)
+    a_dtw = am.addAction('Dynamic time warping (DTW) - planned', lambda: _autopick_planned('DTW'))
+    a_dtw.setEnabled(False)
+    am.addSeparator()
+    am.addAction('Undo last auto-pick', undo_last_autopick)
+    auto.setMenu(am)
+    tb.addWidget(auto)
     tb.addAction('\U0001F4BE Save picks', _run_from_menu(_save_picks_menu))
     win.addToolBarBreak()
     win.addToolBar(tb)
@@ -3096,6 +3218,7 @@ def pick_metadata():
         'shot_pos_index': [float(v) for v in shot_pos_index],
         'recv_pos_index': [float(v) for v in recv_pos_index],
         'import_record': getattr(sv, 'record_path', ''),
+        'autopick_last_settings': (AUTOPICK_PARAMS.__dict__.copy() if AUTOPICK_UNDO else None),
     }
 
 

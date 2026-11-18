@@ -181,6 +181,8 @@ class ShotRecord:
     elev_scalar: int = 0
     textual: str = ''
     quantity_hint: str = None
+    spec_f: object = None          # Hz (v11: amplitude spectrum of the shot)
+    spec_a: object = None          # mean amplitude spectrum over live traces
     read_s: float = 0.0
 
     @property
@@ -191,6 +193,101 @@ class ShotRecord:
     @property
     def has_elev(self):
         return self.gelev is not None and np.any(self.gelev != 0)
+
+
+# =====================================================================
+# Spectra (v11)
+# =====================================================================
+SPECTRUM_BANDS = [(0, 5), (5, 10), (10, 20), (20, 40), (40, 80), (80, 160), (160, 320), (320, None)]
+
+
+def shot_spectrum(data, dt):
+    """Mean amplitude spectrum of one gather (ns, ntr): each live trace demeaned and
+    Hann-tapered, |FFT| averaged over traces. Returns (f Hz, amplitude)."""
+    d = np.asarray(data, float)
+    live = np.any(d != 0, axis=0)
+    if not live.any():
+        f = np.fft.rfftfreq(d.shape[0], dt)
+        return f, np.zeros(len(f))
+    d = d[:, live] - d[:, live].mean(axis=0)
+    w = np.hanning(d.shape[0])[:, None]
+    A = np.abs(np.fft.rfft(d * w, axis=0)).mean(axis=1)
+    return np.fft.rfftfreq(d.shape[0], dt), A
+
+
+def band_energy(f, a, bands=None):
+    """Share (%) of spectral energy (amplitude^2) in each band."""
+    bands = bands or SPECTRUM_BANDS
+    e = a ** 2
+    tot = e[f > 0].sum() or 1.0
+    out = []
+    for lo, hi in bands:
+        m = (f >= lo) & ((f < hi) if hi is not None else (f <= f.max())) & (f > 0)
+        out.append(100.0 * e[m].sum() / tot)
+    return np.array(out)
+
+
+def draw_spectra(ax_s, ax_b, f, spectra, labels, highlight=(), db=True, logf=False, normalize=True,
+                 fmax=None):
+    """
+    Amplitude spectra of several shots + their average (top) and the share of energy
+    per frequency band (bottom). spectra: list of arrays (one per shot, same f);
+    highlight: indices drawn in colour with a legend; the rest light grey.
+    """
+    import matplotlib
+    ax_s.clear()
+    ax_b.clear()
+    if not spectra:
+        for a in (ax_s, ax_b):
+            a.text(0.5, 0.5, 'Read files to see their spectra', ha='center', va='center',
+                   transform=a.transAxes, color='0.5')
+        return
+    S = np.array(spectra, float)
+    if normalize:
+        S = S / np.maximum(S.max(axis=1, keepdims=True), 1e-30)
+    avg = S.mean(axis=0)
+    ref = avg.max() or 1.0
+    conv = (lambda a: 20 * np.log10(np.maximum(a / ref, 1e-6))) if db else (lambda a: a / ref)
+    m = f > 0
+    hl = [i for i in highlight if 0 <= i < len(S)]
+    for i in range(len(S)):
+        if i not in hl:
+            ax_s.plot(f[m], conv(S[i])[m], color='0.8', lw=0.6, zorder=1)
+    cols = matplotlib.colormaps['tab10']
+    for n, i in enumerate(hl[:10]):
+        ax_s.plot(f[m], conv(S[i])[m], color=cols(n % 10), lw=1.3, zorder=2, label=labels[i])
+    ax_s.plot(f[m], conv(avg)[m], color='k', lw=2.4, zorder=3, label=f'Average of {len(S)} shots')
+    if logf:
+        ax_s.set_xscale('log')
+    ax_s.set_xlim(f[m][0] if logf else 0, fmax or f.max())
+    if db:
+        ax_s.set_ylim(-60, 3)
+        ax_s.set_ylabel('Amplitude (dB re average peak)')
+    else:
+        ax_s.set_ylabel('Amplitude (relative)')
+    ax_s.set_xlabel('Frequency (Hz)')
+    ax_s.grid(alpha=0.3, which='both')
+    ax_s.legend(fontsize='x-small', loc='upper right', ncol=2 if len(hl) > 4 else 1)
+    ax_s.set_title('Amplitude spectrum (each shot: mean over its traces)'
+                   + ('; each shot scaled to its own peak' if normalize else ''), fontsize='medium')
+    # band energy
+    nyq = f.max()
+    bands = [(lo, hi) for lo, hi in SPECTRUM_BANDS if lo < nyq]
+    names = [f'{lo:g}\u2013{(hi if hi is not None and hi < nyq else nyq):g}' for lo, hi in bands]
+    rows = [('Average', band_energy(f, avg, bands), 'k')]
+    rows += [(labels[i], band_energy(f, S[i], bands), cols(n % 10)) for n, i in enumerate(hl[:6])]
+    x = np.arange(len(bands))
+    w = 0.8 / len(rows)
+    for k, (lab, e, c) in enumerate(rows):
+        ax_b.bar(x - 0.4 + w * (k + 0.5), e, width=w, color=c, alpha=0.85 if k else 0.9, label=lab)
+    ax_b.set_xticks(x)
+    ax_b.set_xticklabels(names)
+    ax_b.set_xlabel('Frequency band (Hz)')
+    ax_b.set_ylabel('Share of energy (%)')
+    ax_b.grid(alpha=0.3, axis='y')
+    if len(rows) > 1:
+        ax_b.legend(fontsize='x-small', loc='upper right')
+    ax_b.set_title('Energy per frequency band', fontsize='medium')
 
 
 def read_shot(path):
@@ -231,6 +328,7 @@ def read_shot(path):
         rec.quantity_hint = guess_quantity(rec.textual)
         if len(lens) > 1:
             rec.error = f'traces have different lengths {sorted(lens)}; short ones zero-padded'
+        rec.spec_f, rec.spec_a = shot_spectrum(data, dt)
         rec.ok = True
     except Exception as e:                                   # unreadable / not SEG-Y
         rec.ok = False
@@ -1121,7 +1219,11 @@ if _HAVE_QT:
             pl.setContentsMargins(0, 0, 0, 0)
             pl.addWidget(NavigationToolbar(self.canvas, pw))
             pl.addWidget(self.canvas, 1)
-            right.addWidget(pw)
+            self.rtabs = QTabWidget()
+            self.rtabs.addTab(pw, 'Geometry')
+            self.rtabs.addTab(self._build_spectra_panel(dpi), 'Spectra')
+            self.rtabs.currentChanged.connect(lambda *_: self._draw_spectra())
+            right.addWidget(self.rtabs)
             right.setStretchFactor(0, 1)
             right.setStretchFactor(1, 2)
             split.addWidget(right)
@@ -1221,6 +1323,7 @@ if _HAVE_QT:
                     self.progress.setValue(i + 1)
                     self._refresh_table()
                     self._draw_geometry(highlight_path=r.path)
+                    self._draw_spectra()
                     QApplication.processEvents()
             finally:
                 QApplication.restoreOverrideCursor()
@@ -1303,6 +1406,63 @@ if _HAVE_QT:
             rows = sorted({i.row() for i in self.table.selectedIndexes()})
             if rows:
                 self._draw_geometry(highlight_path=self.records[rows[0]].path)
+            self._draw_spectra()
+
+        # ---------------- spectra (v11) ----------------
+        def _build_spectra_panel(self, dpi):
+            w = QWidget()
+            l = QVBoxLayout(w)
+            l.setContentsMargins(0, 0, 0, 0)
+            row = QHBoxLayout()
+            self.chk_db = QCheckBox('dB')
+            self.chk_db.setChecked(True)
+            self.chk_logf = QCheckBox('Log frequency')
+            self.chk_norm = QCheckBox('Scale each shot to its peak')
+            self.chk_norm.setChecked(True)
+            self.sp_fmax = QDoubleSpinBox()
+            self.sp_fmax.setRange(0, 1e5)
+            self.sp_fmax.setDecimals(0)
+            self.sp_fmax.setSpecialValueText('Nyquist')
+            self.sp_fmax.setSuffix(' Hz')
+            for c in (self.chk_db, self.chk_logf, self.chk_norm):
+                c.toggled.connect(lambda *_: self._draw_spectra())
+                row.addWidget(c)
+            self.sp_fmax.valueChanged.connect(lambda *_: self._draw_spectra())
+            row.addWidget(QLabel('Up to'))
+            row.addWidget(self.sp_fmax)
+            row.addStretch(1)
+            l.addLayout(row)
+            hint = QLabel('Select shots in the table (Ctrl / Shift for several) to compare them; '
+                          'black = average of all shots read.')
+            hint.setStyleSheet('color: #555;')
+            l.addWidget(hint)
+            self.fig_sp = Figure(dpi=dpi, constrained_layout=True)
+            self.canvas_sp = FigureCanvas(self.fig_sp)
+            g2 = self.fig_sp.add_gridspec(2, 1, height_ratios=[1.6, 1])
+            self.ax_sp = self.fig_sp.add_subplot(g2[0])
+            self.ax_band = self.fig_sp.add_subplot(g2[1])
+            l.addWidget(NavigationToolbar(self.canvas_sp, w))
+            l.addWidget(self.canvas_sp, 1)
+            return w
+
+        def _draw_spectra(self):
+            if not hasattr(self, 'rtabs') or self.rtabs.currentIndex() != 1:
+                return
+            good = [(i, r) for i, r in enumerate(self.records) if r.ok and r.spec_a is not None]
+            sel_rows = sorted({i.row() for i in self.table.selectedIndexes()})
+            if good:
+                f = good[0][1].spec_f
+                same = [(i, r) for i, r in good if len(r.spec_f) == len(f)]
+                specs = [r.spec_a for _, r in same]
+                labels = [f'Shot {i + 1}' for i, _ in same]
+                pos = {i: n for n, (i, _) in enumerate(same)}
+                hl = [pos[i] for i in sel_rows if i in pos]
+            else:
+                f, specs, labels, hl = np.array([0.0, 1.0]), [], [], []
+            draw_spectra(self.ax_sp, self.ax_band, f, specs, labels, hl, self.chk_db.isChecked(),
+                         self.chk_logf.isChecked(), self.chk_norm.isChecked(),
+                         self.sp_fmax.value() or None)
+            self.canvas_sp.draw_idle()
 
         # ---------------- geometry ----------------
         def _geom_settings(self):
@@ -1668,6 +1828,35 @@ if _HAVE_QT:
             self.txt = QPlainTextEdit()
             self.txt.setReadOnly(True)
             tabs.addTab(self.txt, 'Import summary')
+            # v11: spectra of the imported shots
+            sw = QWidget()
+            sl = QVBoxLayout(sw)
+            sl.setContentsMargins(0, 0, 0, 0)
+            row = QHBoxLayout()
+            self.chk_db = QCheckBox('dB')
+            self.chk_db.setChecked(True)
+            self.chk_logf = QCheckBox('Log frequency')
+            self.ed_shots = QLineEdit()
+            self.ed_shots.setPlaceholderText('shots to compare, e.g. 1, 5, 9-11 (the shot on the canvas is always shown)')
+            for c in (self.chk_db, self.chk_logf):
+                c.toggled.connect(lambda *_: self._draw_spectra())
+            self.ed_shots.editingFinished.connect(self._draw_spectra)
+            row.addWidget(self.chk_db)
+            row.addWidget(self.chk_logf)
+            row.addWidget(self.ed_shots, 1)
+            sl.addLayout(row)
+            self.fig_sp = Figure(dpi=dpi, constrained_layout=True)
+            self.canvas_sp = FigureCanvas(self.fig_sp)
+            g2 = self.fig_sp.add_gridspec(2, 1, height_ratios=[1.6, 1])
+            self.ax_sp = self.fig_sp.add_subplot(g2[0])
+            self.ax_band = self.fig_sp.add_subplot(g2[1])
+            sl.addWidget(NavigationToolbar(self.canvas_sp, sw))
+            sl.addWidget(self.canvas_sp, 1)
+            tabs.addTab(sw, 'Spectra')
+            self._spec = None
+            self._cur = None
+            tabs.currentChanged.connect(lambda i: self._draw_spectra() if i == 2 else None)
+            self.tabs_g = tabs
             self.lbl = QLabel('Green = picked, red = not picked, ring = shot on the picker canvas. '
                               'Double-click a shot to open it.')
             self.lbl.setStyleSheet('color: #555;')
@@ -1691,8 +1880,36 @@ if _HAVE_QT:
                 pass
             self.txt.setPlainText('\n'.join(lines))
 
+        def _draw_spectra(self):
+            if getattr(self, 'tabs_g', None) is None or self.tabs_g.currentIndex() != 2:
+                return
+            sv = self.sv
+            if self._spec is None:
+                specs = [shot_spectrum(sv.data[i], sv.dt) for i in range(sv.n_shots)]
+                self._spec = (specs[0][0], [a for _, a in specs])
+            f, specs = self._spec
+            hl = []
+            for part in self.ed_shots.text().replace(';', ',').split(','):
+                part = part.strip()
+                try:
+                    if '-' in part:
+                        a, b = part.split('-')
+                        hl += list(range(int(a) - 1, int(b)))
+                    elif part:
+                        hl.append(int(part) - 1)
+                except ValueError:
+                    pass
+            if self._cur is not None and self._cur not in hl:
+                hl.insert(0, self._cur)
+            draw_spectra(self.ax_sp, self.ax_band, f, specs, [f'Shot {i + 1}' for i in range(len(specs))],
+                         [i for i in hl if 0 <= i < len(specs)], self.chk_db.isChecked(),
+                         self.chk_logf.isChecked(), True)
+            self.canvas_sp.draw_idle()
+
         def update_state(self, current_shot=None, picked=()):
             sv = self.sv
+            self._cur = current_shot
+            self._draw_spectra()
             draw_geometry(self.axp, self.axm, sv.recv_dist, sv.recv_elev if sv.has_elev else None,
                           sv.recv_xy, sv.shot_dist, sv.shot_elev, sv.shot_xy, highlight=current_shot,
                           highlight_label='On the picker canvas')
