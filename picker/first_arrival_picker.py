@@ -1146,7 +1146,7 @@ import importlib
 import reciprocity_analyzer as rcq
 importlib.reload(rcq)                  # pick up edits without restarting the kernel
 RECIPROCITY_THRESHOLD_MS = 2.0         # flag shots whose median |reciprocal error| exceeds this
-import pick_tools as ptl               # void picks on a trace (same folder)
+import pick_tools as ptl               # delete picks dialog, plotted traces, gain control (same folder)
 import auto_pickers as apk             # v11: automatic picking (STA/LTA family + post-processing)
 import help_manual as hlp              # v13: user manual (Help menu, F1, PDF)
 importlib.reload(apk)
@@ -1160,7 +1160,7 @@ gain_minus_ax = gain_plus_ax = None    # gain step buttons
 gain_minus_btn = gain_plus_btn = None
 _quantity_actions = {}                 # menu actions (checked = active quantity)
 last_void = None                       # undo record for the last 'void picks'
-_last_cursor_x = None                  # receiver under the mouse (default for void picks)
+_last_cursor_x = None                  # receiver under the mouse (default for Delete picks)
 GAIN_MIN, GAIN_MAX = 0.1, 200.0        # gain slider range (log scale)
 prev_shot_ax = next_shot_ax = None     # Prev / Next shot buttons on the canvas
 prev_shot_btn = next_shot_btn = None
@@ -1258,7 +1258,8 @@ mpl.rcParams['keymap.fullscreen'] = [k for k in mpl.rcParams['keymap.fullscreen'
 # v15: every picker key must belong to the picker only. Matplotlib binds 'r' and 'h' to its
 # own Home (jump to the first view of the toolbar history - often an old zoom from picking),
 # 'g' to the grid, and others; remove the picker's keys from every matplotlib key map.
-_PICKER_KEYS = {'m', 'r', 'u', 'h', 'z', 'd', 'g', 's', 'n', 'f', 'ctrl+s', 'cmd+s', 'ctrl+o', 'ctrl+d'}
+_PICKER_KEYS = {'m', 'r', 'u', 'h', 'z', 'd', 'g', 's', 'n', 'f', 'ctrl+s', 'cmd+s', 'ctrl+o', 'ctrl+d',
+                'ctrl+z', 'ctrl+y', 'ctrl+Z', 'ctrl+shift+z', 'cmd+z', 'cmd+y'}
 for _km in [k for k in mpl.rcParams if k.startswith('keymap.')]:
     _v = mpl.rcParams[_km]
     if isinstance(_v, (list, tuple)):
@@ -1849,6 +1850,9 @@ def plot_shot():
     global previous_radio_button_state, radio_data, radio_reverse, previous_zoom_state
     global rubber_line, drag_current_line   
 
+    history_baseline()               # v16: the picks as loaded are the first undo state
+    pending_stroke_starts.clear()
+    pending_redo.clear()
     drag_strokes_data.clear()
     drag_completed_lines.clear()
     global drag_stroke_start
@@ -2145,6 +2149,7 @@ def apply_autopicks(results, write_mode, params):
         pass
     if shot_no is not None:
         finalize_and_process_picks()                  # keep anything picked by hand first
+    history_baseline()
     spm = _samples_per_ms()
     undo = {}
     n_written = 0
@@ -2162,6 +2167,7 @@ def apply_autopicks(results, write_mode, params):
         final_picks_dict[key] = new[None, :, :]
     AUTOPICK_UNDO.append(undo)
     AUTOPICK_PARAMS = params.copy()
+    history_commit(f"automatic picks on {len(results)} shot(s)")
     if shot_no is not None and shot_no in results:
         final_pick_gather_multi_seed = None
         if fig is not None and plt.fignum_exists(fig.number):
@@ -2172,30 +2178,9 @@ def apply_autopicks(results, write_mode, params):
         print(f"Saving after automatic picking failed: {e}")
     refresh_reciprocity_window()
     refresh_geometry_window()
-    msg = f"Automatic picks written on {len(results)} shot(s) ({write_mode}); undo: Auto-pick > Undo last auto-pick."
+    msg = f"Automatic picks written on {len(results)} shot(s) ({write_mode}); undo: u / Ctrl+Z."
     print(msg)
     return msg
-
-
-def undo_last_autopick():
-    global final_pick_gather_multi_seed
-    if not AUTOPICK_UNDO:
-        print("No automatic picking to undo.")
-        return
-    undo = AUTOPICK_UNDO.pop()
-    for key, old in undo.items():
-        if old is None:
-            final_picks_dict.pop(key, None)
-        else:
-            final_picks_dict[key] = old
-    if shot_no is not None and f'final_picks_for_shot_no_{shot_no}' in undo:
-        final_pick_gather_multi_seed = None
-        if fig is not None and plt.fignum_exists(fig.number):
-            update_plot_with_picks()
-    save_picks(file_path_pkl)
-    refresh_reciprocity_window()
-    refresh_geometry_window()
-    print(f"Undid the last automatic picking ({len(undo)} shot(s) restored).")
 
 
 def open_autopick_stalta():
@@ -2217,6 +2202,166 @@ def _autopick_planned(name):
     QMessageBox.information(None, 'Automatic picking', f'{name} is planned; the menu is ready for it.')
 
 
+# ---------------------------------------------------------------------
+# One undo / redo history for every pick edit (v16)
+#   manual picks (each click or drag stroke; finished strokes as one edit), Delete Picks (r),
+#   Delete picks dialog (one receiver / receiver ranges), automatic picking, QC window edits.
+#   u or Ctrl+Z = undo, Ctrl+Y (or Ctrl+Shift+Z) = redo. Zoom is kept; the pick file follows.
+# ---------------------------------------------------------------------
+PICK_HISTORY = {'states': [], 'labels': [], 'pos': -1}
+PICK_HISTORY_MAX = 200
+pending_stroke_starts = []      # index into pending_picks where each unfinished click / stroke starts
+pending_redo = []               # unfinished strokes taken back by undo (redo puts them back)
+
+
+def _picks_snapshot():
+    return {k: np.array(v, copy=True) for k, v in final_picks_dict.items()
+            if str(k).startswith('final_picks_for_shot_no_')}
+
+
+def history_reset():
+    """Start a fresh history from the picks as they are now (new session / new data)."""
+    PICK_HISTORY['states'] = [_picks_snapshot()]
+    PICK_HISTORY['labels'] = ['start']
+    PICK_HISTORY['pos'] = 0
+    pending_stroke_starts.clear()
+    pending_redo.clear()
+
+
+def _same_picks(a, b):
+    if a.keys() != b.keys():
+        return False
+    return all(a[k].shape == b[k].shape and np.array_equal(a[k], b[k]) for k in a)
+
+
+def history_baseline():
+    """Make sure the state BEFORE the next edit is in the history (also picks changed elsewhere)."""
+    if not PICK_HISTORY['states']:
+        history_reset()
+        return
+    now = _picks_snapshot()
+    if not _same_picks(now, PICK_HISTORY['states'][PICK_HISTORY['pos']]):
+        history_commit('picks changed outside the undo history')
+
+
+def history_commit(label):
+    """Record the picks as they are AFTER an edit (drops anything that was undone)."""
+    if not PICK_HISTORY['states']:
+        history_reset()
+        return
+    pos = PICK_HISTORY['pos']
+    del PICK_HISTORY['states'][pos + 1:]
+    del PICK_HISTORY['labels'][pos + 1:]
+    PICK_HISTORY['states'].append(_picks_snapshot())
+    PICK_HISTORY['labels'].append(label)
+    while len(PICK_HISTORY['states']) > PICK_HISTORY_MAX:
+        PICK_HISTORY['states'].pop(0)
+        PICK_HISTORY['labels'].pop(0)
+    PICK_HISTORY['pos'] = len(PICK_HISTORY['states']) - 1
+
+
+def _history_restore(state):
+    global final_pick_gather_multi_seed
+    for k in [k for k in final_picks_dict if str(k).startswith('final_picks_for_shot_no_')]:
+        del final_picks_dict[k]
+    for k, v in state.items():
+        final_picks_dict[k] = np.array(v, copy=True)
+    key = f'final_picks_for_shot_no_{shot_no}'
+    final_pick_gather_multi_seed = final_picks_dict.get(key)
+    if fig is not None and plt.fignum_exists(fig.number):
+        update_plot_with_picks()          # zoom kept; QC window refreshed there
+    try:
+        save_picks(file_path_pkl)
+    except Exception as e:
+        print(f"Picks not saved after undo/redo: {e}")
+    refresh_geometry_window()
+
+
+def _rebuild_pending_strokes():
+    """Drag-line bookkeeping from pending_picks + pending_stroke_starts (after an undo of a stroke)."""
+    global drag_stroke_start, drag_current_line
+    drag_strokes_data.clear()
+    bounds = pending_stroke_starts + [len(pending_picks)]
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        seg = pending_picks[a:b]
+        if len(seg) >= 2:
+            drag_strokes_data.append(([p[0] for p in seg], [p[1] for p in seg]))
+    drag_stroke_start = len(pending_picks)
+    drag_current_line = None
+
+
+def _set_mode_from_menu(m):
+    """Toolbar: switch the canvas mode like its key (zoom kept)."""
+    try:
+        lims = (ax.get_xlim(), ax.get_ylim())
+        reset_cursor_and_toolbar()
+        if pending_picks:
+            finalize_and_process_picks()
+        mode[0] = m
+        ax.set_xlim(lims[0])
+        ax.set_ylim(lims[1])
+        update_mode_text()
+        print(f"Mode switched to {m}")
+    except Exception as e:
+        print(f"Mode not changed: {e}")
+
+
+def undo_pick_edit():
+    """u / Ctrl+Z: take back the last click or stroke not yet finished, else the last pick edit."""
+    if pending_picks and pending_stroke_starts:
+        a = pending_stroke_starts.pop()
+        pending_redo.append(list(pending_picks[a:]))
+        del pending_picks[a:]
+        _rebuild_pending_strokes()
+        update_plot_with_picks()
+        print(f"Undo: removed the last {len(pending_redo[-1])} unfinished pick(s).")
+        return True
+    if PICK_HISTORY['pos'] <= 0:
+        print("Nothing to undo.")
+        return False
+    label = PICK_HISTORY['labels'][PICK_HISTORY['pos']]
+    PICK_HISTORY['pos'] -= 1
+    _history_restore(PICK_HISTORY['states'][PICK_HISTORY['pos']])
+    print(f"Undo: {label}.")
+    return True
+
+
+def redo_pick_edit():
+    """Ctrl+Y: put back what the last undo took away."""
+    if pending_redo and mode[0] == 'Manual Pick':
+        seg = pending_redo.pop()
+        pending_stroke_starts.append(len(pending_picks))
+        pending_picks.extend(seg)
+        _rebuild_pending_strokes()
+        update_plot_with_picks()
+        print(f"Redo: {len(seg)} unfinished pick(s) back.")
+        return True
+    if PICK_HISTORY['pos'] >= len(PICK_HISTORY['states']) - 1:
+        print("Nothing to redo.")
+        return False
+    PICK_HISTORY['pos'] += 1
+    _history_restore(PICK_HISTORY['states'][PICK_HISTORY['pos']])
+    print(f"Redo: {PICK_HISTORY['labels'][PICK_HISTORY['pos']]}.")
+    return True
+
+
+# the earlier, separate undo commands are the same undo now
+def undo_last_delete():
+    return undo_pick_edit()
+
+
+def undo_last_void():
+    return undo_pick_edit()
+
+
+def open_void_picks_ui(mode='receiver'):           # old name (v6-v15) of open_delete_picks_ui
+    return open_delete_picks_ui(mode)
+
+
+def undo_last_autopick():
+    return undo_pick_edit()
+
+
 def picks_changed_from_qc(shots):
     """
     Picks were deleted / restored in the Reciprocity and pick QC window (v10).
@@ -2228,6 +2373,7 @@ def picks_changed_from_qc(shots):
         final_pick_gather_multi_seed = None
         if fig is not None and plt.fignum_exists(fig.number):
             update_plot_with_picks()
+    history_commit(f"QC edit on shot(s) {', '.join(str(s + 1) for s in sorted(shots))}")
     try:
         save_picks(file_path_pkl)
     except Exception as e:
@@ -2393,7 +2539,7 @@ def open_pdf_manual():
 
 def show_about():
     QMessageBox.about(None, 'About the first-arrival picker',
-                      '<b>First-arrival picker</b> for refraction tomography (v15)<br><br>'
+                      '<b>First-arrival picker</b> for refraction tomography (v16)<br><br>'
                       'Manual and automatic first-break picking of SEG-Y shot gathers, with '
                       'preprocessing, filtering, reciprocity QC and export to a three-column '
                       'S G T file for travel-time tomography.<br><br>'
@@ -2549,49 +2695,37 @@ def open_preprocessing_ui(preview_shot=None, parent=None, target=None):
 
 
 # ---------------------------------------------------------------------
-# Void picks on a trace
+# Delete picks on one receiver or in receiver ranges (called 'void picks' before v16)
 # ---------------------------------------------------------------------
-def open_void_picks_ui(mode='receiver'):
-    """Void (delete) picks at one receiver or in receiver ranges, this shot or all shots (v15)."""
+def open_delete_picks_ui(mode='receiver'):
+    """Delete picks at one receiver or in receiver ranges, this shot or all shots (v15, v16)."""
     global last_void, final_pick_gather_multi_seed, pending_picks
     if shot_no is None:
         print("Open a shot first.")
         return
     finalize_and_process_picks()
-    dlg = ptl.VoidPicksDialog(final_picks_dict, recv_pos, shot_no,
+    dlg = ptl.DeletePicksDialog(final_picks_dict, recv_pos, shot_no,
                               dt_pick_ms=dt * 1e3 / RESAMPLE_FACTOR, default_x=_last_cursor_x,
                               mode=mode)
-    _with_help(dlg, 'void')
+    _with_help(dlg, 'delete-picks')
     if dlg.exec_() != QDialog.Accepted:
         return
     tol = 0.5 * float(np.min(np.diff(np.sort(recv_pos))))
+    history_baseline()
     removed = ptl.void_picks_at(final_picks_dict, dlg.xs, tol, dlg.shots)
     key = f'final_picks_for_shot_no_{shot_no}'
     if key in removed:                         # keep the working copy of this shot in step
         final_pick_gather_multi_seed = final_picks_dict[key]
     last_void = removed
     scope = 'all shots' if dlg.shots is None else f'shot {shot_no + 1}'
-    print(f"Voided {sum(v.shape[1] for v in removed.values())} pick(s) at {dlg.label} "
-          f"on {scope}. Picks > Undo last void restores them; 's' saves.")
+    n_del = sum(v.shape[1] for v in removed.values())
+    history_commit(f"deleted {n_del} pick(s) at {dlg.label} on {scope}")
+    print(f"Deleted {n_del} pick(s) at {dlg.label} on {scope}. Undo: u / Ctrl+Z.")
     update_plot_with_picks()
     try:
         save_picks(file_path_pkl)               # same as the other edits: the pick file follows
     except Exception as e:
         print(f"Picks not saved: {e}")
-
-
-def undo_last_void():
-    global last_void, final_pick_gather_multi_seed
-    if not last_void:
-        print("Nothing to undo.")
-        return
-    ptl.restore_picks(final_picks_dict, last_void)
-    key = f'final_picks_for_shot_no_{shot_no}'
-    if key in last_void:
-        final_pick_gather_multi_seed = final_picks_dict[key]
-    print(f"Restored {sum(v.shape[1] for v in last_void.values())} voided pick(s).")
-    last_void = None
-    update_plot_with_picks()
 
 
 # ---------------------------------------------------------------------
@@ -2600,7 +2734,8 @@ def undo_last_void():
 SHORTCUTS_TEXT = """Picking canvas keys
   m   manual pick (click / drag)
   r   delete picks (click two points)
-  u   undo last delete
+  u   undo the last pick edit (also Ctrl+Z): an unfinished click / stroke first,
+      then manual picks, deletes, automatic picks, QC edits      Ctrl+Y  redo
   z   zoom      d   pan (drag)      h   home (full view)
   g   type a gain value
   s   save picks (pickle)
@@ -2621,7 +2756,7 @@ Everything else is in the menus / toolbar:
   Data: survey geometry / topography (double-click a shot to open it),
         preprocessing, acceleration / velocity / displacement
   Processing: filter designer
-  Picks: void picks on a trace, undo void, automatic picking, save
+  Picks: undo / redo, delete picks (one receiver or ranges), automatic picking, save
   Traces, axes & gain: trace ranges (e.g. 1-20, 50-60), time window, gain
   QC: reciprocity and pick QC (all picks on one canvas; Delete mode, Ctrl+Z / Ctrl+Y)
   Help: user manual (F1), PDF manual"""
@@ -2943,16 +3078,18 @@ def install_app_menus(fig):
     m_proc.addAction('Filter designer...  (f)', _run_from_menu(open_filter_designer_ui))
 
     m_picks = mb.addMenu('&Picks')
-    m_picks.addAction('Void picks on a receiver...', _run_from_menu(open_void_picks_ui))
+    m_picks.addAction('Undo pick edit  (u, Ctrl+Z)', undo_pick_edit)            # v16: one history
+    m_picks.addAction('Redo pick edit  (Ctrl+Y)', redo_pick_edit)
+    m_picks.addSeparator()
+    m_picks.addAction('Delete picks on one receiver...', _run_from_menu(open_delete_picks_ui))
     m_picks.addAction('Delete picks in a receiver range...',
-                      _run_from_menu(lambda: open_void_picks_ui('range')))       # v15
-    m_picks.addAction('Undo last void', _run_from_menu(undo_last_void))
+                      _run_from_menu(lambda: open_delete_picks_ui('range')))
     m_picks.addSeparator()
     m_picks.addAction('Save picks  (s)', _run_from_menu(_save_picks_menu))
     m_picks.addSeparator()
     m_auto = m_picks.addMenu('Automatic picking')
     m_auto.addAction('STA/LTA (settings + preview)...', open_autopick_stalta)
-    m_auto.addAction('Undo last auto-pick', undo_last_autopick)
+    m_auto.addAction('Undo  (u, Ctrl+Z)', undo_pick_edit)
 
     m_view = mb.addMenu('&Traces, axes && gain')        # v12: was View
     a = m_view.addAction('Plotted traces, time axis and gain...', open_display_settings)
@@ -2987,7 +3124,7 @@ def install_app_menus(fig):
     # Toolbar: one-click access + a Tools drop-down
     tb = QToolBar('Picker tools', win)
     tb.setObjectName('picker_tools')
-    tb.setStyleSheet('QToolBar { spacing: 6px; } QToolButton { padding: 3px 8px; font-weight: bold; }')
+    tb.setStyleSheet('QToolBar { spacing: 3px; } QToolButton { padding: 3px 5px; font-weight: bold; }')   # v16: tighter, all buttons fit
     tools = QToolButton(tb)
     tools.setText('Tools \u25be')
     tools.setPopupMode(QToolButton.InstantPopup)
@@ -2998,10 +3135,11 @@ def install_app_menus(fig):
                         ('Filter designer...', _run_from_menu(open_filter_designer_ui)),
                         ('Reciprocity and pick QC...', open_reciprocity_window),
                         ('Plotted traces, time axis and gain...', open_display_settings),
-                        ('Void picks on a receiver...', _run_from_menu(open_void_picks_ui)),
+                        ('Delete picks on one receiver...', _run_from_menu(open_delete_picks_ui)),
                         ('Delete picks in a receiver range...',
-                         _run_from_menu(lambda: open_void_picks_ui('range'))),
-                        ('Undo last void', _run_from_menu(undo_last_void)),
+                         _run_from_menu(lambda: open_delete_picks_ui('range'))),
+                        ('Undo pick edit  (u, Ctrl+Z)', undo_pick_edit),
+                        ('Redo pick edit  (Ctrl+Y)', redo_pick_edit),
                         ('Shortcuts...', show_shortcuts),
                         ('User manual (F1)', lambda: show_manual(None)),
                         ('Open the PDF manual', open_pdf_manual)):
@@ -3015,17 +3153,19 @@ def install_app_menus(fig):
     tb.addAction('\u2699 Preprocessing', _run_from_menu(open_preprocessing_ui))
     tb.addAction('\u224b Filter', _run_from_menu(open_filter_designer_ui))
     tb.addAction('\u21c4 Reciprocity && pick QC', open_reciprocity_window)
-    void_btn = QToolButton(tb)                # v15: void picks drop-down
-    void_btn.setText('\u2702 Void picks \u25be')
-    void_btn.setPopupMode(QToolButton.InstantPopup)
-    vm = QMenu(void_btn)
-    vm.addAction('On one receiver...', _run_from_menu(open_void_picks_ui))
+    del_btn = QToolButton(tb)                 # v15/v16: delete picks drop-down
+    del_btn.setText('\u2702 Delete picks \u25be')
+    del_btn.setPopupMode(QToolButton.InstantPopup)
+    vm = QMenu(del_btn)
+    vm.addAction('Between two clicks on the canvas  (r)', lambda: _set_mode_from_menu('Delete Picks'))
+    vm.addAction('On one receiver...', _run_from_menu(open_delete_picks_ui))
     vm.addAction('In a receiver range (e.g. 21-40, 55-60)...',
-                 _run_from_menu(lambda: open_void_picks_ui('range')))
+                 _run_from_menu(lambda: open_delete_picks_ui('range')))
     vm.addSeparator()
-    vm.addAction('Undo last void', _run_from_menu(undo_last_void))
-    void_btn.setMenu(vm)
-    tb.addWidget(void_btn)
+    vm.addAction('Undo  (u, Ctrl+Z)', undo_pick_edit)
+    vm.addAction('Redo  (Ctrl+Y)', redo_pick_edit)
+    del_btn.setMenu(vm)
+    tb.addWidget(del_btn)
     auto = QToolButton(tb)                    # v11: automatic picking drop-down
     auto.setText('\u2728 Auto-pick \u25be')
     auto.setPopupMode(QToolButton.InstantPopup)
@@ -3034,9 +3174,19 @@ def install_app_menus(fig):
     a_dtw = am.addAction('Dynamic time warping (DTW) - planned', lambda: _autopick_planned('DTW'))
     a_dtw.setEnabled(False)
     am.addSeparator()
-    am.addAction('Undo last auto-pick', undo_last_autopick)
+    am.addAction('Undo  (u, Ctrl+Z)', undo_pick_edit)
     auto.setMenu(am)
     tb.addWidget(auto)
+    _a_undo = tb.addAction('\u21b6', undo_pick_edit)          # v16: compact, the toolbar is full
+    _a_undo.setToolTip('Undo the last pick edit (u, Ctrl+Z)')
+    _a_undo.setObjectName('undo_action')
+    _a_redo = tb.addAction('\u21b7', redo_pick_edit)
+    _a_redo.setToolTip('Redo the pick edit (Ctrl+Y)')
+    _a_redo.setObjectName('redo_action')
+    for _a in (_a_undo, _a_redo):
+        _f = _a.font()
+        _f.setPointSizeF(_f.pointSizeF() * 1.5)
+        _a.setFont(_f)
     tb.addAction('\U0001F4BE Save picks', _run_from_menu(_save_picks_menu))
     tb.addSeparator()
     tb.addAction('\u2753 Help', lambda: show_manual(None, toggle=True))      # v13
@@ -3081,6 +3231,7 @@ def remove_picks_between_points(points):
     mask = (picks[0, :, 0] >= min_x) & (picks[0, :, 0] <= max_x)
 
     if np.any(mask):
+        history_baseline()
         # Save the removed picks for undo
         last_deleted_segment = picks[:, mask, :].copy()
 
@@ -3088,42 +3239,13 @@ def remove_picks_between_points(points):
         picks = np.delete(picks, np.where(mask), axis=1)
         final_pick_gather_multi_seed = picks
         final_picks_dict[key] = picks
+        history_commit(f"deleted {last_deleted_segment.shape[1]} pick(s) between {min_x:g} and {max_x:g} m "
+                       f"on shot {shot_no + 1}")
 
         print(f"Removed {last_deleted_segment.shape[1]} picks between x-values: {min_x:.2f} and {max_x:.2f} for shot {shot_no}")
         update_plot_with_picks()
     else:
         print(f"No picks found between x-values: {min_x:.2f} and {max_x:.2f} for shot {shot_no}")
-
-def undo_last_delete():
-    global final_picks_dict, final_pick_gather_multi_seed, last_deleted_segment, shot_no
-
-    if last_deleted_segment is None:
-        print("No deleted segment to undo.")
-        return
-
-    key = f'final_picks_for_shot_no_{shot_no}'
-    if key not in final_picks_dict:
-        print("Shot not found in pick dictionary.")
-        return
-
-    current_picks = final_picks_dict[key]
-
-    # Concatenate and remove duplicates by x value
-    all_picks = np.concatenate((current_picks, last_deleted_segment), axis=1)
-    sorted_indices = np.argsort(all_picks[0, :, 0])
-    all_picks = all_picks[:, sorted_indices, :]
-
-    x_vals = all_picks[0, :, 0]
-    _, unique_indices = np.unique(x_vals, return_index=True)
-    unique_sorted = np.sort(unique_indices)
-    all_picks = all_picks[:, unique_sorted, :]
-
-    final_picks_dict[key] = all_picks
-    final_pick_gather_multi_seed = all_picks
-    last_deleted_segment = None
-
-    print(f"Undo completed. Restored {all_picks.shape[1]} picks for shot {shot_no}")
-    update_plot_with_picks()
 
 """ Drag and Pan functions to pair with mouse movements """
 
@@ -3195,6 +3317,10 @@ def redraw_all_drag_lines():
         drag_current_line, = ax.plot(xs, ys, 'r-', linewidth=2, alpha=0.7)
     else:
         drag_current_line = None
+    # v16: unfinished picks (clicks and strokes) stay visible through redraws
+    if pending_picks:
+        _pp = np.asarray(pending_picks, dtype=float)
+        ax.scatter(_pp[:, 0], _pp[:, 1], color='red', s=ss(225), marker='_', linewidths=2.5, zorder=6)
             
 
 
@@ -3238,6 +3364,10 @@ def on_scroll(event):
         step_gain(+1 if event.button == 'up' else -1)
         return
     if _is_widget_axes(event.inaxes):
+        return
+    if mouse_pressed and mode[0] in ('Manual Pick', 'Delete Picks'):
+        # v16: no zoom while the button is held: wheel + drag used to sweep picks across the shot
+        print("Wheel ignored while the mouse button is held (release to zoom).")
         return
     x_min, x_max = ax.get_xlim()
     y_min, y_max = ax.get_ylim()
@@ -3286,6 +3416,8 @@ def on_mouse_press(event):
             )
         drag_stroke_start = len(pending_picks)
         drag_current_line = None
+        pending_stroke_starts.append(len(pending_picks))   # v16: undo takes back one stroke
+        pending_redo.clear()
 
     on_click(event)   # process single‑point click
 
@@ -3350,7 +3482,7 @@ def on_mouse_move(event):
     # -------------------------------------------------------------
 
     global _last_cursor_x
-    _last_cursor_x = event.xdata          # default receiver for Picks > Void picks
+    _last_cursor_x = event.xdata          # default receiver for Delete picks
 
     # Crosshair logic – create once, update later.
     if crosshair[0] is None:
@@ -3456,16 +3588,22 @@ def on_click(event):
         remove_points.append((x, y))
 
         if len(remove_points) == 2:
-            # Clear old markers
+            # Clear old markers (v16: they may already be gone with a redraw)
             for m in delete_point_markers:
-                m.remove()
+                try:
+                    m.remove()
+                except (NotImplementedError, ValueError):
+                    pass
             delete_point_markers.clear()
 
             # Draw the deletion range line
             x_vals = [remove_points[0][0], remove_points[1][0]]
             y_vals = [remove_points[0][1], remove_points[1][1]]
             if delete_visual_line is not None:
-                delete_visual_line.remove()
+                try:
+                    delete_visual_line.remove()
+                except (NotImplementedError, ValueError):     # v16: cleared by the last redraw
+                    pass
             delete_visual_line = ax.plot(x_vals, y_vals, 'y--', linewidth=2, label="Delete Range")[0]
             fig.canvas.draw()
 
@@ -3520,6 +3658,7 @@ def finalize_and_process_picks():
         rubber_line = None
 
     if not pending_picks:
+        pending_stroke_starts.clear()
         print("No points to process.")
         #update_plot_with_picks()   # this causes delay since it clears the axes
         return
@@ -3538,6 +3677,7 @@ def finalize_and_process_picks():
 
     new_pick = np.array([[[x, y] for x, y in pending_picks_array]])
     key = f'final_picks_for_shot_no_{shot_no}'
+    history_baseline()
 
     if key in final_picks_dict:
         previous_picks = final_picks_dict[key]
@@ -3570,7 +3710,11 @@ def finalize_and_process_picks():
     final_pick_gather_multi_seed = final_pick_gather_multi_seed[:, last_occ, :]
 
     final_picks_dict[key] = final_pick_gather_multi_seed
+    n_new = len(pending_picks_array)
     pending_picks.clear()
+    pending_stroke_starts.clear()
+    pending_redo.clear()
+    history_commit(f"{n_new} manual pick(s) on shot {shot_no + 1}")
     print("Finalized and processed all picks.")
     update_plot_with_picks()
 
@@ -3756,10 +3900,15 @@ def on_key(event):
     
         print("Delete picks mode activated.")
 
-    elif event.key == 'u':
+    elif event.key in ('u', 'ctrl+z', 'cmd+z'):
         reset_cursor_and_toolbar()
-        undo_last_delete()          # internally calls update_plot_with_picks (preserves zoom)
-        restore_zoom()              # ensure final zoom matches
+        undo_pick_edit()            # v16: one history for every pick edit (zoom kept)
+        restore_zoom()
+
+    elif event.key in ('ctrl+y', 'cmd+y', 'ctrl+Z', 'ctrl+shift+z', 'cmd+shift+z'):
+        reset_cursor_and_toolbar()
+        redo_pick_edit()
+        restore_zoom()
 
     elif event.key == 'h':
         reset_cursor_and_toolbar()

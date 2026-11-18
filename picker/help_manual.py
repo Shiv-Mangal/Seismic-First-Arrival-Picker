@@ -13,7 +13,7 @@ and the same content as a PDF (manual/First_Arrival_Picker_User_Manual.pdf).
 
 Section anchors (manual.html <h2 id=...>):
   workflow, starting, import, canvas, menus, picking, traces-axes-gain,
-  preprocessing, filter, void, autopick, qc, geometry, spectra, files,
+  preprocessing, filter, delete-picks, autopick, qc, geometry, spectra, files,
   shortcuts, troubleshooting, history
 
 @author: shiv3210
@@ -31,7 +31,7 @@ SECTION_TITLES = {
     'workflow': 'Overview and workflow', 'starting': 'Installing and starting',
     'import': 'Importing SEG-Y data', 'canvas': 'The picking canvas', 'menus': 'Menus and toolbar',
     'picking': 'Picking by hand', 'traces-axes-gain': 'Traces, axes and gain',
-    'preprocessing': 'Preprocessing', 'filter': 'Filter designer', 'void': 'Void picks',
+    'preprocessing': 'Preprocessing', 'filter': 'Filter designer', 'delete-picks': 'Deleting picks and undo',
     'autopick': 'Automatic picking', 'qc': 'Reciprocity and pick QC', 'geometry': 'Survey geometry',
     'spectra': 'Spectra and the sensor response', 'files': 'Files, saving and the SGT export',
     'shortcuts': 'Keyboard and mouse', 'troubleshooting': 'Troubleshooting', 'history': 'Version history',

@@ -17,11 +17,11 @@ table.note { background-color: #fef9e7; margin-top: 8px; margin-bottom: 10px; }
 a { color: #1f618d; }
 </style></head><body>
 <h1 id="top">First-Arrival Picker: User Manual</h1>
-<p class="sub">Version 15 · first-break picking of SEG-Y shot gathers for refraction tomography</p>
+<p class="sub">Version 16 · first-break picking of SEG-Y shot gathers for refraction tomography</p>
 
 <p>This manual explains every window of the picker, in the order you use them. Every figure was made with the picker itself on a synthetic survey (<a href="#example-data">About the example data</a>), so the numbers in the figures can be checked against known true travel times. Inside the picker, <b>Help &gt; User manual</b> (F1) opens this manual beside the canvas. F1 in any window opens the section for that window. <b>Help &gt; Open the PDF manual</b> opens this same text as a PDF.</p>
 
-<h3 id="contents">Contents</h3><ol><li><a href="#workflow">Overview and workflow</a></li><li><a href="#starting">Installing and starting</a></li><li><a href="#import">Importing SEG-Y data</a></li><li><a href="#canvas">The picking canvas</a></li><li><a href="#menus">Menus and toolbar</a></li><li><a href="#picking">Picking by hand</a></li><li><a href="#traces-axes-gain">Traces, axes and gain</a></li><li><a href="#preprocessing">Preprocessing</a></li><li><a href="#filter">Filter designer</a></li><li><a href="#void">Void picks</a></li><li><a href="#autopick">Automatic picking</a></li><li><a href="#qc">Reciprocity and pick QC</a></li><li><a href="#geometry">Survey geometry</a></li><li><a href="#spectra">Spectra and the sensor response</a></li><li><a href="#files">Files, saving and the SGT export</a></li><li><a href="#shortcuts">Keyboard and mouse</a></li><li><a href="#troubleshooting">Troubleshooting</a></li><li><a href="#history">Version history</a></li></ol>
+<h3 id="contents">Contents</h3><ol><li><a href="#workflow">Overview and workflow</a></li><li><a href="#starting">Installing and starting</a></li><li><a href="#import">Importing SEG-Y data</a></li><li><a href="#canvas">The picking canvas</a></li><li><a href="#menus">Menus and toolbar</a></li><li><a href="#picking">Picking by hand</a></li><li><a href="#traces-axes-gain">Traces, axes and gain</a></li><li><a href="#preprocessing">Preprocessing</a></li><li><a href="#filter">Filter designer</a></li><li><a href="#delete-picks">Deleting picks and undo</a></li><li><a href="#autopick">Automatic picking</a></li><li><a href="#qc">Reciprocity and pick QC</a></li><li><a href="#geometry">Survey geometry</a></li><li><a href="#spectra">Spectra and the sensor response</a></li><li><a href="#files">Files, saving and the SGT export</a></li><li><a href="#shortcuts">Keyboard and mouse</a></li><li><a href="#troubleshooting">Troubleshooting</a></li><li><a href="#history">Version history</a></li></ol>
 <h2 id="workflow">1. Overview and workflow</h2>
 <p>The picker turns a set of SEG-Y shot gathers into first-arrival travel times for refraction (travel-time) tomography. The end product is an <b>S G T file</b>: three columns with the shot position (S), the geophone/receiver position (G) and the first-arrival time (T) of every picked shot–receiver pair. Tomography codes such as pyGIMLi read this file directly.</p>
 <p class="fig"><img src="images/workflow.png" data-w="1386" alt="Workflow"><br><span class="cap">Figure 1. The workflow. Quality control (QC) feeds back into picking until the reciprocal errors are small.</span></p>
@@ -43,7 +43,7 @@ a { color: #1f618d; }
 <tr><td><code>filter_designer.py</code></td><td>Filter designer (minimum-phase FIR, zero-phase FIR, IIR; notch filters; timing).</td></tr>
 <tr><td><code>auto_pickers.py</code></td><td>Automatic picking: detectors, onset refinement, post-processing.</td></tr>
 <tr><td><code>reciprocity_analyzer.py</code></td><td>Reciprocity and pick QC window.</td></tr>
-<tr><td><code>pick_tools.py</code></td><td>Void picks, the plotted traces / time axis / gain window, shared gain control.</td></tr>
+<tr><td><code>pick_tools.py</code></td><td>Delete picks dialog, the plotted traces / time axis / gain window, shared gain control.</td></tr>
 <tr><td><code>help_manual.py</code></td><td>This manual inside the picker (Help menu, F1).</td></tr>
 </table>
 <h3 id="example-data">About the example data</h3>
@@ -144,12 +144,12 @@ a { color: #1f618d; }
 <tr><td>File</td><td>Import SEG-Y data (Ctrl+O), Repeat an import record, Save picks, Save canvas image (PNG/PDF/SVG), Close picker.</td></tr>
 <tr><td>Data</td><td>Survey geometry / topography, Preprocessing, Show quantity.</td></tr>
 <tr><td>Processing</td><td>Filter designer (f).</td></tr>
-<tr><td>Picks</td><td>Void picks on a trace, Undo last void, Save picks, Automatic picking (STA/LTA, Undo last auto-pick).</td></tr>
+<tr><td>Picks</td><td>Undo pick edit (u, Ctrl+Z), Redo pick edit (Ctrl+Y), Delete picks on one receiver, Delete picks in a receiver range, Save picks, Automatic picking (STA/LTA, Undo).</td></tr>
 <tr><td>Traces, axes &amp; gain</td><td>Plotted traces, time axis and gain (Ctrl+D), Plot all traces, Plot trace ranges, Gain submenu, Go to the plotted window (h).</td></tr>
 <tr><td>QC</td><td>Reciprocity and pick QC.</td></tr>
 <tr><td>Help</td><td>User manual (F1), Open the PDF manual, Manual sections, Keyboard and mouse shortcuts, About.</td></tr>
 </table>
-<p>The toolbar repeats the common actions: <i>Tools ▾</i> (everything in one list), <i>Import</i>, <i>Geometry</i>, <i>Traces / axes / gain</i>, <i>Preprocessing</i>, <i>Filter</i>, <i>Reciprocity &amp; pick QC</i>, <i>Void picks</i>, <i>Auto-pick ▾</i>, <i>Save picks</i> and <i>Help</i>.</p>
+<p>The toolbar repeats the common actions: <i>Tools ▾</i> (everything in one list), <i>Import</i>, <i>Geometry</i>, <i>Traces / axes / gain</i>, <i>Preprocessing</i>, <i>Filter</i>, <i>Reciprocity &amp; pick QC</i>, <i>Delete picks ▾</i>, <i>Auto-pick ▾</i>, <i>↶</i> (undo), <i>↷</i> (redo), <i>Save picks</i> and <i>Help</i>.</p>
 <h3 id="help-panel">The manual inside the picker</h3>
 <p><b>Help &gt; User manual</b>, the <i>Help</i> button or F1 opens this manual as a side panel of the canvas. Press F1 again to hide it. Drag its title bar to float it as its own window or dock it on the other side.</p>
 <ul>
@@ -164,7 +164,8 @@ a { color: #1f618d; }
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Key</th><th>Mode / action</th></tr>
 <tr><td><b>m</b></td><td><b>Manual Pick.</b> Click: one pick, snapped to the nearest receiver and the nearest sample. Drag with the button held: a pick on every receiver you cross, interpolated between mouse positions (red line). Release and drag again to add strokes.</td></tr>
-<tr><td><b>r</b></td><td><b>Delete Picks.</b> Click two points: every pick between their receivers is removed (yellow dashed line). <b>u</b> undoes the last delete.</td></tr>
+<tr><td><b>r</b></td><td><b>Delete Picks.</b> Click two points: every pick between their receivers is removed (yellow dashed line).</td></tr>
+<tr><td><b>u</b>, Ctrl+Z / Ctrl+Y</td><td><b>Undo / redo</b> any pick edit (<a href="#delete-picks">section 10</a>). In Manual Pick, the first u takes back the last click or stroke you have not finished yet.</td></tr>
 <tr><td><b>h</b></td><td><b>Home</b>: finishes the picks and goes back to the plotted window.</td></tr>
 <tr><td><b>z</b> / <b>d</b></td><td>Zoom box / pan (drag). Mouse wheel on the gather zooms.</td></tr>
 <tr><td><b>s</b></td><td>Save picks to the pick file.</td></tr>
@@ -229,15 +230,27 @@ a { color: #1f618d; }
 </ul>
 <p>Both only change the display; the zoom stays. The <i>Traces, axes &amp; gain</i> window has the same pair and drives the canvas.</p>
 
-<h2 id="void">10. Void picks</h2>
-<p><b>Void picks ▾</b> on the toolbar (or the Picks menu) deletes picks without clicking on the canvas:</p>
+<h2 id="delete-picks">10. Deleting picks and undo</h2>
+<p>There are four ways to delete picks, and every one of them can be undone:</p>
 <ul>
-<li><b>On one receiver…</b>: the picks of one receiver (the one under the mouse is proposed). Use it for a receiver that was bad during the whole survey.</li>
-<li><b>In a receiver range…</b>: type receiver numbers or ranges, e.g. <code>21-40</code> or <code>21-40, 55-60, 83</code> (both ends included), or positions in metres. Every pick on those receivers goes.</li>
-<li>Choose <i>This shot only</i> or <i>ALL shots</i>; the dialog counts the picks before you delete them, and refuses a range outside the line.</li>
-<li><b>Undo last void</b> puts the picks back. The pick file is saved after each void.</li>
+<li><b>Between two clicks</b> on the canvas: key <b>r</b> (Delete Picks mode), then click two points.</li>
+<li><b>On one receiver</b>: <i>Delete picks ▾ &gt; On one receiver…</i> on the toolbar (or the Picks menu). The receiver under the mouse is proposed. Use it for a receiver that was bad during the whole survey.</li>
+<li><b>In a receiver range</b>: <i>Delete picks ▾ &gt; In a receiver range…</i>. Type receiver numbers or ranges, e.g. <code>21-40</code> or <code>21-40, 55-60, 83</code> (both ends included), or positions in metres.</li>
+<li><b>In the QC window</b>: Delete mode, click or drag a box (<a href="#qc">section 12</a>).</li>
 </ul>
-<p class="fig"><img src="images/void_dialog.png" data-w="520" alt="Void picks"><br><span class="cap">Figure 19. Void picks: one receiver, or receiver ranges such as 21-40, 55-60, on this shot or all shots.</span></p>
+<p>In the dialog choose <i>This shot only</i> or <i>ALL shots</i>; it counts the picks before you delete them, and refuses a range outside the line. The pick file is saved after each delete.</p>
+<p class="fig"><img src="images/delete_picks_dialog.png" data-w="520" alt="Delete picks"><br><span class="cap">Figure 19. Delete picks: one receiver, or receiver ranges such as 21-40, 55-60, on this shot or all shots.</span></p>
+<h3 id="undo">Undo and redo</h3>
+<p>One history holds every pick edit of the session:</p>
+<ul>
+<li>manual picks;</li>
+<li>deletes (r, the Delete picks dialog);</li>
+<li>automatic picking;</li>
+<li>edits made in the QC window.</li>
+</ul>
+<p><b>u</b> or <b>Ctrl+Z</b> (or <i>↶</i> on the toolbar, <i>Picks &gt; Undo pick edit</i>) takes the last edit back. <b>Ctrl+Y</b> (<i>↷</i>) puts it back. The zoom stays and the pick file follows each step.</p>
+<p>In <b>Manual Pick</b> mode, picks you have not finished yet (before h, another mode, saving or another shot) are undone one click or one drag stroke at a time. Once finished, all the picks of that round are one edit.</p>
+<table class="note" width="100%" cellpadding="8"><tr><td><b>Mouse wheel while picking.</b> While the mouse button is held in Manual Pick or Delete Picks mode, the wheel does not zoom. Zooming in the middle of a drag used to sweep a stroke across the whole shot. Release the button, then zoom.</td></tr></table>
 
 <h2 id="autopick">11. Automatic picking</h2>
 <p><b>Auto-pick ▾ &gt; STA/LTA (settings + preview)…</b> on the toolbar, or <b>Picks &gt; Automatic picking</b>, opens the settings with a live preview on any shot. Every change re-picks the preview shot, so you can tune before applying.</p>
@@ -270,7 +283,7 @@ a { color: #1f618d; }
 <ul>
 <li><i>Apply to the preview shot</i>, <i>Apply to all shots</i>, or <i>Apply to shots</i> with a range such as <code>2-10</code>.</li>
 <li><i>Replace the picks of these shots</i> or <i>Only fill receivers without a pick</i>, which keeps hand picks.</li>
-<li><b>Undo last auto-pick</b> (toolbar drop-down or Picks menu) restores the shots as they were.</li>
+<li><b>Undo</b> (u, Ctrl+Z, or the drop-down) restores the shots as they were (<a href="#undo">section 10</a>).</li>
 <li>Settings can be saved to and loaded from JSON. The last settings are stored in the pick file's metadata.</li>
 </ul>
 <p class="fig"><img src="images/canvas_autopicks.png" data-w="1600" alt="Automatic picks on the canvas"><br><span class="cap">Figure 23. Automatic picks (MER, velocity, filtered) on the canvas. They are ordinary picks: edit, delete or re-pick them by hand.</span></p>
@@ -378,7 +391,9 @@ a { color: #1f618d; }
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Key / mouse</th><th>Action</th></tr>
 <tr><td>m</td><td>Manual Pick (click / drag)</td></tr>
-<tr><td>r, u</td><td>Delete picks between two clicks; undo the last delete</td></tr>
+<tr><td>r</td><td>Delete picks between two clicks</td></tr>
+<tr><td>u, Ctrl+Z</td><td>Undo the last pick edit (in Manual Pick: the last unfinished click or stroke first)</td></tr>
+<tr><td>Ctrl+Y</td><td>Redo</td></tr>
 <tr><td>h</td><td>Home: finish picks, go to the plotted window</td></tr>
 <tr><td>z, d</td><td>Zoom box, pan</td></tr>
 <tr><td>g</td><td>Type a gain</td></tr>
@@ -413,12 +428,13 @@ a { color: #1f618d; }
 <tr><th>Version</th><th>Main changes</th></tr>
 <tr><td>v1–v4</td><td>Filters merged (minimum-phase FIR, zero-phase FIR, IIR), balanced wiggles, filter designer with live preview, resampling ×10 for picking.</td></tr>
 <tr><td>v5</td><td>Live reciprocity window with robust shot offsets and flags.</td></tr>
-<tr><td>v6–v7</td><td>Preprocessing window, quantity switch, menus and toolbar, log gain slider to 200, void picks, Prev / Next.</td></tr>
+<tr><td>v6–v7</td><td>Preprocessing window, quantity switch, menus and toolbar, log gain slider to 200, deleting picks on a receiver, Prev / Next.</td></tr>
 <tr><td>v8–v9</td><td>SEG-Y import window (headers, geometry, time zero, automatic names, import record), continuing from .pkl or SGT, filter timing presets.</td></tr>
 <tr><td>v10</td><td>Display settings, time axis in ms, Reciprocity and pick QC with all picks, delete mode, undo / redo.</td></tr>
 <tr><td>v11</td><td>Automatic picking (STA/LTA, MER, original routine; AIC; post-processing) with live preview; shot spectra.</td></tr>
 <tr><td>v12</td><td>File menu with import from the picker; trace ranges; gain in every preview; spectra corrected for the sensor response.</td></tr>
 <tr><td>v13</td><td>This manual: built into the picker (Help menu, F1, side panel) and as a PDF.</td></tr>
+<tr><td>v16</td><td>One undo / redo history for every pick edit (u, Ctrl+Z / Ctrl+Y; unfinished strokes one at a time); no wheel zoom while dragging; “Delete picks” everywhere (was “void”); fix: a second delete range no longer fails.</td></tr>
 <tr><td>v15</td><td>Polarity switch beside every preview gain; Delete-mode zoom fixes (r no longer jumps to an old view, no flash after deleting); delete picks in typed receiver ranges; larger MODE / GAIN boxes and legend.</td></tr>
 <tr><td>v14</td><td>Default filter back to the original configuration (minimum-phase 10–80 Hz, notch 199 Hz); 10–150 Hz kept as the <i>Wider band</i> preset.</td></tr>
 </table>

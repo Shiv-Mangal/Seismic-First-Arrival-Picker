@@ -6,9 +6,10 @@ pick_tools.py
 Pick editing helpers for the first-arrival picker.
 
   picks_at_receiver()  which shots have a pick at a receiver, and the times
-  void_picks()         remove the picks at one receiver, on one shot or all shots
-  restore_picks()      undo a void_picks() call
-  VoidPicksDialog      choose the receiver and the scope, with a preview of
+  delete_picks_at()    delete the picks at one or more receivers, on one shot or all shots
+                       (void_picks / void_picks_at: the same, names from before v16)
+  restore_picks()      put deleted picks back
+  DeletePicksDialog    choose one receiver or receiver ranges and the scope, with a preview of
                        what will be removed
 
 Picks are stored as the picker does: final_picks_dict['final_picks_for_shot_no_<i>']
@@ -103,6 +104,9 @@ def count_picks_at(final_picks_dict, xs, tol, shots=None):
         if n:
             out[s_] = n
     return out
+
+
+delete_picks_at = void_picks_at           # v16 name
 
 
 def restore_picks(final_picks_dict, removed):
@@ -288,7 +292,7 @@ if _HAVE_QT:
 
 if _HAVE_QT:
 
-    class VoidPicksDialog(QDialog):
+    class DeletePicksDialog(QDialog):
         """
         Remove picks at one receiver, or at every receiver in typed ranges (v15),
         on this shot or on all shots.
@@ -305,7 +309,7 @@ if _HAVE_QT:
                      default_x=None, parent=None, mode='receiver'):
             super().__init__(parent)
             from PyQt5.QtWidgets import QLineEdit, QHBoxLayout
-            self.setWindowTitle('Void (delete) picks')
+            self.setWindowTitle('Delete picks')
             self.picks = final_picks_dict
             self.recv_x = np.asarray(recv_x, dtype=float)
             self.n = len(self.recv_x)
@@ -405,7 +409,7 @@ if _HAVE_QT:
             elif n_all:
                 lst = ', '.join(f'{s + 1}' for s in sorted(allc))
                 self.info.setText(f'Selected: {label}.<br>Shots with picks there: {lst}<br>'
-                                  f'<span style="color:#555;">Picks &gt; Undo last void restores them.</span>')
+                                  f'<span style="color:#555;">Undo (u or Ctrl+Z) puts them back.</span>')
             else:
                 self.info.setText(f'Selected: {label}. No shot has picks there.')
             n = n_all if self.rb_all.isChecked() else this
@@ -757,3 +761,7 @@ if _HAVE_QT:
                 self.sp_lw.setValue(0.5)
     except ImportError:
         pass
+
+
+if _HAVE_QT:
+    VoidPicksDialog = DeletePicksDialog       # old name (before v16: "void picks")
