@@ -36,6 +36,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.widgets import RadioButtons, Slider, Button
 from matplotlib.collections import PolyCollection, LineCollection
+from matplotlib.ticker import FuncFormatter
 
 # seismic data reading
 import segypy
@@ -97,6 +98,8 @@ AUTO_OUTPUT_NAMES = True        # script mode: name the .pkl/.txt from the line 
                                 # (False: use file_path_pkl / file_path_sgt above)
 LOAD_EXISTING_PICKS = True      # script mode: continue from the auto-named pick file if it exists
 EXISTING_PICKS_FILE = None      # script mode: a .pkl or SGT .txt to continue from (overrides the names)
+AUTO_CONTINUE_TO_PICKER = True  # v10: running only the import cell (Ctrl+Enter) carries on through
+                                # preprocessing and filtering to the shot dialog
 
 # %% Loading seismic data (v8: data_importer.py) into an array (n_shots, n_samples, n_traces)
 """
@@ -106,6 +109,28 @@ data_importer.py (import dialog or script mode). The previous loader is kept bel
 commented out, for reference.
 """
 import importlib
+
+
+def _running_single_cell():
+    """True when Spyder runs one cell (Ctrl+Enter), False for Run file (F5)."""
+    import inspect
+    return any(f.function in ('runcell', 'debugcell', 'run_cell_magic') for f in inspect.stack())
+
+
+def _this_script_path():
+    """Path of this script (Spyder sets __file__ for cells; else look for it on the call stack)."""
+    import inspect
+    p = globals().get('__file__')
+    if p and os.path.isfile(p) and p.endswith('.py'):
+        return p
+    for f in inspect.stack():
+        for name in ('filename', 'file_name', 'path'):
+            v = f.frame.f_locals.get(name)
+            if isinstance(v, str) and v.endswith('.py') and os.path.isfile(v):
+                return v
+    return None
+
+
 try:
     _here = os.path.dirname(os.path.abspath(__file__))
 except NameError:                     # running cells in Spyder/IPython
@@ -193,6 +218,21 @@ print(f'Active nodes: {shot_gather_array.shape[2]}, samples: {shot_gather_array.
 if not USE_IMPORT_DIALOG:                     # the dialog already showed the topography
     dimp.plot_geometry(SURVEY)
     plt.show()
+
+# v10: run on its own (Ctrl+Enter), this cell carries on to the shot dialog, like Run file (F5)
+if AUTO_CONTINUE_TO_PICKER and _running_single_cell():
+    _script = _this_script_path()
+    if _script is None:
+        print("Import done. Run the next cells (or Run file) to reach the shot dialog.")
+    else:
+        _src_all = open(_script, encoding='utf-8').read().replace('\r\n', '\n')
+        _a = _src_all.find('\n# %% Data Normalizer')
+        _b = _src_all.find('\n#%% ==== End of the picking session')
+        if _a < 0 or _b < 0:
+            print("Import done. Run the next cells to reach the shot dialog.")
+        else:
+            print("Import done: running preprocessing, filtering and the picker cells ...")
+            exec(compile(_src_all[_a:_b], _script, 'exec'), globals())
 
 
 # ---------------- previous loader (v7 and earlier), kept for reference ----------------
@@ -1119,6 +1159,26 @@ DISPLAY_TRACE_NORM = 'rms'  # 'rms': balance every trace to unit RMS over the DI
                             # (first no_of_samples_to_plot samples), so far offsets aren't
                             # swamped by near offsets. None = use the data as it is.
 
+# ---------------- Display settings (v10: View > Display settings...) ----------------
+DISPLAY = dict(ptl.DISPLAY_DEFAULTS)    # time axis in ms, time window, receivers, every Nth trace,
+DISPLAY['t_end_ms'] = None              # fill, clip, line width, balance (None = plotted length)
+_reset_view_once = [False]              # next redraw goes to the display window instead of the zoom
+
+
+def _samples_per_ms():
+    """Pick/display samples per millisecond (1 ms data resampled x10 -> 10)."""
+    return RESAMPLE_FACTOR / (dt * 1e3)
+
+
+def _display_window():
+    """(xlim, ylim) of the display window, in canvas units (receiver position, sample)."""
+    spm = _samples_per_ms()
+    x0 = DISPLAY['first_x'] if DISPLAY['first_x'] is not None else recv_pos[0]
+    x1 = DISPLAY['last_x'] if DISPLAY['last_x'] is not None else recv_pos[-1]
+    t0 = DISPLAY['t_start_ms'] * spm
+    t1 = (DISPLAY['t_end_ms'] * spm) if DISPLAY['t_end_ms'] else no_of_samples_to_plot
+    return (x0 - 0.5, x1 + 0.5), (min(t1, no_of_samples_to_plot), t0)
+
 final_pick_gather_multi_seed = None
 shot_no = None
 highlighted_point = None
@@ -1389,11 +1449,12 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
             ax.add_collection(lc)
             arts = [lc]
 
-            if type == 'VA':
+            if type == 'VA' and DISPLAY.get('fill', 'positive') != 'none':
+                neg = DISPLAY.get('fill') == 'negative'
                 verts = []
                 for i in range(traces.shape[1]):
                     xi = x_indices[i]
-                    tr_pos = np.clip(traces[:, i], 0, None)
+                    tr_pos = (np.clip(traces[:, i], None, 0) if neg else np.clip(traces[:, i], 0, None))
                     xs = np.concatenate([np.full(len(t), xi), xi + tr_pos[::-1]])
                     ys = np.concatenate([t, t[::-1]])
                     verts.append(np.column_stack([xs, ys]))
@@ -1420,9 +1481,14 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
         # when first shown, so the gain slider rebuilds one view instead of four.
 
         # ----- Rebuild all (used on initial plot and gain changes) -----
+        first_build = [True]                 # only the first build sets the view (v10)
+
         def rebuild_all(new_gain):
             nonlocal gain, overlay_artists
             gain = new_gain
+            keep_view = (not first_build[0]) and ax.has_data()
+            if keep_view:                     # gain change: keep the zoom exactly (v10)
+                kept_xlim, kept_ylim = ax.get_xlim(), ax.get_ylim()
 
             # Remove all artists from the axes (only those we added)
             for key, arts in list(_artist_cache.items()):
@@ -1462,9 +1528,18 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
 
             # ----- Axes styling (copied from original plot_data) -----
             ax.grid(True, alpha=0.3, linestyle='--', linewidth=1.0)
-            ax.set_xlabel('Trace Number', fontsize='x-large', labelpad=8,
+            ax.set_xlabel('Receiver position (m)', fontsize='x-large', labelpad=8,
                           fontweight='bold', fontfamily='sans-serif')
-            ax.set_ylabel('Time Sample (10th of ms)', fontsize='x-large', labelpad=8,
+            spm = _samples_per_ms()
+            if DISPLAY.get('time_axis', 'ms') == 'ms':        # labels in ms, picks stay in samples
+                ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f'{v / spm:g}'))
+                ylab = 'Time (ms)'
+            else:
+                ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f'{v:g}'))
+                ylab = f'Time sample ({1 / spm:g} ms)'
+            ax.format_coord = lambda xx, yy: (f'receiver {xx:.1f} m   t = {yy / spm:.1f} ms   '
+                                              f'(sample {yy:.0f})')
+            ax.set_ylabel(ylab, fontsize='x-large', labelpad=8,
                           fontweight='bold', fontfamily='sans-serif')
             ax.set_title(f'Shot No {shot_no + 1} at Receiver Position Index {shot_pos[shot_no]}'
                          f'  |  {ACTIVE_QUANTITY.capitalize()}'
@@ -1499,14 +1574,15 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
             if hasattr(fig, 'patch'):
                 fig.patch.set_facecolor('white')
 
-            # ----- Set axis limits (y‑axis always inverted, time increases downward) -----
-            if xlim is not None:
-                ax.set_xlim(xlim)
+            # ----- Axis limits: keep the zoom on gain changes; first build = display window -----
+            if keep_view:
+                ax.set_xlim(kept_xlim)
+                ax.set_ylim(kept_ylim)
             else:
-                ax.set_xlim(x[0] - 0.5, x[-1] + 0.5)
-
-            # Force y‑axis inversion by always setting limits in descending order
-            ax.set_ylim(np.max(t), np.min(t))
+                wx, wy = _display_window()
+                ax.set_xlim(wx)
+                ax.set_ylim(wy)              # inverted: time increases downward
+            first_build[0] = False
 
             fig.canvas.draw_idle()
 
@@ -1694,7 +1770,7 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
         # ----- Reciprocity QC button (under the radio buttons) -----
         global recip_button, recip_button_ax
         recip_button_ax = plt.axes([0.9200, 0.33, 0.06, 0.06])
-        recip_button = Button(recip_button_ax, 'Reciprocity\nQC', color='#eaf2f8',
+        recip_button = Button(recip_button_ax, 'Reciprocity\n& pick QC', color='#eaf2f8',
                               hovercolor='#aed6f1')
         recip_button.label.set_fontsize('medium')
         recip_button.label.set_fontweight('bold')
@@ -1766,7 +1842,8 @@ def plot_shot():
     # Plotting the seismic data
     wiggle(seismic_data[shot_no, :no_of_samples_to_plot, :], 
            filtered_seismic_data[shot_no, :no_of_samples_to_plot, :], 
-           gain=gain_factor[0], ax=ax)
+           gain=gain_factor[0], ax=ax, skipt=int(DISPLAY['every_nth']),
+           lwidth=DISPLAY['line_width'])
 
     # Enhanced text displays
     mode_text = fig.text(0.0075, 0.96, f'MODE: {mode[0]}', fontsize='large', color='#e74c3c', 
@@ -1873,7 +1950,8 @@ def update_plot_with_picks():
     # Plot the data with current gain
     wiggle(seismic_data[shot_no, :no_of_samples_to_plot, :], 
            filtered_seismic_data[shot_no, :no_of_samples_to_plot, :], 
-           gain=gain_factor[0], ax=ax)
+           gain=gain_factor[0], ax=ax, skipt=int(DISPLAY['every_nth']),
+           lwidth=DISPLAY['line_width'])
 
     redraw_all_drag_lines()   # restore completed + in-progress stroke lines
     ax.grid(True)
@@ -1905,8 +1983,10 @@ def update_plot_with_picks():
         if previous_radio_button_state['reverse'] in ['Normal', 'Reverse']:
             radio_reverse.set_active(['Normal', 'Reverse'].index(previous_radio_button_state['reverse']))
     
-    # Restore zoom state if available
-    if current_xlim and current_ylim:
+    # Restore zoom state if available (not after new display settings: show their window)
+    if _reset_view_once[0]:
+        _reset_view_once[0] = False
+    elif current_xlim and current_ylim:
         ax.set_xlim(current_xlim)
         ax.set_ylim(current_ylim)
     
@@ -1914,11 +1994,16 @@ def update_plot_with_picks():
     refresh_reciprocity_window()   # picks may have changed: update the QC window if open
 
 def adjust_gain():
+    """g key: type a gain. Goes through the slider, so the zoom is kept (v10)."""
     global gain_factor
-    gain_input, ok = QInputDialog.getDouble(None, "Adjust Gain", "Enter new gain factor:", gain_factor[0], min=0.1, max=25.0, decimals=2)
+    gain_input, ok = QInputDialog.getDouble(None, "Adjust Gain", "Enter new gain factor:", gain_factor[0],
+                                            min=GAIN_MIN, max=GAIN_MAX, decimals=2)
     if ok:
-        gain_factor[0] = gain_input
-        plot_shot()
+        if gain_slider is not None:
+            gain_slider.set_val(float(np.log10(gain_input)))
+        else:
+            gain_factor[0] = gain_input
+            plot_shot()
         
 
 def initialize_plot():
@@ -1983,12 +2068,31 @@ def open_reciprocity_window():
     if recip_window is None:
         recip_window = rcq.ReciprocityWindow(_reciprocity_inputs,
                                              on_open_shot=open_shot_from_reciprocity,
-                                             threshold_ms=RECIPROCITY_THRESHOLD_MS)
+                                             threshold_ms=RECIPROCITY_THRESHOLD_MS,
+                                             on_picks_changed=picks_changed_from_qc)
     else:
         recip_window.refresh()
     recip_window.show()
     recip_window.raise_()
     recip_window.activateWindow()
+
+
+def picks_changed_from_qc(shots):
+    """
+    Picks were deleted / restored in the Reciprocity and pick QC window (v10).
+    final_picks_dict is already edited there; here: forget the canvas's in-memory copy
+    of the current shot, redraw it if it changed (zoom kept) and save the pick file.
+    """
+    global final_pick_gather_multi_seed
+    if shot_no is not None and shot_no in shots:
+        final_pick_gather_multi_seed = None
+        if fig is not None and plt.fignum_exists(fig.number):
+            update_plot_with_picks()
+    try:
+        save_picks(file_path_pkl)
+    except Exception as e:
+        print(f"Saving after the QC edit failed: {e}")
+    print(f"QC edit applied to shot(s) {', '.join(str(s + 1) for s in sorted(shots))}.")
 
 
 def refresh_reciprocity_window():
@@ -2299,8 +2403,42 @@ Everything else is in the menus / toolbar:
   Data: preprocessing, acceleration / velocity / displacement
   Processing: filter designer
   Picks: void picks on a trace, undo void, save
-  QC: reciprocity
+  QC: reciprocity and pick QC (all picks on one canvas; Delete mode, Ctrl+Z / Ctrl+Y)
   Data: survey geometry / topography (double-click a shot to open it)"""
+
+
+def apply_display_settings(settings):
+    """View > Display settings: store, re-plot the shot, go to the new window (v10)."""
+    global CLIP_FRACTION, DISPLAY_TRACE_NORM, no_of_samples_to_plot
+    DISPLAY.update(settings)
+    CLIP_FRACTION = settings.get('clip')
+    DISPLAY_TRACE_NORM = settings.get('trace_norm')
+    spm = _samples_per_ms()
+    if settings.get('t_end_ms'):
+        no_of_samples_to_plot = int(min(round(settings['t_end_ms'] * spm), seismic_data.shape[1]))
+    print(f"Display: {settings}")
+    if fig is not None and plt.fignum_exists(fig.number) and shot_no is not None:
+        try:
+            reset_cursor_and_toolbar()
+        except Exception:
+            pass
+        finalize_and_process_picks()
+        _reset_view_once[0] = True
+        update_plot_with_picks()
+
+
+def open_display_settings():
+    t_max = seismic_data.shape[1] / _samples_per_ms()
+    cur = dict(DISPLAY)
+    cur['clip'] = CLIP_FRACTION
+    cur['trace_norm'] = DISPLAY_TRACE_NORM
+    if not cur.get('t_end_ms'):
+        cur['t_end_ms'] = no_of_samples_to_plot / _samples_per_ms()
+    dlg = ptl.DisplaySettingsDialog(cur, t_max, float(np.min(recv_pos)), float(np.max(recv_pos)),
+                                    on_apply=apply_display_settings,
+                                    parent=fig.canvas.manager.window if fig is not None else None)
+    _keep_dialog(dlg)
+    dlg.exec_()
 
 
 def show_shortcuts():
@@ -2371,8 +2509,11 @@ def install_app_menus(fig):
     m_picks.addSeparator()
     m_picks.addAction('Save picks  (s)', _run_from_menu(_save_picks_menu))
 
+    m_view = mb.addMenu('&View')
+    m_view.addAction('Display settings (time axis, window, traces, fill)...', open_display_settings)
+    m_view.addAction('Go to the display window (h)', lambda: (reset_to_full_view()))
     m_qc = mb.addMenu('&QC')
-    m_qc.addAction('Reciprocity QC...', open_reciprocity_window)
+    m_qc.addAction('Reciprocity and pick QC...', open_reciprocity_window)
 
     m_help = mb.addMenu('&Help')
     m_help.addAction('Keyboard and mouse shortcuts...', show_shortcuts)
@@ -2388,7 +2529,8 @@ def install_app_menus(fig):
     for title, func in (('Survey geometry / topography...', open_geometry_window),
                         ('Preprocessing...', _run_from_menu(open_preprocessing_ui)),
                         ('Filter designer...', _run_from_menu(open_filter_designer_ui)),
-                        ('Reciprocity QC...', open_reciprocity_window),
+                        ('Reciprocity and pick QC...', open_reciprocity_window),
+                        ('Display settings...', open_display_settings),
                         ('Void picks on a trace...', _run_from_menu(open_void_picks_ui)),
                         ('Undo last void', _run_from_menu(undo_last_void)),
                         ('Shortcuts...', show_shortcuts)):
@@ -2397,9 +2539,10 @@ def install_app_menus(fig):
     tb.addWidget(tools)
     tb.addSeparator()
     tb.addAction('\u26f0 Geometry', open_geometry_window)
+    tb.addAction('\u25a4 Display', open_display_settings)
     tb.addAction('\u2699 Preprocessing', _run_from_menu(open_preprocessing_ui))
     tb.addAction('\u224b Filter', _run_from_menu(open_filter_designer_ui))
-    tb.addAction('\u21c4 Reciprocity QC', open_reciprocity_window)
+    tb.addAction('\u21c4 Reciprocity && pick QC', open_reciprocity_window)
     tb.addAction('\u2702 Void picks', _run_from_menu(open_void_picks_ui))
     tb.addAction('\U0001F4BE Save picks', _run_from_menu(_save_picks_menu))
     win.addToolBarBreak()
@@ -3014,9 +3157,10 @@ def save_picks(file_path_pkl):  # Optional: specify the file path
 """ Zoom and cursor toolbar functions start here """
 
 def reset_to_full_view():
-    """Reset zoom to the full default data extent."""
-    ax.set_xlim(recv_pos[0] - 0.5, recv_pos[-1] + 0.5)
-    ax.set_ylim(no_of_samples_to_plot, 0)   # inverted: time increases downward
+    """Reset zoom to the display window (View > Display settings; default = everything plotted)."""
+    wx, wy = _display_window()
+    ax.set_xlim(wx)
+    ax.set_ylim(wy)                          # inverted: time increases downward
     fig.canvas.draw_idle()
     
 def restore_zoom_state():
@@ -3129,8 +3273,7 @@ def on_key(event):
     elif event.key == 'g':
         reset_cursor_and_toolbar()
         finalize_and_process_picks()
-        adjust_gain()               # calls plot_shot() -> new figure
-        restore_zoom()              # restore the zoom we captured before plot_shot
+        adjust_gain()               # v10: through the slider, the zoom stays
         print("Gain adjusted.")
 
     # --- S key: Save picks (finalize + pickle), no image saving ---
@@ -3209,11 +3352,6 @@ v9: running the whole file (F5 / Run file) stops here, so the import is followed
 by the shot dialog and the picker, and nothing below runs on half-finished picks.
 When you have finished picking, run the cells below one at a time (Ctrl+Enter).
 """
-def _running_single_cell():
-    import inspect
-    return any(f.function in ('runcell', 'debugcell', 'run_cell_magic') for f in inspect.stack())
-
-
 if __name__ == '__main__' and not _running_single_cell():
     print("Picker is running. When you have finished picking, run the cells below this one "
           "one at a time (Ctrl+Enter).")

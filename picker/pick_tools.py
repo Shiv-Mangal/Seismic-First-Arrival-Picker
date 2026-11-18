@@ -158,3 +158,145 @@ if _HAVE_QT:
             self.x0 = self.cb.currentData()
             self.shots = None if self.rb_all.isChecked() else {self.current_shot}
             self.accept()
+
+
+# =====================================================================
+# Display settings for the picking canvas (v10)
+# =====================================================================
+DISPLAY_DEFAULTS = dict(time_axis='ms', t_start_ms=0.0, t_end_ms=None, first_x=None, last_x=None,
+                        every_nth=1, fill='positive', clip=1.0, line_width=0.5, trace_norm='rms')
+
+if _HAVE_QT:
+    try:
+        from PyQt5.QtWidgets import (QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton,
+                                     QHBoxLayout, QGroupBox, QDialogButtonBox as _BB)
+
+        class DisplaySettingsDialog(QDialog):
+            """
+            Canvas display settings, like the filter designer's data preview:
+            time axis in ms (or samples), time window, receiver range, every Nth trace,
+            fill, clip, line width and trace balance. on_apply(settings) is called by
+            Apply and OK; the zoom is reset to the new window.
+            """
+
+            def __init__(self, settings, t_max_ms, x_min, x_max, on_apply=None, parent=None):
+                super().__init__(parent)
+                self.setWindowTitle('Display settings')
+                self.on_apply = on_apply
+                self.t_max_ms, self.x_min, self.x_max = float(t_max_ms), float(x_min), float(x_max)
+                s = dict(DISPLAY_DEFAULTS)
+                s.update(settings or {})
+                lay = QVBoxLayout(self)
+
+                g = QGroupBox('Time axis')
+                f = QFormLayout(g)
+                self.cb_axis = QComboBox()
+                self.cb_axis.addItem('Time (ms)', 'ms')
+                self.cb_axis.addItem('Sample number (0.1 ms after resampling)', 'samples')
+                self.cb_axis.setCurrentIndex(0 if s['time_axis'] == 'ms' else 1)
+                f.addRow('Labels', self.cb_axis)
+                self.sp_t0 = self._d(0, self.t_max_ms, s['t_start_ms'], ' ms')
+                self.sp_t1 = self._d(1, self.t_max_ms, s['t_end_ms'] or self.t_max_ms, ' ms')
+                f.addRow('Show from', self.sp_t0)
+                f.addRow('to', self.sp_t1)
+                note = QLabel(f'Record length {self.t_max_ms:g} ms. Picks are only accepted inside '
+                              f'the plotted time range.')
+                note.setWordWrap(True)
+                note.setStyleSheet('color: #555;')
+                f.addRow(note)
+                lay.addWidget(g)
+
+                g = QGroupBox('Traces')
+                f = QFormLayout(g)
+                self.chk_all = QCheckBox('All receivers')
+                self.chk_all.setChecked(s['first_x'] is None and s['last_x'] is None)
+                self.chk_all.toggled.connect(self._toggle)
+                f.addRow(self.chk_all)
+                self.sp_x0 = self._d(self.x_min, self.x_max, s['first_x'] if s['first_x'] is not None else self.x_min, ' m')
+                self.sp_x1 = self._d(self.x_min, self.x_max, s['last_x'] if s['last_x'] is not None else self.x_max, ' m')
+                self.lab_x0, self.lab_x1 = QLabel('From receiver'), QLabel('to receiver')
+                f.addRow(self.lab_x0, self.sp_x0)
+                f.addRow(self.lab_x1, self.sp_x1)
+                self.sp_nth = QSpinBox()
+                self.sp_nth.setRange(1, 50)
+                self.sp_nth.setValue(int(s['every_nth']))
+                self.sp_nth.setToolTip('Plot every Nth trace (picks still show on every receiver)')
+                f.addRow('Plot every Nth trace', self.sp_nth)
+                self.cb_norm = QComboBox()
+                self.cb_norm.addItem('Per-trace RMS (far offsets as strong as near)', 'rms')
+                self.cb_norm.addItem('True amplitude (one scale for the gather)', None)
+                self.cb_norm.setCurrentIndex(0 if s['trace_norm'] == 'rms' else 1)
+                f.addRow('Balance', self.cb_norm)
+                lay.addWidget(g)
+
+                g = QGroupBox('Wiggles')
+                f = QFormLayout(g)
+                self.cb_fill = QComboBox()
+                for lab, v in (('Fill positive lobes', 'positive'), ('Fill negative lobes', 'negative'),
+                               ('No fill (wiggle line only)', 'none')):
+                    self.cb_fill.addItem(lab, v)
+                self.cb_fill.setCurrentIndex(['positive', 'negative', 'none'].index(s['fill']))
+                f.addRow('Fill', self.cb_fill)
+                self.sp_clip = self._d(0, 10, s['clip'] if s['clip'] is not None else 0, ' trace spacings', 0.25)
+                self.sp_clip.setSpecialValueText('no clip')
+                f.addRow('Clip at', self.sp_clip)
+                self.sp_lw = self._d(0.1, 3, s['line_width'], '', 0.1)
+                f.addRow('Line width', self.sp_lw)
+                lay.addWidget(g)
+
+                bb = _BB(_BB.Ok | _BB.Apply | _BB.Cancel | _BB.RestoreDefaults)
+                bb.accepted.connect(self._ok)
+                bb.rejected.connect(self.reject)
+                bb.button(_BB.Apply).clicked.connect(self._apply)
+                bb.button(_BB.RestoreDefaults).clicked.connect(self._defaults)
+                lay.addWidget(bb)
+                self._toggle()
+
+            @staticmethod
+            def _d(lo, hi, val, suffix, step=1.0):
+                w = QDoubleSpinBox()
+                w.setRange(lo, hi)
+                w.setDecimals(2)
+                w.setSingleStep(step)
+                w.setValue(float(val))
+                w.setSuffix(suffix)
+                return w
+
+            def _toggle(self, *args):
+                show = not self.chk_all.isChecked()
+                for w in (self.lab_x0, self.sp_x0, self.lab_x1, self.sp_x1):
+                    w.setVisible(show)
+
+            def settings(self):
+                t0, t1 = sorted((self.sp_t0.value(), self.sp_t1.value()))
+                x0, x1 = sorted((self.sp_x0.value(), self.sp_x1.value()))
+                if t1 - t0 < 1:
+                    t1 = min(self.t_max_ms, t0 + 1)
+                return dict(time_axis=self.cb_axis.currentData(), t_start_ms=t0, t_end_ms=t1,
+                            first_x=None if self.chk_all.isChecked() else x0,
+                            last_x=None if self.chk_all.isChecked() else x1,
+                            every_nth=self.sp_nth.value(), fill=self.cb_fill.currentData(),
+                            clip=self.sp_clip.value() or None, line_width=self.sp_lw.value(),
+                            trace_norm=self.cb_norm.currentData())
+
+            def _apply(self):
+                if self.on_apply is not None:
+                    self.on_apply(self.settings())
+
+            def _ok(self):
+                self._apply()
+                self.accept()
+
+            def _defaults(self):
+                d = dict(DISPLAY_DEFAULTS)
+                self.cb_axis.setCurrentIndex(0)
+                self.sp_t0.setValue(0)
+                self.sp_t1.setValue(self.t_max_ms if d['t_end_ms'] is None else d['t_end_ms'])
+                self.chk_all.setChecked(True)
+                self.sp_nth.setValue(1)
+                self.cb_norm.setCurrentIndex(0)
+                self.cb_fill.setCurrentIndex(0)
+                self.sp_clip.setValue(1.0)
+                self.sp_lw.setValue(0.5)
+    except ImportError:
+        pass

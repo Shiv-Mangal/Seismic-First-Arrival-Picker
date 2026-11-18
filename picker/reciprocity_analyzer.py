@@ -3,7 +3,12 @@
 reciprocity_analyzer.py
 =======================
 
-Live reciprocity QC for the first-arrival picker.
+Live reciprocity and pick QC for the first-arrival picker.
+
+v10: a 'Picks (all shots)' tab shows every pick of every shot on one canvas (travel time vs
+receiver position, coloured by shot position) with picks whose reciprocal error exceeds the
+threshold ringed in red, the |dt| checkerboard beside it, and a delete mode (click a pick or
+drag a box) with undo / redo that edits the picker's picks directly.
 
 Reciprocity: the travel time from a shot at A to a receiver at B should equal
 the time from a shot at B to a receiver at A. For every pair of picked shots
@@ -62,7 +67,9 @@ def picks_from_dict(final_picks_dict):
 class ReciprocityResult:
     """Container for one analysis run (all tables are pandas DataFrames)."""
 
-    def __init__(self, pairs, shots, missing, matrix, matrix_shots, summary, threshold_ms):
+    def __init__(self, pairs, shots, missing, matrix, matrix_shots, summary, threshold_ms,
+                 pick_err=None):
+        self.pick_err = pick_err or {}    # (shot, pick x) -> (|dt| ms, partner shot, dt ms)
         self.pairs = pairs                # one row per reciprocal pair
         self.shots = shots                # one row per shot (all shots, picked or not)
         self.missing = missing            # reciprocal picks that could be added
@@ -98,11 +105,18 @@ def compute_reciprocity(final_picks_dict, shot_x, recv_x, dt_pick, threshold_ms=
 
     def t_at(s, x):
         px, py = picks[s]
+        if len(px) == 0:
+            return None
         j = int(np.argmin(np.abs(px - x)))
         return py[j] * dt_pick * 1e3 if abs(px[j] - x) <= tol else None   # ms
 
+    def x_at(s, x):
+        px = picks[s][0]
+        return float(px[int(np.argmin(np.abs(px - x)))])
+
     # ---------------- pairs ----------------
     rows, missing = [], []
+    pick_err = {}
     for a, b in combinations(picked, 2):
         xa, xb = shot_x[a], shot_x[b]
         if not (on_station(xa) and on_station(xb)) or abs(xa - xb) <= tol:
@@ -115,6 +129,8 @@ def compute_reciprocity(final_picks_dict, shot_x, recv_x, dt_pick, threshold_ms=
                 missing.append((b, a, xb, xa, f'shot {b + 1} has no pick at x = {xa:g}'))
             continue
         rows.append((a, b, xa, xb, abs(xb - xa), tab, tba, tab - tba))
+        pick_err[(a, x_at(a, xb))] = (abs(tab - tba), b, tab - tba)
+        pick_err[(b, x_at(b, xa))] = (abs(tab - tba), a, tba - tab)
     pairs = pd.DataFrame(rows, columns=['shot_a', 'shot_b', 'x_a', 'x_b', 'offset',
                                         't_ab_ms', 't_ba_ms', 'dt_ms'])
     pairs['abs_dt_ms'] = pairs['dt_ms'].abs()
@@ -208,7 +224,82 @@ def compute_reciprocity(final_picks_dict, shot_x, recv_x, dt_pick, threshold_ms=
         n_flagged=int((shots['status'] == 'FLAG').sum()),
         tol=tol,
     )
-    return ReciprocityResult(pairs, shots, missing, M, mshots, summary, threshold_ms)
+    return ReciprocityResult(pairs, shots, missing, M, mshots, summary, threshold_ms, pick_err)
+
+
+def delete_picks(final_picks_dict, items):
+    """
+    Remove picks from the picker's dictionary. items: iterable of (shot, x, sample).
+    A shot whose last pick goes keeps an empty (1, 0, 2) array (so the picker does not
+    fall back to an older copy). Returns an undo record [(key, removed rows)].
+    """
+    by_shot = {}
+    for s_, x, smp in items:
+        by_shot.setdefault(int(s_), []).append((float(x), float(smp)))
+    record = []
+    for s_, rows in by_shot.items():
+        key = f'final_picks_for_shot_no_{s_}'
+        if key not in final_picks_dict:
+            continue
+        a = np.asarray(final_picks_dict[key], dtype=float).reshape(-1, 2)
+        kill = np.zeros(len(a), bool)
+        for x, smp in rows:
+            kill |= (np.abs(a[:, 0] - x) < 1e-6) & (np.abs(a[:, 1] - smp) < 1e-6)
+        if kill.any():
+            record.append((key, a[kill].copy()))
+            final_picks_dict[key] = a[~kill][None, :, :]
+    return record
+
+
+def restore_deleted(final_picks_dict, record):
+    """Undo delete_picks. A receiver picked again since the delete keeps its new pick."""
+    for key, rows in record:
+        a = np.asarray(final_picks_dict.get(key, np.zeros((1, 0, 2))), dtype=float).reshape(-1, 2)
+        have = set(np.round(a[:, 0], 6))
+        add = np.array([r for r in rows if round(float(r[0]), 6) not in have]).reshape(-1, 2)
+        m = np.concatenate([a, add])
+        m = m[np.argsort(m[:, 0], kind='stable')]
+        final_picks_dict[key] = m[None, :, :]
+
+
+def draw_abs_matrix(fig, ax, result, current_shot=None, cbar=None, compact=False):
+    """|dt| checkerboard (shot x partner shot); returns the colour bar."""
+    import matplotlib
+    if cbar is not None:
+        try:
+            cbar.remove()
+        except Exception:
+            pass
+    ax.clear()
+    M = np.abs(result.matrix)
+    n = M.shape[0]
+    vals = M[np.isfinite(M)]
+    vmax = max(2 * result.threshold_ms, np.percentile(vals, 95) if vals.size else 1.0)
+    cmap = matplotlib.colormaps['YlOrRd'].copy()
+    cmap.set_bad('#e0e0e0')
+    im = ax.imshow(np.ma.masked_invalid(M), cmap=cmap, vmin=0, vmax=vmax, origin='upper',
+                   interpolation='nearest', extent=[0.5, n + 0.5, n + 0.5, 0.5])
+    cb = fig.colorbar(im, ax=ax, shrink=0.85 if not compact else 0.6,
+                      label='|\u0394t| (ms)' if compact else '|\u0394t| = |t(A\u2192B) \u2212 t(B\u2192A)|  (ms)',
+                      orientation='horizontal' if compact else 'vertical', pad=0.12 if compact else 0.05)
+    if compact:
+        cb.ax.axvline(result.threshold_ms, color='k', lw=1.5)
+    else:
+        cb.ax.axhline(result.threshold_ms, color='k', lw=1.5)
+    step = max(1, n // (10 if compact else 20))
+    ticks = np.arange(1, n + 1, step)
+    ax.set_xticks(ticks)
+    ax.set_yticks(ticks)
+    ax.set_xlabel('Partner shot no.')
+    ax.set_ylabel('Shot no.')
+    fl = result.flagged()['index'].values + 1
+    if len(fl):
+        ax.scatter(np.full(len(fl), 0.5), fl, marker='>', color='#c0392b', s=40 if not compact else 25,
+                   clip_on=False, zorder=5)
+    if current_shot is not None and 0 <= current_shot < n:
+        c = current_shot + 1
+        ax.add_patch(matplotlib.patches.Rectangle((0.5, c - 0.5), n, 1, fill=False, ec='lime', lw=1.5))
+    return cb
 
 
 # =====================================================================
@@ -220,7 +311,8 @@ try:
     from PyQt5.QtWidgets import (
         QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton,
         QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QWidget, QFileDialog,
-        QApplication, QMessageBox, QAbstractItemView, QCheckBox)
+        QApplication, QMessageBox, QAbstractItemView, QCheckBox, QSplitter, QShortcut)
+    from PyQt5.QtGui import QKeySequence
     from matplotlib.figure import Figure
     try:
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -264,9 +356,19 @@ if _HAVE_QT:
         on_open_shot : callable(shot_index) used when a row is double-clicked
         """
 
-        def __init__(self, get_inputs, on_open_shot=None, threshold_ms=2.0, parent=None):
+        def __init__(self, get_inputs, on_open_shot=None, threshold_ms=2.0, parent=None,
+                     on_picks_changed=None):
             super().__init__(parent)
-            self.setWindowTitle('Reciprocity QC')
+            self.setWindowTitle('Reciprocity and pick QC')
+            self.on_picks_changed = on_picks_changed      # callback(set of shot indices)
+            self._undo, self._redo = [], []
+            self._editing = False
+            self._pcbar = self._ccbar = None
+            self._pview = None
+            self._fit_next = True
+            self._hl = []
+            self._drag = None
+            self._pts = np.zeros((0, 4))
             self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint |
                                 Qt.WindowMinimizeButtonHint)
             self.setModal(False)
@@ -330,6 +432,7 @@ if _HAVE_QT:
 
             self.tabs = QTabWidget()
             lay.addWidget(self.tabs, 1)
+            self._build_picks_tab()
 
             # Shots
             self.tbl_shots = self._table(['Shot no.', 'Index', 'Position', 'Picks', 'Pairs',
@@ -373,15 +476,367 @@ if _HAVE_QT:
                 lambda r, c: self._open_from(self.tbl_missing, r, 0, shot_no=True))
             self.tabs.addTab(self.tbl_missing, 'Missing picks')
 
+        # ---------------- picks tab (v10) ----------------
+        def _build_picks_tab(self):
+            w = QWidget()
+            v = QVBoxLayout(w)
+            row = QHBoxLayout()
+            self.chk_delete = QCheckBox('Delete mode')
+            self.chk_delete.setToolTip('Click a pick to delete it, or drag a box to delete every pick '
+                                       'inside it (D toggles; Ctrl+Z undo, Ctrl+Y redo)')
+            self.chk_delete.setStyleSheet('QCheckBox { font-weight: bold; } '
+                                          'QCheckBox::indicator { width: 18px; height: 18px; }')
+            self.chk_delete.toggled.connect(self._delete_mode_changed)
+            row.addWidget(self.chk_delete)
+            self.btn_undo = QPushButton('\u21b6 Undo')
+            self.btn_undo.clicked.connect(self.undo)
+            self.btn_redo = QPushButton('Redo \u21b7')
+            self.btn_redo.clicked.connect(self.redo)
+            row.addWidget(self.btn_undo)
+            row.addWidget(self.btn_redo)
+            row.addSpacing(16)
+            self.chk_lines = QCheckBox('Lines')
+            self.chk_lines.setChecked(True)
+            self.chk_lines.toggled.connect(lambda *_: self._draw_picks())
+            row.addWidget(self.chk_lines)
+            self.chk_flags = QCheckBox('Flag picks with |\u0394t| above the threshold')
+            self.chk_flags.setChecked(True)
+            self.chk_flags.toggled.connect(lambda *_: self._draw_picks())
+            row.addWidget(self.chk_flags)
+            b = QPushButton('Fit all')
+            b.clicked.connect(self._fit_all)
+            row.addWidget(b)
+            row.addStretch(1)
+            v.addLayout(row)
+            split = QSplitter(Qt.Horizontal)
+            scr = QApplication.primaryScreen()
+            dpi = scr.logicalDotsPerInch() if scr is not None else 96
+            left = QWidget()
+            ll = QVBoxLayout(left)
+            ll.setContentsMargins(0, 0, 0, 0)
+            self.fig_p = Figure(dpi=dpi, constrained_layout=True)
+            self.canvas_p = FigureCanvas(self.fig_p)
+            self.ax_p = self.fig_p.add_subplot(111)
+            self.tb_p = NavigationToolbar(self.canvas_p, left)
+            ll.addWidget(self.tb_p)
+            ll.addWidget(self.canvas_p, 1)
+            split.addWidget(left)
+            right = QWidget()
+            rl = QVBoxLayout(right)
+            rl.setContentsMargins(0, 0, 0, 0)
+            self.fig_c = Figure(dpi=dpi, constrained_layout=True)
+            self.canvas_c = FigureCanvas(self.fig_c)
+            self.ax_c = self.fig_c.add_subplot(111)
+            rl.addWidget(QLabel('<b>Reciprocal error</b> (click a cell: its two picks are marked; '
+                                'double-click: open the shot)'))
+            rl.addWidget(self.canvas_c, 1)
+            split.addWidget(right)
+            split.setStretchFactor(0, 3)
+            split.setStretchFactor(1, 1)
+            v.addWidget(split, 1)
+            self.lbl_p = QLabel('Click a pick for its details; double-click opens that shot in the picker.')
+            self.lbl_p.setWordWrap(True)
+            self.lbl_p.setTextFormat(Qt.RichText)
+            v.addWidget(self.lbl_p)
+            self.tabs.addTab(w, 'Picks (all shots)')
+            self.canvas_p.mpl_connect('button_press_event', self._p_press)
+            self.canvas_p.mpl_connect('motion_notify_event', self._p_motion)
+            self.canvas_p.mpl_connect('button_release_event', self._p_release)
+            self.canvas_c.mpl_connect('button_press_event', self._c_click)
+            QShortcut(QKeySequence.Undo, self, self.undo)
+            QShortcut(QKeySequence.Redo, self, self.redo)
+            QShortcut(QKeySequence('Ctrl+Y'), self, self.redo)
+            QShortcut(QKeySequence('D'), self, lambda: self.chk_delete.toggle())
+            self._update_undo_buttons()
+
+        def _delete_mode_changed(self, on):
+            if on and getattr(self.tb_p, 'mode', ''):
+                try:                              # leave zoom/pan so clicks reach the picks
+                    if 'zoom' in str(self.tb_p.mode).lower():
+                        self.tb_p.zoom()
+                    elif 'pan' in str(self.tb_p.mode).lower():
+                        self.tb_p.pan()
+                except Exception:
+                    pass
+            self.canvas_p.setCursor(Qt.CrossCursor if on else Qt.ArrowCursor)
+            for sp in self.ax_p.spines.values():
+                sp.set_edgecolor('#c0392b' if on else 'black')
+                sp.set_linewidth(2.5 if on else 0.8)
+            self.lbl_p.setText('<b style="color:#c0392b;">DELETE MODE</b>: click a pick to delete it, or '
+                               'drag a box around several. Undo / Redo restore them.' if on else
+                               'Click a pick for its details; double-click opens that shot in the picker.')
+            self.canvas_p.draw_idle()
+
+        def _fit_all(self):
+            self._fit_next = True
+            self._draw_picks()
+
+        def _update_undo_buttons(self):
+            self.btn_undo.setEnabled(bool(self._undo))
+            self.btn_redo.setEnabled(bool(self._redo))
+            self.btn_undo.setText(f'\u21b6 Undo ({len(self._undo)})' if self._undo else '\u21b6 Undo')
+            self.btn_redo.setText(f'Redo ({len(self._redo)}) \u21b7' if self._redo else 'Redo \u21b7')
+
+        def _draw_picks(self):
+            import matplotlib
+            from matplotlib.collections import LineCollection
+            from matplotlib.colors import Normalize
+            from matplotlib.cm import ScalarMappable
+            if self.result is None or not hasattr(self, 'inp'):
+                return
+            ax = self.ax_p
+            had = ax.has_data() and not self._fit_next
+            if had:
+                xl, yl = ax.get_xlim(), ax.get_ylim()
+            if self._pcbar is not None:
+                try:
+                    self._pcbar.remove()
+                except Exception:
+                    pass
+                self._pcbar = None
+            ax.clear()
+            inp = self.inp
+            picks = picks_from_dict(inp['final_picks_dict'])
+            shot_x = np.asarray(inp['shot_x'], float)
+            msp = inp['dt_pick'] * 1e3                     # ms per pick sample
+            rows = []
+            for s_, (px, py) in sorted(picks.items()):
+                for x, smp in zip(px, py):
+                    rows.append((s_, x, smp, smp * msp))
+            self._pts = np.array(rows, float).reshape(-1, 4)
+            cmap = matplotlib.colormaps['turbo']
+            norm = Normalize(float(shot_x.min()), float(shot_x.max()) if shot_x.max() > shot_x.min() else shot_x.min() + 1)
+            P = self._pts
+            if len(P):
+                cols = cmap(norm(shot_x[P[:, 0].astype(int)]))
+                if self.chk_lines.isChecked():
+                    segs, lc_cols = [], []
+                    for s_, (px, py) in sorted(picks.items()):
+                        if len(px) > 1:
+                            o = np.argsort(px)
+                            segs.append(np.column_stack([px[o], py[o] * msp]))
+                            lc_cols.append(cmap(norm(shot_x[s_])))
+                    ax.add_collection(LineCollection(segs, colors=lc_cols, linewidths=0.9, alpha=0.55, zorder=1))
+                ax.scatter(P[:, 1], P[:, 3], s=16, c=cols, edgecolors='none', zorder=2)
+                cs = self.current_shot
+                if cs in picks and len(picks[cs][0]):
+                    o = np.argsort(picks[cs][0])
+                    ax.plot(picks[cs][0][o], picks[cs][1][o] * msp, '-', color='k', lw=2.0, zorder=3,
+                            label=f'shot {cs + 1} (on the picker canvas)')
+            # shots at t = 0
+            ax.scatter(shot_x, np.zeros(len(shot_x)), marker='s', s=40, c=cmap(norm(shot_x)),
+                       edgecolors='k', linewidths=0.6, zorder=4, clip_on=False, label='shots')
+            # flagged picks
+            thr = self.result.threshold_ms
+            n_flag = 0
+            if self.chk_flags.isChecked() and self.result.pick_err:
+                fl = [(k, v) for k, v in self.result.pick_err.items() if v[0] > thr]
+                n_flag = len(fl)
+                if fl:
+                    fx, fy, fe = [], [], []
+                    for (s_, x), (e, partner, d) in fl:
+                        px, py = picks.get(s_, (np.array([]), np.array([])))
+                        j = np.where(np.abs(px - x) < 1e-6)[0]
+                        if len(j):
+                            fx.append(x)
+                            fy.append(py[j[0]] * msp)
+                            fe.append(e)
+                    sizes = 40 + 160 * np.clip(np.array(fe) / (4 * thr), 0, 1)   # bigger ring = bigger error
+                    ax.scatter(fx, fy, s=sizes, facecolors='none', edgecolors='#c0392b', linewidths=1.6,
+                               zorder=5, label=f'|\u0394t| > {thr:g} ms ({len(fx)} picks)')
+            for (s_, x) in self._hl:                      # pair chosen on the checkerboard
+                px, py = picks.get(s_, (np.array([]), np.array([])))
+                j = np.where(np.abs(px - x) < 1e-6)[0]
+                if len(j):
+                    ax.scatter([x], [py[j[0]] * msp], marker='*', s=260, color='#f1c40f',
+                               edgecolors='k', zorder=6)
+            self._pcbar = self.fig_p.colorbar(ScalarMappable(norm=norm, cmap=cmap), ax=ax, pad=0.01,
+                                              label='Shot position (m)')
+            ax.set_xlabel('Receiver position (m)')
+            ax.set_ylabel('First-arrival time (ms)')
+            ax.grid(alpha=0.3)
+            npk = len(P)
+            ax.set_title(f'{npk} picks on {len(picks)} shots'
+                         + (f';  {n_flag} picks with reciprocal |\u0394t| > {thr:g} ms (red rings)'
+                            if self.chk_flags.isChecked() else ''), fontsize='medium')
+            if npk or len(shot_x):
+                ax.legend(loc='upper right', fontsize='small', framealpha=0.9)
+            if had:
+                ax.set_xlim(xl)
+                ax.set_ylim(yl)
+            else:
+                tmax = (P[:, 3].max() if len(P) else 100.0) * 1.08 + 1
+                pad = 0.02 * (shot_x.max() - shot_x.min() + 1)
+                xs = np.concatenate([shot_x, P[:, 1]]) if len(P) else shot_x
+                ax.set_xlim(xs.min() - pad, xs.max() + pad)
+                ax.set_ylim(tmax, -0.03 * tmax)
+                self._fit_next = False
+            if self.chk_delete.isChecked():
+                for sp in ax.spines.values():
+                    sp.set_edgecolor('#c0392b')
+                    sp.set_linewidth(2.5)
+            self.canvas_p.draw_idle()
+
+        def _draw_checker(self):
+            if self.result is None:
+                return
+            self._ccbar = draw_abs_matrix(self.fig_c, self.ax_c, self.result, self.current_shot,
+                                          self._ccbar, compact=True)
+            self.ax_c.set_title(f'black line on colour bar = {self.result.threshold_ms:g} ms',
+                                fontsize='small')
+            self.canvas_c.draw_idle()
+
+        # ---- picking on the picks canvas ----
+        def _nav_active(self):
+            return bool(getattr(self.tb_p, 'mode', ''))
+
+        def _nearest(self, ev, max_px=10):
+            if not len(self._pts):
+                return None
+            xy = self.ax_p.transData.transform(self._pts[:, [1, 3]])
+            d = np.hypot(xy[:, 0] - ev.x, xy[:, 1] - ev.y)
+            j = int(np.argmin(d))
+            return j if d[j] <= max_px else None
+
+        def _p_press(self, ev):
+            if ev.inaxes is not self.ax_p or ev.button != 1 or self._nav_active():
+                return
+            if self.chk_delete.isChecked():
+                import matplotlib
+                self._drag = (ev.x, ev.y, ev.xdata, ev.ydata,
+                              matplotlib.patches.Rectangle((ev.xdata, ev.ydata), 0, 0, fill=True,
+                                                           fc=(0.75, 0.22, 0.17, 0.12), ec='#c0392b',
+                                                           lw=1.2, ls='--', zorder=10))
+                self.ax_p.add_patch(self._drag[4])
+                return
+            j = self._nearest(ev)
+            if j is None:
+                return
+            s_, x, smp, t = self._pts[j]
+            s_ = int(s_)
+            e = self.result.pick_err.get((s_, x)) if self.result else None
+            txt = (f'<b>Shot {s_ + 1}</b> (x = {self.inp["shot_x"][s_]:g} m), receiver {x:g} m: '
+                   f't = {t:.2f} ms')
+            if e:
+                txt += (f'; reciprocal with shot {e[1] + 1}: \u0394t = {e[2]:+.2f} ms '
+                        + ('<b style="color:#c0392b;">(above threshold)</b>' if e[0] > self.result.threshold_ms else ''))
+            else:
+                txt += '; no reciprocal partner pick'
+            self.lbl_p.setText(txt + '. Double-click to open this shot in the picker.')
+            if ev.dblclick and self.on_open_shot is not None:
+                self.on_open_shot(s_)
+
+        def _p_motion(self, ev):
+            if self._drag is None or ev.inaxes is not self.ax_p or ev.xdata is None:
+                return
+            x0, y0 = self._drag[2], self._drag[3]
+            r = self._drag[4]
+            r.set_bounds(min(x0, ev.xdata), min(y0, ev.ydata), abs(ev.xdata - x0), abs(ev.ydata - y0))
+            self.canvas_p.draw_idle()
+
+        def _p_release(self, ev):
+            if self._drag is None:
+                return
+            px0, py0, x0, y0, rect = self._drag
+            self._drag = None
+            try:
+                rect.remove()
+            except Exception:
+                pass
+            if ev.x is None or (abs(ev.x - px0) < 6 and abs(ev.y - py0) < 6):
+                j = self._nearest(ev) if ev.inaxes is self.ax_p else None
+                sel = [] if j is None else [j]
+            else:
+                x1 = ev.xdata if ev.xdata is not None else x0
+                y1 = ev.ydata if ev.ydata is not None else y0
+                P = self._pts
+                sel = list(np.where((P[:, 1] >= min(x0, x1)) & (P[:, 1] <= max(x0, x1)) &
+                                    (P[:, 3] >= min(y0, y1)) & (P[:, 3] <= max(y0, y1)))[0])
+            if not sel:
+                self.canvas_p.draw_idle()
+                return
+            items = [(int(self._pts[j, 0]), self._pts[j, 1], self._pts[j, 2]) for j in sel]
+            self.delete_items(items)
+
+        # ---- delete / undo / redo ----
+        def delete_items(self, items):
+            fpd = self.get_inputs()['final_picks_dict']
+            rec = delete_picks(fpd, items)
+            if not rec:
+                return
+            self._undo.append((list(items), rec))
+            self._redo.clear()
+            n = sum(len(r) for _, r in rec)
+            self._after_edit({int(k.rsplit('_', 1)[1]) for k, _ in rec},
+                             f'Deleted {n} pick(s) on shot(s) '
+                             + ', '.join(str(int(k.rsplit("_", 1)[1]) + 1) for k, _ in rec)
+                             + '. Ctrl+Z to undo.')
+
+        def undo(self):
+            if not self._undo:
+                return
+            items, rec = self._undo.pop()
+            restore_deleted(self.get_inputs()['final_picks_dict'], rec)
+            self._redo.append((items, rec))
+            n = sum(len(r) for _, r in rec)
+            self._after_edit({int(k.rsplit('_', 1)[1]) for k, _ in rec}, f'Restored {n} pick(s).')
+
+        def redo(self):
+            if not self._redo:
+                return
+            items, _ = self._redo.pop()
+            rec = delete_picks(self.get_inputs()['final_picks_dict'], items)
+            self._undo.append((items, rec))
+            n = sum(len(r) for _, r in rec)
+            self._after_edit({int(k.rsplit('_', 1)[1]) for k, _ in rec}, f'Deleted {n} pick(s) again.')
+
+        def _after_edit(self, shots, msg):
+            self._editing = True
+            try:
+                if self.on_picks_changed is not None:
+                    self.on_picks_changed(set(shots))
+            except Exception as e:
+                msg += f' (picker update failed: {e})'
+            finally:
+                self._editing = False
+            self._update_undo_buttons()
+            self.refresh()
+            self.lbl_p.setText(msg)
+
+        # ---- checkerboard ----
+        def _c_click(self, event):
+            if event.inaxes is not self.ax_c or self.result is None or event.xdata is None:
+                return
+            a, b = int(round(event.ydata)) - 1, int(round(event.xdata)) - 1
+            M = self.result.matrix
+            if not (0 <= a < M.shape[0] and 0 <= b < M.shape[1]):
+                return
+            v = M[a, b]
+            self._hl = []
+            if np.isfinite(v):
+                for (s_, x), (e, partner, d) in self.result.pick_err.items():
+                    if (s_ == a and partner == b) or (s_ == b and partner == a):
+                        self._hl.append((s_, x))
+                self.lbl_p.setText(f'Shot {a + 1} \u2194 shot {b + 1}: |\u0394t| = {abs(v):.2f} ms '
+                                   f'(the two picks are marked with yellow stars)')
+            else:
+                self.lbl_p.setText(f'Shot {a + 1} \u2194 shot {b + 1}: no reciprocal pair')
+            self._draw_picks()
+            if event.dblclick and self.on_open_shot is not None:
+                self.on_open_shot(a)
+
         # ---------------- refresh ----------------
         def live_refresh(self):
             """Called by the picker whenever picks change."""
+            if self._editing:
+                return
             if self.chk_live.isChecked() and self.isVisible():
                 self.refresh()
 
         def refresh(self):
             try:
                 inp = self.get_inputs()
+                self.inp = inp
                 self.current_shot = inp.get('current_shot')
                 self.result = compute_reciprocity(inp['final_picks_dict'], inp['shot_x'],
                                                   inp['recv_x'], inp['dt_pick'],
@@ -394,6 +849,8 @@ if _HAVE_QT:
             self._fill_pairs()
             self._fill_missing()
             self._draw_map()
+            self._draw_picks()
+            self._draw_checker()
 
         def _fill_summary(self):
             s, r = self.result.summary, self.result
@@ -473,7 +930,7 @@ if _HAVE_QT:
                 for j, it in enumerate(vals):
                     t.setItem(i, j, it)
             t.setSortingEnabled(True)
-            self.tabs.setTabText(3, f'Missing picks ({len(df)})')
+            self.tabs.setTabText(self.tabs.indexOf(self.tbl_missing), f'Missing picks ({len(df)})')
 
         def _draw_map(self):
             r = self.result
