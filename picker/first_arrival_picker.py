@@ -1148,10 +1148,12 @@ importlib.reload(rcq)                  # pick up edits without restarting the ke
 RECIPROCITY_THRESHOLD_MS = 2.0         # flag shots whose median |reciprocal error| exceeds this
 import pick_tools as ptl               # void picks on a trace (same folder)
 import auto_pickers as apk             # v11: automatic picking (STA/LTA family + post-processing)
+import help_manual as hlp              # v13: user manual (Help menu, F1, PDF)
 importlib.reload(apk)
 AUTOPICK_PARAMS = apk.AutoPickParams()  # last settings used (saved with the picks)
 AUTOPICK_UNDO = []                      # undo stack for automatic picking
 importlib.reload(ptl)
+importlib.reload(hlp)
 rax3 = None                            # DATA QUANTITY radio axes
 radio_quantity = None
 gain_minus_ax = gain_plus_ax = None    # gain step buttons
@@ -2038,6 +2040,7 @@ def adjust_gain():
 
 def initialize_plot():
     dialog = InputDialog()
+    _with_help(dialog, 'canvas')
     if dialog.exec_() == QDialog.Accepted:
         plot_shot()
 
@@ -2100,6 +2103,7 @@ def open_reciprocity_window():
                                              on_open_shot=open_shot_from_reciprocity,
                                              threshold_ms=RECIPROCITY_THRESHOLD_MS,
                                              on_picks_changed=picks_changed_from_qc)
+        _with_help(recip_window, 'qc')
     else:
         recip_window.refresh()
     recip_window.show()
@@ -2202,6 +2206,7 @@ def open_autopick_stalta():
                            current_shot=shot_no or 0, available_quantities=list(QUANTITY_DATA),
                            existing_picks=_existing_picks_ms, on_apply=apply_autopicks,
                            parent=fig.canvas.manager.window if fig is not None else None)
+    _with_help(dlg, 'autopick')
     _keep_dialog(dlg)
     dlg.exec_()
 
@@ -2289,6 +2294,7 @@ def open_geometry_window():
     geometry_window = dimp.GeometryWindow(
         SURVEY, current_shot=shot_no, picked=_picked_shot_indices(),
         on_open_shot=lambda i: QTimer.singleShot(0, lambda: go_to_shot(i, ' from the geometry window')))
+    _with_help(geometry_window, 'geometry')
     geometry_window.show()
 
 
@@ -2325,6 +2331,49 @@ def step_shot(direction):
 # Widget helpers
 # ---------------------------------------------------------------------
 _recent_dialogs = []
+
+
+def _with_help(dlg, section):
+    """F1 in a dialog/window opens the manual at its section (v13)."""
+    try:
+        hlp.install_f1(dlg, section)
+    except Exception as e:
+        print(f"Help (F1) not installed: {e}")
+    return dlg
+
+
+def show_manual(section=None, toggle=False):
+    """Help > User manual / toolbar Help / F1: the manual as a side tab of the picker (v13)."""
+    win = None
+    try:
+        if fig is not None and plt.fignum_exists(fig.number):
+            win = fig.canvas.manager.window
+    except Exception:
+        win = None
+    if win is None or not hasattr(win, 'addDockWidget'):
+        return hlp.open_help(None, section)
+    dock = getattr(win, '_help_dock', None)
+    if dock is None:
+        dock = hlp.make_help_dock(win)
+        win._help_dock = dock
+    if toggle and dock.isVisible() and not section:
+        dock.hide()
+        return dock
+    return hlp.show_in_dock(dock, section)
+
+
+def open_pdf_manual():
+    if not hlp.open_pdf():
+        QMessageBox.information(None, 'PDF manual', f'The PDF manual was not found:\n{hlp.MANUAL_PDF}')
+
+
+def show_about():
+    QMessageBox.about(None, 'About the first-arrival picker',
+                      '<b>First-arrival picker</b> for refraction tomography (v13)<br><br>'
+                      'Manual and automatic first-break picking of SEG-Y shot gathers, with '
+                      'preprocessing, filtering, reciprocity QC and export to a three-column '
+                      'S G T file for travel-time tomography.<br><br>'
+                      'Help &gt; User manual (F1) explains every window.')
 
 
 def _keep_dialog(dlg):
@@ -2470,6 +2519,7 @@ def open_preprocessing_ui(preview_shot=None, parent=None, target=None):
                                wiggle_clip=CLIP_FRACTION,
                                preview_ms=no_of_samples_to_plot / RESAMPLE_FACTOR * dt * 1e3,
                                note=note, parent=parent)
+    _with_help(dlg, 'preprocessing')
     dlg.exec_()
     _keep_dialog(dlg)
 
@@ -2485,6 +2535,7 @@ def open_void_picks_ui():
     finalize_and_process_picks()
     dlg = ptl.VoidPicksDialog(final_picks_dict, recv_pos, shot_no,
                               dt_pick_ms=dt * 1e3 / RESAMPLE_FACTOR, default_x=_last_cursor_x)
+    _with_help(dlg, 'void')
     if dlg.exec_() != QDialog.Accepted:
         return
     tol = 0.5 * float(np.min(np.diff(np.sort(recv_pos))))
@@ -2526,6 +2577,9 @@ SHORTCUTS_TEXT = """Picking canvas keys
   n   choose a shot (dialog; saves first)
   f   filter designer
   Ctrl+S   save the canvas as an image
+  Ctrl+O   import SEG-Y data (File menu)
+  Ctrl+D   plotted traces, time axis and gain
+  F1       user manual (also F1 in every window: help for that window)
 
 Mouse
   wheel on the gather    zoom
@@ -2533,11 +2587,14 @@ Mouse
   ◀ Prev / Next ▶   neighbouring shot (saves first)
 
 Everything else is in the menus / toolbar:
-  Data: preprocessing, acceleration / velocity / displacement
+  File: import SEG-Y data, repeat an import, save picks, canvas image
+  Data: survey geometry / topography (double-click a shot to open it),
+        preprocessing, acceleration / velocity / displacement
   Processing: filter designer
-  Picks: void picks on a trace, undo void, save
+  Picks: void picks on a trace, undo void, automatic picking, save
+  Traces, axes & gain: trace ranges (e.g. 1-20, 50-60), time window, gain
   QC: reciprocity and pick QC (all picks on one canvas; Delete mode, Ctrl+Z / Ctrl+Y)
-  Data: survey geometry / topography (double-click a shot to open it)"""
+  Help: user manual (F1), PDF manual"""
 
 
 def apply_display_settings(settings):
@@ -2601,6 +2658,7 @@ def open_display_settings():
                                     gain=gain_factor[0], on_gain=set_canvas_gain,
                                     gain_range=(GAIN_MIN, GAIN_MAX))
     _keep_dialog(dlg)
+    _with_help(dlg, 'traces-axes-gain')
     dlg.exec_()
 
 
@@ -2881,8 +2939,17 @@ def install_app_menus(fig):
     m_qc = mb.addMenu('&QC')
     m_qc.addAction('Reciprocity and pick QC...', open_reciprocity_window)
 
-    m_help = mb.addMenu('&Help')
+    m_help = mb.addMenu('&Help')                        # v13: the user manual
+    a = m_help.addAction('User manual', lambda: show_manual(None, toggle=True))
+    a.setShortcut(QKeySequence('F1'))
+    a.setToolTip('The manual as a side tab of this window (F1 again hides it)')
+    m_help.addAction('Open the PDF manual', open_pdf_manual)
+    m_sec = m_help.addMenu('Manual sections')
+    for _anchor, _title in hlp.SECTION_TITLES.items():
+        m_sec.addAction(_title, lambda _c=False, a_=_anchor: show_manual(a_))
+    m_help.addSeparator()
     m_help.addAction('Keyboard and mouse shortcuts...', show_shortcuts)
+    m_help.addAction('About...', show_about)
 
     # Toolbar: one-click access + a Tools drop-down
     tb = QToolBar('Picker tools', win)
@@ -2900,7 +2967,9 @@ def install_app_menus(fig):
                         ('Plotted traces, time axis and gain...', open_display_settings),
                         ('Void picks on a trace...', _run_from_menu(open_void_picks_ui)),
                         ('Undo last void', _run_from_menu(undo_last_void)),
-                        ('Shortcuts...', show_shortcuts)):
+                        ('Shortcuts...', show_shortcuts),
+                        ('User manual (F1)', lambda: show_manual(None)),
+                        ('Open the PDF manual', open_pdf_manual)):
         menu.addAction(title, func)
     tools.setMenu(menu)
     tb.addWidget(tools)
@@ -2924,6 +2993,8 @@ def install_app_menus(fig):
     auto.setMenu(am)
     tb.addWidget(auto)
     tb.addAction('\U0001F4BE Save picks', _run_from_menu(_save_picks_menu))
+    tb.addSeparator()
+    tb.addAction('\u2753 Help', lambda: show_manual(None, toggle=True))      # v13
     win.addToolBarBreak()
     win.addToolBar(tb)
     refresh_geometry_window()                 # follow the shot on the canvas
@@ -2944,6 +3015,7 @@ def open_filter_designer_ui(preview_shot=None, parent=None):
         wiggle_clip=CLIP_FRACTION,
         parent=parent,
         pre_shift_s=filter_pre_shift())               # filter before the time shift (v9)
+    _with_help(dlg, 'filter')
     dlg.exec_()
     _keep_dialog(dlg)
 

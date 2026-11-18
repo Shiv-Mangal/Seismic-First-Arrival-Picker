@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>First-Arrival Picker - User Manual</title>
+<style>
+body { font-family: 'Segoe UI', 'DejaVu Sans', Arial, sans-serif; font-size: 10.5pt; color: #222; }
+h1 { color: #1b4f72; font-size: 20pt; margin-bottom: 2px; }
+p.sub { color: #555; font-size: 11pt; margin-top: 0; }
+h2 { color: #1b4f72; font-size: 15pt; margin-top: 26px; border-bottom: 1px solid #aab7b8; }
+h3 { color: #21618c; font-size: 12pt; margin-top: 16px; }
+code { font-family: Consolas, 'DejaVu Sans Mono', monospace; color: #7b241c; }
+pre { font-family: Consolas, 'DejaVu Sans Mono', monospace; background-color: #f4f6f7; padding: 6px; }
+p.fig { margin-top: 10px; margin-bottom: 14px; }
+span.cap { color: #555; font-size: 9.5pt; }
+table.grid { border-collapse: collapse; margin-top: 6px; margin-bottom: 10px; }
+table.grid th { background-color: #d6eaf8; text-align: left; padding: 4px; }
+table.grid td { padding: 4px; vertical-align: top; }
+table.note { background-color: #fef9e7; margin-top: 8px; margin-bottom: 10px; }
+a { color: #1f618d; }
+</style></head><body>
+<h1 id="top">First-Arrival Picker: User Manual</h1>
+<p class="sub">Version 13 · first-break picking of SEG-Y shot gathers for refraction tomography</p>
+
+<p>This manual explains every window of the picker, in the order you use them. Every figure was made with the picker itself on a synthetic survey (<a href="#example-data">About the example data</a>), so the numbers in the figures can be checked against known true travel times. Inside the picker, <b>Help &gt; User manual</b> (F1) opens this manual beside the canvas. F1 in any window opens the section for that window. <b>Help &gt; Open the PDF manual</b> opens this same text as a PDF.</p>
+
+<h3 id="contents">Contents</h3><ol><li><a href="#workflow">Overview and workflow</a></li><li><a href="#starting">Installing and starting</a></li><li><a href="#import">Importing SEG-Y data</a></li><li><a href="#canvas">The picking canvas</a></li><li><a href="#menus">Menus and toolbar</a></li><li><a href="#picking">Picking by hand</a></li><li><a href="#traces-axes-gain">Traces, axes and gain</a></li><li><a href="#preprocessing">Preprocessing</a></li><li><a href="#filter">Filter designer</a></li><li><a href="#void">Void picks</a></li><li><a href="#autopick">Automatic picking</a></li><li><a href="#qc">Reciprocity and pick QC</a></li><li><a href="#geometry">Survey geometry</a></li><li><a href="#spectra">Spectra and the sensor response</a></li><li><a href="#files">Files, saving and the SGT export</a></li><li><a href="#shortcuts">Keyboard and mouse</a></li><li><a href="#troubleshooting">Troubleshooting</a></li><li><a href="#history">Version history</a></li></ol>
+<h2 id="workflow">1. Overview and workflow</h2>
+<p>The picker turns a set of SEG-Y shot gathers into first-arrival travel times for refraction (travel-time) tomography. The end product is an <b>S G T file</b>: three columns with the shot position (S), the geophone/receiver position (G) and the first-arrival time (T) of every picked shot–receiver pair. Tomography codes such as pyGIMLi read this file directly.</p>
+<p class="fig"><img src="images/workflow.png" data-w="1386" alt="Workflow"><br><span class="cap">Figure 1. The workflow. Quality control (QC) feeds back into picking until the reciprocal errors are small.</span></p>
+<ol>
+<li><b>Import</b> the SEG-Y files: one file per shot. You state what the data are (acceleration, velocity or displacement); the geometry and the time zero come from the headers.</li>
+<li><b>Preprocess</b>: integrate acceleration to velocity or displacement (or differentiate), apply the time shift, and kill bad traces.</li>
+<li><b>Filter</b> with a minimum-phase band-pass and notch filters. The filter designer measures the delay the filter adds to the onsets, so you know how far to trust filtered picks.</li>
+<li><b>Pick</b> by hand (click or drag across traces) or automatically (STA/LTA family plus post-processing). Both write to the same pick file.</li>
+<li><b>QC</b>: reciprocity says that the time from A to B equals the time from B to A. The guider on the canvas and the <i>Reciprocity and pick QC</i> window show where picks disagree, so you can delete and pick them again.</li>
+<li><b>Export</b> the S G T file with the end-of-session cells of the script.</li>
+</ol>
+<h3 id="modules">Program files</h3>
+<p>Keep these files, and the <code>manual</code> folder, together in one folder:</p>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>File</th><th>What it does</th></tr>
+<tr><td><code>first_arrival_picker.py</code></td><td>The script you run (Spyder cells): import, preprocessing, filtering, the picking canvas, menus, saving and the SGT export cells.</td></tr>
+<tr><td><code>data_importer.py</code></td><td>SEG-Y import window, header reading, geometry, spectra, survey geometry window.</td></tr>
+<tr><td><code>preprocess_designer.py</code></td><td>Integration / differentiation, time shift, mute, normalization, trace kills.</td></tr>
+<tr><td><code>filter_designer.py</code></td><td>Filter designer (minimum-phase FIR, zero-phase FIR, IIR; notch filters; timing).</td></tr>
+<tr><td><code>auto_pickers.py</code></td><td>Automatic picking: detectors, onset refinement, post-processing.</td></tr>
+<tr><td><code>reciprocity_analyzer.py</code></td><td>Reciprocity and pick QC window.</td></tr>
+<tr><td><code>pick_tools.py</code></td><td>Void picks, the plotted traces / time axis / gain window, shared gain control.</td></tr>
+<tr><td><code>help_manual.py</code></td><td>This manual inside the picker (Help menu, F1).</td></tr>
+</table>
+<h3 id="example-data">About the example data</h3>
+<p>The figures use a synthetic survey written as ordinary SEG-Y files (<code>SYN_0900_*.segy</code>), so the import runs exactly as on field data:</p>
+<ul>
+<li>96 receivers every 2 m along a gently curved line, with topography (720–727 m elevation).</li>
+<li>11 shots, at 0, 20, …, 180 and 190 m.</li>
+<li>1 ms sampling, 0.7 s records, and a header recording delay of −50 ms.</li>
+<li>A three-layer model: 450, 1400 and 2800 m/s, with laterally varying thicknesses.</li>
+<li>Ground roll at about 230 and 165 m/s, and random noise.</li>
+<li>One dead trace (receiver 75 m) and one noisy trace (143 m).</li>
+<li>Recorded through an accelerometer response with a resonance at 200 Hz (damping 0.015), like the field sensors.</li>
+<li>The true first-arrival times are kept, so automatic picks can be scored against them (<a href="#detector-choice">section 11</a>).</li>
+</ul>
+
+<h2 id="starting">2. Installing and starting</h2>
+<h3 id="requirements">Requirements</h3>
+<p>Python 3 with <code>numpy</code>, <code>scipy</code>, <code>pandas</code>, <code>matplotlib</code>, <code>PyQt5</code>, <code>obspy</code>, <code>segypy</code> and <code>bruges</code> (the last two are imported by the script). Spyder is the intended environment.</p>
+<table class="note" width="100%" cellpadding="8"><tr><td><b>Spyder setting.</b> The canvas must be interactive: <i>Preferences &gt; IPython console &gt; Graphics &gt; Backend = Qt</i> (or run <code>%matplotlib qt</code>), then restart the kernel. With the inline backend the picker prints a warning and cannot take clicks.</td></tr></table>
+<h3 id="running">Running the picker</h3>
+<ul>
+<li><b>Run file (F5)</b> runs the import window, then preprocessing and filtering, and opens the shot dialog. The run stops there, at the cell <i>End of the picking session</i>, so nothing below it runs on unfinished picks.</li>
+<li><b>Run only the import cell (Ctrl+Enter)</b> does the same: it carries on through preprocessing and filtering to the shot dialog (<code>AUTO_CONTINUE_TO_PICKER = True</code>).</li>
+<li>When you have finished picking, run the cells below the end-of-session line one at a time to sort the picks and write the S G T file (<a href="#files">section 15</a>).</li>
+<li>Once the picker is open, <b>File &gt; Import SEG-Y data…</b> (Ctrl+O) loads another line or data type without restarting (<a href="#import-from-picker">section 3</a>).</li>
+</ul>
+<h3 id="script-settings">Settings at the top of the script</h3>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Variable</th><th>Meaning</th></tr>
+<tr><td><code>USE_IMPORT_DIALOG</code></td><td><code>True</code>: the import window opens. <code>False</code>: script mode, reads <code>segy_data_path</code> with <code>search_string_for_segy_files</code> and needs <code>DATA_QUANTITY</code>.</td></tr>
+<tr><td><code>DATA_QUANTITY</code></td><td><code>'acceleration'</code>, <code>'velocity'</code> or <code>'displacement'</code>: what the files contain (pre-selects the radio in the window).</td></tr>
+<tr><td><code>IMPORT_RECORD_FILE</code></td><td>An earlier <code>…_import.json</code>: repeats that import exactly, with no window.</td></tr>
+<tr><td><code>AUTO_OUTPUT_NAMES</code></td><td>Script mode: name the pick and SGT files from the line name and data type.</td></tr>
+<tr><td><code>LOAD_EXISTING_PICKS</code>, <code>EXISTING_PICKS_FILE</code></td><td>Script mode: continue from the auto-named pick file, or from a given .pkl or SGT file.</td></tr>
+<tr><td><code>AUTO_CONTINUE_TO_PICKER</code></td><td>Running only the import cell continues to the shot dialog.</td></tr>
+</table>
+
+<h2 id="import">3. Importing SEG-Y data</h2>
+<p>The import window opens at start-up and from <b>File &gt; Import SEG-Y data…</b>. Work down its five groups on the left; the right side shows the files, the geometry and the spectra as they are read.</p>
+<p class="fig"><img src="images/import_dialog.png" data-w="1600" alt="Import window"><br><span class="cap">Figure 2. The import window after <i>Read folder (batch)</i> on the 11 synthetic shots. Right: the file table, the topography along the line with the shots (stars; the selected shot ringed) and the cross-line view.</span></p>
+<h3 id="import-files">1. Files</h3>
+<ul>
+<li><b>Read folder (batch)</b>: choose a folder (<i>Browse…</i>), an optional name filter with wildcards (e.g. <code>*_stacked.segy</code>), and <i>Include sub-folders</i>. Only .segy/.sgy files are listed.</li>
+<li><b>Add files…</b> picks individual files. <i>Remove selected</i> and <i>Clear</i> edit the list.</li>
+<li>Files are sorted naturally (shot 2 before shot 10) and read as they are added. Unreadable files are marked and skipped. A different sample interval is refused; different record lengths are padded.</li>
+</ul>
+<h3 id="import-type">2. What do the files contain? (required)</h3>
+<p>Choose <i>Acceleration</i>, <i>Velocity</i> or <i>Displacement</i>. When the SEG-Y textual header names one (for example “ACCELERATION (M/S2)”), it is pre-selected and a mismatch is noted. The choice decides which conversions preprocessing offers.</p>
+<h3 id="import-geometry">3. Geometry</h3>
+<ul>
+<li><b>From headers</b> (default): receiver and source coordinates and elevations are read with their SEG-Y scalars. Positions are distances along the receiver line, computed as √(ΔE² + ΔN²) from receiver to receiver, so a crooked line keeps its true length. Shots are placed by projection on the line. The report gives the line length, the azimuth and how far receivers lie off a straight line.</li>
+<li><b>Manual</b>: first receiver position, receiver spacing and evenly spaced shots, typed in.</li>
+<li>Shots with fewer traces: <i>Match by receiver coordinates (recommended)</i>, <i>Pad dead traces at the end</i>, or <i>Insert dead traces after trace…</i>.</li>
+</ul>
+<h3 id="import-time">4. Time zero</h3>
+<p><i>Use the header recording delay as the time shift</i>: a delay of −50 ms means the record starts 50 ms before the shot. Preprocessing then advances every trace by 50 ms, so time zero is the shot time.</p>
+<h3 id="import-picks">5. Picks</h3>
+<ul>
+<li><b>Start a new pick file</b>: the pick file and the SGT file are named automatically, <code>&lt;line&gt;_&lt;type&gt;_picks.pkl</code> and <code>&lt;line&gt;_&lt;type&gt;_SGT.txt</code>, in a <code>picks</code> folder next to the data (or the output folder you choose). An existing file with that name triggers an overwrite warning.</li>
+<li><b>Continue existing picks</b>: a .pkl or SGT file next to the data is found automatically; you can also choose one. SGT files are converted back into picks: the S/G convention (positions, positions + 1, 1-based indices) and the time unit (s or ms) are detected against the geometry. A file that does not fit is refused. pyGIMLi <code>.sgt</code> files are read too. The outputs then follow the file you continue.</li>
+</ul>
+<p>Press <b>Import</b>, or close the window with valid files and a data type, to import. An <b>import record</b> <code>&lt;line&gt;_&lt;type&gt;_import.json</code> is written every time: it lists the files, data type, geometry and outputs. <i>Load import record…</i> fills the window from one.</p>
+<h3 id="import-spectra">Spectra tab</h3>
+<p class="fig"><img src="images/import_spectra.png" data-w="1600" alt="Import spectra"><br><span class="cap">Figure 3. Spectra tab of the import window: two selected shots in colour, all shots in grey, their average in black, and the share of energy per octave band. The hint names the sharp 200 Hz sensor resonance.</span></p>
+<p>Select shots in the table (Ctrl / Shift for several) to compare their amplitude spectra. Each shot's spectrum is the mean over its traces. The views that look past a sensor resonance are explained in <a href="#spectra">section 14</a>.</p>
+<h3 id="import-from-picker">Importing from inside the picker</h3>
+<ul>
+<li><b>File &gt; Import SEG-Y data…</b> (Ctrl+O, or <i>Import</i> on the toolbar) opens the same window in the folder of the current data. On OK, the picks of the session are saved and the canvas closes. Preprocessing, filtering and the shot dialog then run on the new data. <i>Cancel</i> keeps the current data.</li>
+<li><b>File &gt; Repeat an import (import record .json)…</b> reloads an earlier import exactly, including its pick file.</li>
+</ul>
+
+<h2 id="canvas">4. The picking canvas</h2>
+<p>After the import, the <b>shot dialog</b> asks which shot to open (1 to the number of shots, as in the plot title). It also sets the starting gain and the reciprocity guider. From it you can open the filter designer or preprocessing first. Enter submits.</p>
+<p class="fig"><img src="images/shot_dialog.png" data-w="432" alt="Shot dialog"><br><span class="cap">Figure 4. The shot dialog.</span></p>
+<p class="fig"><img src="images/canvas_filtered.png" data-w="1600" alt="Picking canvas"><br><span class="cap">Figure 5. The picking canvas: shot 3 of the synthetic survey, filtered acceleration. Menus and toolbar at the top; mode and gain at the top left; display switches on the right; gain slider at the bottom.</span></p>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Element</th><th>What it does</th></tr>
+<tr><td>Title</td><td>Shot number and position, the quantity shown, and the filter of the filtered view.</td></tr>
+<tr><td>MODE box</td><td>Current mode: Home, Manual Pick, Delete Picks (keys in <a href="#picking">section 6</a>).</td></tr>
+<tr><td>DATA TYPE</td><td><i>Original</i> (preprocessed, not filtered) or <i>Filtered</i>. Toggle often: filtered data are easier to read, but the original shows the true onset.</td></tr>
+<tr><td>DATA POLARITY</td><td><i>Normal</i> or <i>Reverse</i> (flip the wiggles).</td></tr>
+<tr><td>QUANTITY</td><td>Acceleration, velocity or displacement. A grey entry is not computed yet. Clicking it offers to open preprocessing with the conversion ticked.</td></tr>
+<tr><td>Reciprocity &amp; pick QC</td><td>Opens the QC window (<a href="#qc">section 12</a>).</td></tr>
+<tr><td>◀ Prev / Next ▶</td><td>Save the picks and open the neighbouring shot.</td></tr>
+<tr><td>GAIN slider</td><td>Log scale from 0.1 to 200, with − / + (×1.25) and the mouse wheel over the slider. The zoom is kept.</td></tr>
+<tr><td>Crosshair</td><td>Follows the mouse; the toolbar readout shows receiver, time (ms) and sample.</td></tr>
+</table>
+<p class="fig"><img src="images/canvas_original.png" data-w="1600" alt="Original data"><br><span class="cap">Figure 6. The same shot with DATA TYPE = Original: the 200 Hz ringing of the accelerometer resonance hides the first breaks. The filter (<a href="#filter">section 9</a>) removes it.</span></p>
+<h3 id="guider">Reciprocity guider</h3>
+<p>When other shots are already picked, the canvas marks with a blue ✕ the time each reciprocal pick predicts on this shot. The source of shot B sits at a receiver of shot A, so t(A→B) should equal t(B→A). A pick far from its ✕ deserves a second look.</p>
+<p class="fig"><img src="images/reciprocity_guider.png" data-w="1600" alt="Reciprocity guider"><br><span class="cap">Figure 7. Shot 7 zoomed in, with picks (red) and the reciprocity guider (blue ✕). The picks beyond 140 m were deliberately made 9 ms late: they sit below their ✕ marks.</span></p>
+
+<h2 id="menus">5. Menus and toolbar</h2>
+<p class="fig"><img src="images/toolbar.png" data-w="1600" alt="Toolbar"><br><span class="cap">Figure 8. Menu bar, navigation toolbar and the picker toolbar.</span></p>
+<p class="fig"><img src="images/menus.png" data-w="1323" alt="Menus"><br><span class="cap">Figure 9. Every menu and the two toolbar drop-downs.</span></p>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Menu</th><th>Contents</th></tr>
+<tr><td>File</td><td>Import SEG-Y data (Ctrl+O), Repeat an import record, Save picks, Save canvas image (PNG/PDF/SVG), Close picker.</td></tr>
+<tr><td>Data</td><td>Survey geometry / topography, Preprocessing, Show quantity.</td></tr>
+<tr><td>Processing</td><td>Filter designer (f).</td></tr>
+<tr><td>Picks</td><td>Void picks on a trace, Undo last void, Save picks, Automatic picking (STA/LTA, Undo last auto-pick).</td></tr>
+<tr><td>Traces, axes &amp; gain</td><td>Plotted traces, time axis and gain (Ctrl+D), Plot all traces, Plot trace ranges, Gain submenu, Go to the plotted window (h).</td></tr>
+<tr><td>QC</td><td>Reciprocity and pick QC.</td></tr>
+<tr><td>Help</td><td>User manual (F1), Open the PDF manual, Manual sections, Keyboard and mouse shortcuts, About.</td></tr>
+</table>
+<p>The toolbar repeats the common actions: <i>Tools ▾</i> (everything in one list), <i>Import</i>, <i>Geometry</i>, <i>Traces / axes / gain</i>, <i>Preprocessing</i>, <i>Filter</i>, <i>Reciprocity &amp; pick QC</i>, <i>Void picks</i>, <i>Auto-pick ▾</i>, <i>Save picks</i> and <i>Help</i>.</p>
+<h3 id="help-panel">The manual inside the picker</h3>
+<p><b>Help &gt; User manual</b>, the <i>Help</i> button or F1 opens this manual as a side panel of the canvas. Press F1 again to hide it. Drag its title bar to float it as its own window or dock it on the other side.</p>
+<ul>
+<li>The contents tree jumps to a section; Back and Forward work like a browser.</li>
+<li>The search box finds text (Enter for the next match).</li>
+<li><i>Open PDF</i> opens this text as a PDF.</li>
+<li>In every other window, F1 opens the manual at that window's section.</li>
+</ul>
+<p class="fig"><img src="images/help_panel.png" data-w="1700" alt="Help panel"><br><span class="cap">Figure 10. The manual docked beside the canvas, opened at <i>Automatic picking</i>.</span></p>
+
+<h2 id="picking">6. Picking by hand</h2>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Key</th><th>Mode / action</th></tr>
+<tr><td><b>m</b></td><td><b>Manual Pick.</b> Click: one pick, snapped to the nearest receiver and the nearest sample. Drag with the button held: a pick on every receiver you cross, interpolated between mouse positions (red line). Release and drag again to add strokes.</td></tr>
+<tr><td><b>r</b></td><td><b>Delete Picks.</b> Click two points: every pick between their receivers is removed (yellow dashed line). <b>u</b> undoes the last delete.</td></tr>
+<tr><td><b>h</b></td><td><b>Home</b>: finishes the picks and goes back to the plotted window.</td></tr>
+<tr><td><b>z</b> / <b>d</b></td><td>Zoom box / pan (drag). Mouse wheel on the gather zooms.</td></tr>
+<tr><td><b>s</b></td><td>Save picks to the pick file.</td></tr>
+<tr><td><b>n</b></td><td>Save and choose another shot.</td></tr>
+<tr><td><b>g</b></td><td>Type a gain value.</td></tr>
+</table>
+<p>New picks are kept as <i>pending</i> until you switch mode, save, change shot or press h. Then they are merged into the shot's picks: a new pick replaces the old one on the same receiver. Picks outside the plotted time range are rejected.</p>
+<p class="fig"><img src="images/picking_drag.png" data-w="1600" alt="Drag picking"><br><span class="cap">Figure 11. Manual Pick: a drag stroke across the first break of shot 3 (red line), not yet finished.</span></p>
+<p class="fig"><img src="images/picking_done.png" data-w="1600" alt="Finished picks"><br><span class="cap">Figure 12. After Home (h): the stroke became one pick per receiver.</span></p>
+<table class="note" width="100%" cellpadding="8"><tr><td><b>Where to pick.</b> Pick the first departure from the background, not the first peak. Every causal (minimum-phase) filter delays energy slightly. The filter designer reports the delay on your data (<a href="#filter">section 9</a>); toggle to <i>Original</i> to check a difficult pick.</td></tr></table>
+
+<h2 id="traces-axes-gain">7. Traces, axes and gain</h2>
+<p><b>Traces, axes &amp; gain &gt; Plotted traces, time axis and gain…</b> (Ctrl+D, or <i>Traces / axes / gain</i> on the toolbar) sets what the canvas plots.</p>
+<p class="fig"><img src="images/display_dialog.png" data-w="560" alt="Plotted traces dialog"><br><span class="cap">Figure 13. Traces 1–30 and 61–96, 0–250 ms.</span></p>
+<ul>
+<li><b>Traces to plot (x axis)</b>: <i>All traces</i>, or ranges such as <code>1-100</code> or <code>1-20, 50-60</code>, as trace numbers or receiver positions in metres. Traces in the gaps are not drawn and their space stays empty. <i>Quick</i> buttons pick halves or the first or last 50. <i>Plot every Nth trace</i> thins the selection (picks still show on every receiver). The line below counts the plotted traces; a range outside the gather is refused.</li>
+<li><b>Time axis (y axis)</b>: labels in ms or samples (0.1 ms after resampling), and the window <i>Show from … to …</i>. Picks are only accepted inside it.</li>
+<li><b>Gain</b>: applied at once; the canvas slider follows and the zoom stays.</li>
+<li><b>Wiggles</b>:
+<ul>
+<li><i>Balance</i>: per-trace RMS, which makes far offsets as strong as near ones, or true amplitude.</li>
+<li><i>Fill</i>: positive lobes, negative lobes or none.</li>
+<li><i>Clip at</i>: how far a wiggle can swing, in trace spacings.</li>
+<li><i>Line width</i>.</li>
+</ul></li>
+</ul>
+<p>The menu also has <i>Plot all traces</i>, <i>Plot trace ranges…</i> and a <i>Gain</i> submenu (×1.25, ÷1.25, set, presets ×1 / ×3.5 / ×10 / ×30).</p>
+<p class="fig"><img src="images/trace_ranges.png" data-w="1600" alt="Trace ranges on the canvas"><br><span class="cap">Figure 14. The canvas with traces 1–30 and 61–96: the gap stays empty.</span></p>
+
+<h2 id="preprocessing">8. Preprocessing</h2>
+<p><b>Data &gt; Preprocessing…</b> (also in the shot dialog) prepares the data before filtering and picking:</p>
+<ul>
+<li><b>Compute acceleration, velocity AND displacement</b>: integration from acceleration, or differentiation from displacement. Each integration is followed by a minimum-phase <b>low-cut</b> (default 15 Hz, 20 Hz transition), which stops the drift that integration of noise produces. Each differentiation is followed by a minimum-phase <b>high-cut</b> (default 120 Hz, 40 Hz transition), which stops differentiation boosting high-frequency noise. Taps are sized automatically.</li>
+<li><b>Time shift</b> (from the header delay), <b>mute</b> before a time, per-trace <b>RMS normalization</b>.</li>
+<li><b>Trace edits</b>: <i>Kill on this shot</i> or <i>Kill on ALL shots</i> zeroes a trace; <i>Restore selected</i> brings it back. With <i>Click a trace in the preview to kill / restore it</i> you kill traces straight from the preview.</li>
+<li><b>Presets</b> store everything, including the kills.</li>
+</ul>
+<p class="fig"><img src="images/preprocess_spectra.png" data-w="1600" alt="Preprocessing spectra"><br><span class="cap">Figure 15. Spectra before and after integration with the low-cut after each step, and the realized filter response.</span></p>
+<p class="fig"><img src="images/preprocess_preview.png" data-w="1600" alt="Preprocessing preview"><br><span class="cap">Figure 16. Data preview of acceleration, velocity and displacement for one shot. Click a trace to kill it.</span></p>
+<p>OK processes all shots; the QUANTITY switch on the canvas then offers all three quantities.</p>
+
+<h2 id="filter">9. Filter designer</h2>
+<p><b>Processing &gt; Filter designer…</b> (key <b>f</b>) designs the filter of the <i>Filtered</i> view. It runs on the active quantity, and before the time shift: the shift is undone, the data filtered, and the shift re-applied, so filter transients stay before time zero.</p>
+<ul>
+<li><b>Filter type</b>:
+<ul>
+<li><i>Minimum-phase FIR (causal)</i>, the default: nothing arrives before the true onset, but the energy is delayed a little.</li>
+<li><i>Zero-phase FIR</i>: peaks stay put, but energy leaks before the onset, so picks come out early.</li>
+<li><i>IIR Butterworth</i>: causal, or zero-phase with a forward-backward pass.</li>
+</ul></li>
+<li><b>Low-cut / high-cut</b> with transition widths, and <b>notch filters</b> (frequency and Q in a table: <i>Add notch</i>, <i>Remove selected</i>). The default is 10–150 Hz with a notch at 199 Hz for the accelerometer resonance.</li>
+<li><b>Timing presets</b>: <i>No delay</i> (low-cut only), <i>Small delay</i> (10–150 Hz, the default), <i>Strong</i> (10–80 Hz). The <b>timing line</b> reports, on the preview shot, how far the filter moves the first-break onsets and the first peaks, and the impulse delay.</li>
+</ul>
+<p class="fig"><img src="images/filter_response.png" data-w="1600" alt="Filter response"><br><span class="cap">Figure 17. Response tab: realized amplitude response, impulse response and the spectrum of the shot before and after.</span></p>
+<p class="fig"><img src="images/filter_preview.png" data-w="1600" alt="Filter preview"><br><span class="cap">Figure 18. Data preview tab: the shot before (top) and after (bottom) the filter, with the shared gain control.</span></p>
+<h3 id="gain-control">The gain control in preview windows</h3>
+<p>The filter designer, the preprocessing window and the auto-pick preview share one gain control:</p>
+<ul>
+<li>a log slider from 0.1 to 200, with − / + (×1.25) and a typed value;</li>
+<li>Ctrl + mouse wheel over the plot.</li>
+</ul>
+<p>It only rescales the wiggles; the zoom stays.</p>
+
+<h2 id="void">10. Void picks</h2>
+<p><b>Picks &gt; Void picks on a trace…</b> removes the picks of one receiver, on this shot or on ALL shots. Use it for a receiver that was bad during the whole survey. The receiver under the mouse is proposed. <b>Undo last void</b> puts the picks back.</p>
+<p class="fig"><img src="images/void_dialog.png" data-w="334" alt="Void picks"><br><span class="cap">Figure 19. Void picks at receiver 75 m (the dead trace of the example).</span></p>
+
+<h2 id="autopick">11. Automatic picking</h2>
+<p><b>Auto-pick ▾ &gt; STA/LTA (settings + preview)…</b> on the toolbar, or <b>Picks &gt; Automatic picking</b>, opens the settings with a live preview on any shot. Every change re-picks the preview shot, so you can tune before applying.</p>
+<p class="fig"><img src="images/autopick_shot.png" data-w="1600" alt="Auto-pick preview"><br><span class="cap">Figure 20. Shot preview: automatic picks (red), picks removed by post-processing (orange ✕), the velocity search window (dotted) and existing picks (grey).</span></p>
+<h3 id="autopick-data">Data</h3>
+<p><i>Pick on</i> acceleration, velocity or displacement; <i>Original</i> or <i>Filtered</i> data; the <i>Preview shot</i>.</p>
+<h3 id="autopick-detectors">Detector</h3>
+<ul>
+<li><b>Classic STA/LTA (causal, energy)</b>: the ratio of short-term to long-term average energy; it triggers when the ratio first exceeds the trigger level (defaults 4 ms / 40 ms, level 2.5).</li>
+<li><b>Modified energy ratio (MER)</b>: (energy after / energy before)³ × |amplitude|³ over one window (default 10 ms); its maximum marks the onset.</li>
+<li><b>Shiv's RMS STA/LTA + slope trigger (original)</b>: the original routine, reproduced exactly. A centred RMS STA/LTA (3 ms / 1000 ms), triggered where its slope exceeds an offset-dependent threshold (e.g. <code>0:0.01, 10:0.0025, 25:0.002</code>).</li>
+<li><b>Earliest pick</b>: ignore anything before this time.</li>
+</ul>
+<h3 id="autopick-onset">Onset, search window, quality</h3>
+<ul>
+<li><b>Refine the onset with AIC</b>: the Akaike information criterion minimum in a window around the trigger (default 15 ms before, 5 ms after) moves the pick to the onset.</li>
+<li><b>Velocity search window</b>: search only between |offset| / v_max and |offset| / v_min (default 6000 and 150 m/s), plus a pad.</li>
+<li><b>Minimum S/N</b>: drop picks whose signal-to-noise ratio is lower.</li>
+</ul>
+<h3 id="autopick-post">Post-processing (each shot, each side of the source)</h3>
+<ul>
+<li><b>Polynomial fit, multi-stage</b>: fit time against |offset| (orders per stage, default 3 then 2), and reject picks beyond k × scale. The scale is the robust MAD or the standard deviation.</li>
+<li><b>Running-median check</b>: reject picks far from the median of their neighbours (default 9 traces, 5 × MAD).</li>
+<li><b>Monotonic check</b>: first-arrival times must increase with offset (tolerance 4 ms); the worst violator is removed until they do.</li>
+<li><b>Reciprocity check</b> (several shots): reject picks whose reciprocal pair disagrees by more than the threshold (default 4 ms).</li>
+</ul>
+<p class="fig"><img src="images/autopick_off.png" data-w="1600" alt="Picks vs offset"><br><span class="cap">Figure 21. Picks vs offset: detector picks, the ones each step removed, and the polynomial fits on each side of the source.</span></p>
+<p class="fig"><img src="images/autopick_trace.png" data-w="1600" alt="One trace"><br><span class="cap">Figure 22. One trace (click a trace in the shot preview): the trace, the characteristic function, the trigger, the AIC onset and the pick.</span></p>
+<h3 id="autopick-apply">Apply, undo, settings</h3>
+<ul>
+<li><i>Apply to the preview shot</i>, <i>Apply to all shots</i>, or <i>Apply to shots</i> with a range such as <code>2-10</code>.</li>
+<li><i>Replace the picks of these shots</i> or <i>Only fill receivers without a pick</i>, which keeps hand picks.</li>
+<li><b>Undo last auto-pick</b> (toolbar drop-down or Picks menu) restores the shots as they were.</li>
+<li>Settings can be saved to and loaded from JSON. The last settings are stored in the pick file's metadata.</li>
+</ul>
+<p class="fig"><img src="images/canvas_autopicks.png" data-w="1600" alt="Automatic picks on the canvas"><br><span class="cap">Figure 23. Automatic picks (MER, velocity, filtered) on the canvas. They are ordinary picks: edit, delete or re-pick them by hand.</span></p>
+<h3 id="detector-choice">Choosing a detector</h3>
+<p>Because the example survey has known first-arrival times, the detectors can be scored. All results use velocity, filtered, with the default post-processing on all 11 shots (1056 receiver–shot pairs). The error is pick minus true time.</p>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Detector (velocity, filtered)</th><th>Picks kept</th><th>Median error</th><th>90 % of |error| below</th></tr>
+<tr><td>Classic STA/LTA, defaults</td><td>467</td><td>+3.6 ms</td><td>8.3 ms</td></tr>
+<tr><td>Classic STA/LTA, trigger level 4</td><td>799</td><td>+4.0 ms</td><td>5.0 ms</td></tr>
+<tr><td><b>MER, defaults</b></td><td><b>970</b></td><td><b>+3.9 ms</b></td><td><b>4.9 ms</b></td></tr>
+<tr><td>Shiv's original</td><td>273</td><td>+3.0 ms</td><td>52 ms</td></tr>
+</table>
+<ul>
+<li>On this survey MER keeps the most picks. The defaults were tuned on a field line, so try two detectors on a few shots before applying to all.</li>
+<li>The median error of +3 to +4 ms is mostly the delay of the 10–150 Hz filter. On acceleration the same detectors are about 1 ms closer. For the final times, check difficult picks on the <i>Original</i> view.</li>
+</ul>
+
+<h2 id="qc">12. Reciprocity and pick QC</h2>
+<p><b>QC &gt; Reciprocity and pick QC…</b> (or the button on the canvas) opens a live window. It updates as you pick, so you can keep it on a second screen.</p>
+<ul>
+<li>A reciprocal pair is shot A recorded at the receiver of shot B and shot B recorded at the receiver of shot A. Their times should be equal; |Δt| is the reciprocal error.</li>
+<li>The header shows the number of pairs, the median, mean and RMS |Δt|, and the RMS after removing a time offset per shot.</li>
+<li><i>Flag shots whose median |Δt| exceeds</i> sets the threshold (default 2 ms).</li>
+</ul>
+<p class="fig"><img src="images/qc_tab0.png" data-w="1600" alt="QC picks"><br><span class="cap">Figure 24. Picks (all shots): every pick of every shot on one canvas, coloured by shot position, with the shot on the picker canvas in black. Red rings flag picks whose reciprocal |Δt| exceeds the threshold. Right: the reciprocal-error map. The 9 ms segment of shot 7 shows as dark cells in row and column 7.</span></p>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Tab</th><th>What it shows</th></tr>
+<tr><td>Picks (all shots)</td><td>All picks; flags; click a pick for its details; double-click opens that shot in the picker. <i>Lines</i> joins each shot's picks. <i>Fit all</i> resets the view.</td></tr>
+<tr><td>Shots</td><td>Per shot: picks, pairs, median / mean / max |Δt|, bias, the robust (Huber) time offset, the residual after it, the count above the threshold, the status and the reason.</td></tr>
+<tr><td>Map</td><td>The shot-by-shot map of the reciprocal error (click a cell: both picks are marked; double-click opens the shot) and the median per shot.</td></tr>
+<tr><td>Pairs</td><td>Every reciprocal pair, worst first.</td></tr>
+<tr><td>Missing picks</td><td>Pairs where one of the two picks is missing.</td></tr>
+</table>
+<p class="fig"><img src="images/qc_tab2.png" data-w="1600" alt="QC map"><br><span class="cap">Figure 25. Map tab. Shot 7 has the largest errors against shots 8–11.</span></p>
+<p class="fig"><img src="images/qc_tab1.png" data-w="1600" alt="QC shots"><br><span class="cap">Figure 26. Shots tab, sorted by median |Δt|. Shot 7 has a bias of +3.6 ms and 4 pairs above the threshold.</span></p>
+<h3 id="qc-delete">Deleting picks in the QC window</h3>
+<p>Tick <b>Delete mode</b>:</p>
+<ul>
+<li>Click a pick to delete it, or drag a box to delete every pick inside it, on all shots.</li>
+<li><b>Undo</b> / <b>Redo</b> (Ctrl+Z / Ctrl+Y) step through the deletes.</li>
+<li>The picker canvas and the pick file follow each edit.</li>
+</ul>
+<p>Then open the shot (double-click) and pick the deleted receivers again. <i>Export CSV…</i> saves the tables.</p>
+<p class="fig"><img src="images/qc_delete_mode.png" data-w="1600" alt="QC delete mode"><br><span class="cap">Figure 27. Delete mode: click a pick or drag a box; Undo and Redo become active.</span></p>
+
+<h2 id="geometry">13. Survey geometry</h2>
+<p><b>Data &gt; Survey geometry / topography…</b> (toolbar <i>Geometry</i>) shows the line as imported:</p>
+<ul>
+<li>the topography along the line, with shots green when picked and red when not, and the shot on the canvas ringed;</li>
+<li>the cross-line view;</li>
+<li>the import summary;</li>
+<li>the Spectra tab.</li>
+</ul>
+<p>Double-click a shot to open it in the picker.</p>
+<p class="fig"><img src="images/geometry.png" data-w="1300" alt="Geometry window"><br><span class="cap">Figure 28. Survey geometry of the example: all shots picked (green), shot 7 on the canvas (ringed).</span></p>
+
+<h2 id="spectra">14. Spectra and the sensor response</h2>
+<p>Accelerometers and geophones shape what they record. A lightly damped resonance can hold most of the recorded energy and squash the rest of the spectrum. The Spectra tabs of the import and geometry windows have three views:</p>
+<ul>
+<li><b>Raw (as recorded)</b>. A hint names a dominant narrow peak when there is one.</li>
+<li><b>Corrected for the sensor response</b>: each spectrum divided by the sensor amplitude response |H(f)|:
+<ul>
+<li><i>Accelerometer</i>: flat below the resonance f0, with a peak of 1/(2·damping) at f0.</li>
+<li><i>Geophone</i>: natural frequency and damping.</li>
+<li><i>Response file</i>: two columns, frequency (Hz) and amplitude.</li>
+</ul>
+<b>Estimate from data</b> finds the strongest narrow peak and fills in f0, the damping (from its −3 dB width) and a band to leave out. A water level of 1 % keeps the division stable. Above the resonance the correction boosts the spectrum, and noise with it; the panel says by how much.</li>
+<li><b>Relative to the survey average</b>: each shot divided by the average of all shots, frequency by frequency. Whatever is common to every shot (sensor, coupling, recording chain) cancels without a model; 0 dB means the same as the average.</li>
+</ul>
+<p><b>Leave out of the scaling</b> takes a band (e.g. 184–216 Hz) out of the peak scaling, the dB reference and the energy shares; the band is still drawn, shaded.</p>
+<p class="fig"><img src="images/spectra_raw.png" data-w="1300" alt="Raw spectra"><br><span class="cap">Figure 29. Raw: the 200 Hz resonance dominates (54 % of the energy is in the 160–320 Hz band).</span></p>
+<p class="fig"><img src="images/spectra_corrected.png" data-w="1300" alt="Corrected spectra"><br><span class="cap">Figure 30. Corrected for the estimated accelerometer response (f0 200.0 Hz, damping ≈ 0.013; the true value in the synthetic is 0.015): the resonance is gone and the 10–80 Hz signal and ground-roll band shows.</span></p>
+<p class="fig"><img src="images/spectra_relative.png" data-w="1300" alt="Relative spectra"><br><span class="cap">Figure 31. Relative to the survey average, with the resonance band left out: how each shot differs from the survey.</span></p>
+
+<h2 id="files">15. Files, saving and the SGT export</h2>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>File</th><th>Contents</th></tr>
+<tr><td><code>&lt;line&gt;_&lt;type&gt;_picks.pkl</code></td><td>The picks: <code>final_picks</code> (per shot, an array of [receiver position, time sample at 0.1 ms]), the clicked points, and <code>metadata</code> (data type, preprocessing, filter, geometry, import record, last auto-pick settings). Written by <b>s</b>, Save picks, Prev/Next, every QC edit and every auto-pick.</td></tr>
+<tr><td><code>&lt;line&gt;_&lt;type&gt;_SGT.txt</code></td><td>The export: one row per pick, <code>S G T</code>, written by the end-of-session cells.</td></tr>
+<tr><td><code>&lt;line&gt;_&lt;type&gt;_import.json</code></td><td>The import record (files, data type, geometry, outputs).</td></tr>
+<tr><td><code>shot_&lt;n&gt;_plot.png</code></td><td>Canvas images (Ctrl+S; File &gt; Save canvas image chooses the name and format).</td></tr>
+</table>
+<h3 id="sgt">The S G T file</h3>
+<p>After picking, run the cells below <i>End of the picking session</i> one at a time. They:</p>
+<ol>
+<li>count the picked shots;</li>
+<li>sort the picks by shot;</li>
+<li>convert them to three columns;</li>
+<li>write the SGT file.</li>
+</ol>
+<p>The columns are:</p>
+<ul>
+<li><b>S</b>: the shot position + 1 (the convention of the earlier exports).</li>
+<li><b>G</b>: the receiver position + 1.</li>
+<li><b>T</b>: the first-arrival time in seconds after the time shift, with 0.1 ms resolution.</li>
+</ul>
+<p>The first rows for the example survey (true times) would be:</p>
+<pre>1.000000 1.000000 0.000000
+1.000000 3.000000 0.004400
+1.000000 5.000000 0.008900
+...</pre>
+<p>The import reads such a file back (and detects the convention), so you can continue picking from an exported SGT.</p>
+
+<h2 id="shortcuts">16. Keyboard and mouse</h2>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Key / mouse</th><th>Action</th></tr>
+<tr><td>m</td><td>Manual Pick (click / drag)</td></tr>
+<tr><td>r, u</td><td>Delete picks between two clicks; undo the last delete</td></tr>
+<tr><td>h</td><td>Home: finish picks, go to the plotted window</td></tr>
+<tr><td>z, d</td><td>Zoom box, pan</td></tr>
+<tr><td>g</td><td>Type a gain</td></tr>
+<tr><td>s</td><td>Save picks</td></tr>
+<tr><td>n</td><td>Save and choose a shot</td></tr>
+<tr><td>f</td><td>Filter designer</td></tr>
+<tr><td>Ctrl+S</td><td>Save the canvas as an image</td></tr>
+<tr><td>Ctrl+O</td><td>Import SEG-Y data</td></tr>
+<tr><td>Ctrl+D</td><td>Plotted traces, time axis and gain</td></tr>
+<tr><td>F1</td><td>User manual (in any window: help for that window)</td></tr>
+<tr><td>Wheel on the gather</td><td>Zoom</td></tr>
+<tr><td>Wheel on the gain slider</td><td>Gain ×/÷ 1.25</td></tr>
+<tr><td>Ctrl + wheel in a preview</td><td>Gain of that preview</td></tr>
+<tr><td>Ctrl+Z / Ctrl+Y (QC window)</td><td>Undo / redo deletes</td></tr>
+</table>
+
+<h2 id="troubleshooting">17. Troubleshooting</h2>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Symptom</th><th>Cause and fix</th></tr>
+<tr><td>The canvas does not react to clicks; a warning about the inline backend.</td><td>Set Spyder's graphics backend to Qt and restart the kernel (<a href="#starting">section 2</a>).</td></tr>
+<tr><td>“Rejected pick … out of sample range”.</td><td>The pick is outside the plotted time window; widen it (Ctrl+D).</td></tr>
+<tr><td>A quantity is grey on the canvas.</td><td>Not computed yet: accept the prompt, tick <i>Compute acceleration, velocity AND displacement</i> in preprocessing.</td></tr>
+<tr><td>Import refuses a file.</td><td>Different sample interval, or unreadable SEG-Y. The table says which; remove it and import the rest.</td></tr>
+<tr><td>An SGT file is refused when continuing.</td><td>It does not match the imported geometry (less than 90 % of rows fit). Check that it belongs to these files and this geometry.</td></tr>
+<tr><td>Automatic picking keeps few picks.</td><td>Try MER or a higher trigger level, check the velocity window, and look at <i>Picks vs offset</i> to see which step removes them (<a href="#detector-choice">section 11</a>).</td></tr>
+<tr><td>Picks look a few ms late on filtered data.</td><td>Filter delay: see the timing line in the filter designer; use <i>Small delay</i> or <i>No delay</i>, and check on <i>Original</i>.</td></tr>
+<tr><td>Help says the manual was not found.</td><td>Keep the <code>manual</code> folder (manual.html, images, PDF) next to the .py files.</td></tr>
+</table>
+
+<h2 id="history">18. Version history</h2>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Version</th><th>Main changes</th></tr>
+<tr><td>v1–v4</td><td>Filters merged (minimum-phase FIR, zero-phase FIR, IIR), balanced wiggles, filter designer with live preview, resampling ×10 for picking.</td></tr>
+<tr><td>v5</td><td>Live reciprocity window with robust shot offsets and flags.</td></tr>
+<tr><td>v6–v7</td><td>Preprocessing window, quantity switch, menus and toolbar, log gain slider to 200, void picks, Prev / Next.</td></tr>
+<tr><td>v8–v9</td><td>SEG-Y import window (headers, geometry, time zero, automatic names, import record), continuing from .pkl or SGT, filter timing presets.</td></tr>
+<tr><td>v10</td><td>Display settings, time axis in ms, Reciprocity and pick QC with all picks, delete mode, undo / redo.</td></tr>
+<tr><td>v11</td><td>Automatic picking (STA/LTA, MER, original routine; AIC; post-processing) with live preview; shot spectra.</td></tr>
+<tr><td>v12</td><td>File menu with import from the picker; trace ranges; gain in every preview; spectra corrected for the sensor response.</td></tr>
+<tr><td>v13</td><td>This manual: built into the picker (Help menu, F1, side panel) and as a PDF.</td></tr>
+</table>
+
+<p class="sub">Built 16 November 2026. The same text is in First_Arrival_Picker_User_Manual.pdf.</p>
+</body></html>

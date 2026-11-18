@@ -2210,6 +2210,11 @@ if _HAVE_QT:
         """Show the import dialog; returns a Survey or None (cancelled)."""
         app = QApplication.instance() or QApplication([])
         dlg = ImportDialog(parent, **kw)
+        try:                                     # v13: F1 = manual at "Importing SEG-Y data"
+            import help_manual as _hlp
+            _hlp.install_f1(dlg, 'import')
+        except Exception:
+            pass
         dlg.exec_()
         sv = dlg.survey
         dlg.deleteLater()
