@@ -568,10 +568,11 @@ if _HAVE_QT:
 
         def __init__(self, params, get_data, n_shots, shot_x, recv_x, current_shot=0,
                      available_quantities=('acceleration',), existing_picks=None,
-                     on_apply=None, preview_ms=300.0, parent=None, gain=1.5):
+                     on_apply=None, preview_ms=300.0, parent=None, gain=1.5, polarity=1):
             super().__init__(parent)
             self.setWindowTitle('Automatic picking: STA/LTA')
-            self._gain0 = float(gain)              # v12: preview wiggle gain (Gain control on the tab)
+            self._gain0 = float(gain)
+            self._pol0 = -1 if polarity < 0 else 1  # v15: preview polarity              # v12: preview wiggle gain (Gain control on the tab)
             self._wp = None
             self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
             self.p = (params or AutoPickParams()).copy()
@@ -799,8 +800,9 @@ if _HAVE_QT:
                 if key == 'shot':                   # v12: gain for the preview wiggles
                     import pick_tools as _ptl
                     row = QHBoxLayout()
-                    self.gain_ctl = _ptl.GainControl(self._gain0, 0.1, 200.0)
+                    self.gain_ctl = _ptl.GainControl(self._gain0, 0.1, 200.0, polarity=self._pol0)
                     self.gain_ctl.valueChanged.connect(self._gain_changed)
+                    self.gain_ctl.polarityChanged.connect(lambda *_: self._gain_changed(self.gain_ctl.value()))
                     self.gain_ctl.attach_wheel(cv)
                     row.addWidget(self.gain_ctl, 1)
                     row.addStretch(1)
@@ -964,6 +966,7 @@ if _HAVE_QT:
             wp.prepare(data[:ns:step], 1.0 / (dt * step), self.recv_x, 1, oversample=1)
             self._wp = wp
             g = self.gain_ctl.value() if hasattr(self, 'gain_ctl') else self._gain0
+            wp.polarity = self.gain_ctl.polarity() if hasattr(self, 'gain_ctl') else self._pol0
             wp.draw(g, 1.0, f'Shot {self.shot + 1}: {self.p.quantity}, '
                               f'{"filtered" if self.p.use_filtered else "original"}')
             r = self.result
@@ -993,6 +996,7 @@ if _HAVE_QT:
                 return
             ax = self._wp.ax
             lims = ax.get_xlim(), ax.get_ylim()
+            self._wp.polarity = self.gain_ctl.polarity()
             self._wp.draw(float(g), 1.0)
             ax.set_xlim(lims[0])
             ax.set_ylim(lims[1])

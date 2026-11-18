@@ -1255,9 +1255,19 @@ reciprocity_guider_enabled = [True]  # Default enabled
 mpl.rcParams['keymap.save'] = ''  # Clear the 's' key binding
 # 'f' opens the filter designer, so remove it from matplotlib's fullscreen toggle
 mpl.rcParams['keymap.fullscreen'] = [k for k in mpl.rcParams['keymap.fullscreen'] if k != 'f']
+# v15: every picker key must belong to the picker only. Matplotlib binds 'r' and 'h' to its
+# own Home (jump to the first view of the toolbar history - often an old zoom from picking),
+# 'g' to the grid, and others; remove the picker's keys from every matplotlib key map.
+_PICKER_KEYS = {'m', 'r', 'u', 'h', 'z', 'd', 'g', 's', 'n', 'f', 'ctrl+s', 'cmd+s', 'ctrl+o', 'ctrl+d'}
+for _km in [k for k in mpl.rcParams if k.startswith('keymap.')]:
+    _v = mpl.rcParams[_km]
+    if isinstance(_v, (list, tuple)):
+        mpl.rcParams[_km] = [k for k in _v if k not in _PICKER_KEYS]
 
 # Global variable to store the last zoom state (xlim, ylim)
 previous_zoom_state = None
+mode_text = None                      # v15: MODE / GAIN boxes (see _status_texts)
+gain_text = None
 
 # ---------------- Display scaling (resolution independent) ----------------
 # All text uses relative sizes ('small', 'large', 'x-large', ...) of one base
@@ -1580,7 +1590,7 @@ def wiggle(original_data, filtered_data, ax, SH={}, maxval=-1, skipt=1, lwidth=0
 
             handles, labels_leg = ax.get_legend_handles_labels()
             if handles:
-                legend = ax.legend(loc='lower left', fontsize='medium', frameon=True,
+                legend = ax.legend(loc='lower left', fontsize='large', frameon=True,   # v15: was medium
                                    framealpha=0.95, edgecolor='black', facecolor='white',
                                    borderpad=0.8, labelspacing=0.8, handlelength=2.0,
                                    handletextpad=0.8, borderaxespad=0.8, fancybox=True, shadow=True)
@@ -1877,16 +1887,7 @@ def plot_shot():
            gain=gain_factor[0], ax=ax, skipt=int(DISPLAY['every_nth']),
            lwidth=DISPLAY['line_width'])
 
-    # Enhanced text displays
-    mode_text = fig.text(0.0075, 0.96, f'MODE: {mode[0]}', fontsize='large', color='#e74c3c', 
-                        verticalalignment='top', fontweight='bold', fontfamily='sans-serif',
-                        bbox=dict(boxstyle='round,pad=0.6', facecolor='white', 
-                                 edgecolor='#e74c3c', alpha=0.9, linewidth=2))
-    
-    gain_text = fig.text(0.0075, 0.90, f'GAIN: {gain_factor[0]:.2f}', fontsize='medium', color='#3498db', 
-                        verticalalignment='top', fontweight='bold', fontfamily='sans-serif',
-                        bbox=dict(boxstyle='round,pad=0.6', facecolor='white', 
-                                 edgecolor='#3498db', alpha=0.9, linewidth=2))
+    _status_texts()                  # v15: MODE / GAIN boxes
 
     # Ensure that event handling works properly
     fig.canvas.mpl_connect('scroll_event', on_scroll)
@@ -1907,26 +1908,28 @@ def plot_shot():
     plt.show()
 
 
+def _status_texts():
+    """MODE and GAIN boxes at the top left of the canvas (v15: one style everywhere, a size larger)."""
+    global mode_text, gain_text
+    for _t in (mode_text, gain_text):
+        if _t is not None:
+            try:
+                _t.remove()
+            except Exception:
+                pass
+    mode_text = fig.text(0.0075, 0.965, f'MODE: {mode[0]}', fontsize='x-large', color='#e74c3c',
+                         verticalalignment='top', fontweight='bold', fontfamily='sans-serif',
+                         bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
+                                   edgecolor='#e74c3c', alpha=0.9, linewidth=2))
+    gain_text = fig.text(0.0075, 0.905, f'GAIN: {gain_factor[0]:.2f}', fontsize='large', color='#3498db',
+                         verticalalignment='top', fontweight='bold', fontfamily='sans-serif',
+                         bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
+                                   edgecolor='#3498db', alpha=0.9, linewidth=2))
+
+
 def update_mode_text():
     global mode_text, gain_text, filter_text, plot_text, fig
-    
-    # Remove existing text annotations if they exist
-    if mode_text:
-        mode_text.remove()
-    if gain_text:
-        gain_text.remove()
-
-    # Add new text annotations with publication styling
-    mode_text = fig.text(0.02, 0.96, f'MODE: {mode[0]}', fontsize='large', color='#e74c3c', 
-                        verticalalignment='top', fontweight='bold', fontfamily='sans-serif',
-                        bbox=dict(boxstyle='round,pad=0.6', facecolor='white', 
-                                 edgecolor='#e74c3c', alpha=0.9, linewidth=2))
-    
-    gain_text = fig.text(0.02, 0.93, f'GAIN: {gain_factor[0]:.2f}', fontsize='medium', color='#3498db', 
-                        verticalalignment='top', fontweight='bold', fontfamily='sans-serif',
-                        bbox=dict(boxstyle='round,pad=0.6', facecolor='white', 
-                                 edgecolor='#3498db', alpha=0.9, linewidth=2))
-    
+    _status_texts()
     fig.canvas.draw_idle()
 
 
@@ -1985,27 +1988,22 @@ def update_plot_with_picks():
            gain=gain_factor[0], ax=ax, skipt=int(DISPLAY['every_nth']),
            lwidth=DISPLAY['line_width'])
 
+    # v15: restore the zoom at once. The radio buttons below repaint the canvas immediately
+    # (blitting), which used to flash the whole gather before the zoom came back.
+    _keep_reset = _reset_view_once[0]
+    if not _keep_reset and current_xlim and current_ylim:
+        ax.set_xlim(current_xlim)
+        ax.set_ylim(current_ylim)
+    elif _keep_reset:
+        _wx, _wy = _display_window()
+        ax.set_xlim(_wx)
+        ax.set_ylim(_wy)
+
     redraw_all_drag_lines()   # restore completed + in-progress stroke lines
     ax.grid(True)
     
-    # Remove existing text annotations if they exist
-    if mode_text:
-        try:
-            mode_text.remove()
-        except:
-            pass
-    if gain_text:
-        try:
-            gain_text.remove()
-        except:
-            pass
-    
-    # Create new text annotations
-    mode_text = fig.text(0.02, 0.95, f'Mode: {mode[0]}', fontsize='large', color='red', 
-                         verticalalignment='top', fontweight='bold')
-    gain_text = fig.text(0.02, 0.92, f'Gain: {gain_factor[0]:.2f}', fontsize='medium', color='blue', 
-                         verticalalignment='top', fontweight='bold')
-    
+    _status_texts()                  # v15: same MODE / GAIN boxes as everywhere else
+
     # Restore radio button states if they have been stored
     if previous_radio_button_state:
         # Only restore if the values are valid for their respective radio buttons
@@ -2018,6 +2016,9 @@ def update_plot_with_picks():
     # Restore zoom state if available (not after new display settings: show their window)
     if _reset_view_once[0]:
         _reset_view_once[0] = False
+        _wx, _wy = _display_window()
+        ax.set_xlim(_wx)
+        ax.set_ylim(_wy)
     elif current_xlim and current_ylim:
         ax.set_xlim(current_xlim)
         ax.set_ylim(current_ylim)
@@ -2205,7 +2206,8 @@ def open_autopick_stalta():
     dlg = apk.StaLtaDialog(p, autopick_data, len(seismic_data), shot_pos, recv_pos,
                            current_shot=shot_no or 0, available_quantities=list(QUANTITY_DATA),
                            existing_picks=_existing_picks_ms, on_apply=apply_autopicks,
-                           parent=fig.canvas.manager.window if fig is not None else None)
+                           parent=fig.canvas.manager.window if fig is not None else None,
+                           polarity=_canvas_polarity())
     _with_help(dlg, 'autopick')
     _keep_dialog(dlg)
     dlg.exec_()
@@ -2333,6 +2335,28 @@ def step_shot(direction):
 _recent_dialogs = []
 
 
+def _canvas_polarity():
+    """+1 / -1 from the canvas DATA POLARITY radio (previews start the same way) (v15)."""
+    try:
+        return -1 if radio_reverse.value_selected == 'Reverse' else 1
+    except Exception:
+        return 1
+
+
+def set_canvas_polarity(pol):
+    """Set the canvas DATA POLARITY radio (from the Traces, axes & gain window) (v15)."""
+    try:
+        want = 1 if pol < 0 else 0
+        if radio_reverse is not None and ['Normal', 'Reverse'].index(radio_reverse.value_selected) != want:
+            lims = (ax.get_xlim(), ax.get_ylim())
+            radio_reverse.set_active(want)
+            ax.set_xlim(lims[0])
+            ax.set_ylim(lims[1])
+            fig.canvas.draw_idle()
+    except Exception as e:
+        print(f"Polarity not changed: {e}")
+
+
 def _with_help(dlg, section):
     """F1 in a dialog/window opens the manual at its section (v13)."""
     try:
@@ -2369,7 +2393,7 @@ def open_pdf_manual():
 
 def show_about():
     QMessageBox.about(None, 'About the first-arrival picker',
-                      '<b>First-arrival picker</b> for refraction tomography (v14)<br><br>'
+                      '<b>First-arrival picker</b> for refraction tomography (v15)<br><br>'
                       'Manual and automatic first-break picking of SEG-Y shot gathers, with '
                       'preprocessing, filtering, reciprocity QC and export to a three-column '
                       'S G T file for travel-time tomography.<br><br>'
@@ -2518,7 +2542,7 @@ def open_preprocessing_ui(preview_shot=None, parent=None, target=None):
                                on_apply=apply_preprocessing, wiggle_gain=gain_factor[0],
                                wiggle_clip=CLIP_FRACTION,
                                preview_ms=no_of_samples_to_plot / RESAMPLE_FACTOR * dt * 1e3,
-                               note=note, parent=parent)
+                               note=note, parent=parent, wiggle_polarity=_canvas_polarity())
     _with_help(dlg, 'preprocessing')
     dlg.exec_()
     _keep_dialog(dlg)
@@ -2527,27 +2551,33 @@ def open_preprocessing_ui(preview_shot=None, parent=None, target=None):
 # ---------------------------------------------------------------------
 # Void picks on a trace
 # ---------------------------------------------------------------------
-def open_void_picks_ui():
+def open_void_picks_ui(mode='receiver'):
+    """Void (delete) picks at one receiver or in receiver ranges, this shot or all shots (v15)."""
     global last_void, final_pick_gather_multi_seed, pending_picks
     if shot_no is None:
         print("Open a shot first.")
         return
     finalize_and_process_picks()
     dlg = ptl.VoidPicksDialog(final_picks_dict, recv_pos, shot_no,
-                              dt_pick_ms=dt * 1e3 / RESAMPLE_FACTOR, default_x=_last_cursor_x)
+                              dt_pick_ms=dt * 1e3 / RESAMPLE_FACTOR, default_x=_last_cursor_x,
+                              mode=mode)
     _with_help(dlg, 'void')
     if dlg.exec_() != QDialog.Accepted:
         return
     tol = 0.5 * float(np.min(np.diff(np.sort(recv_pos))))
-    removed = ptl.void_picks(final_picks_dict, dlg.x0, tol, dlg.shots)
+    removed = ptl.void_picks_at(final_picks_dict, dlg.xs, tol, dlg.shots)
     key = f'final_picks_for_shot_no_{shot_no}'
     if key in removed:                         # keep the working copy of this shot in step
         final_pick_gather_multi_seed = final_picks_dict[key]
     last_void = removed
     scope = 'all shots' if dlg.shots is None else f'shot {shot_no + 1}'
-    print(f"Voided {sum(v.shape[1] for v in removed.values())} pick(s) at receiver "
-          f"{dlg.x0:g} on {scope}. Picks > Undo last void restores them; 's' saves.")
+    print(f"Voided {sum(v.shape[1] for v in removed.values())} pick(s) at {dlg.label} "
+          f"on {scope}. Picks > Undo last void restores them; 's' saves.")
     update_plot_with_picks()
+    try:
+        save_picks(file_path_pkl)               # same as the other edits: the pick file follows
+    except Exception as e:
+        print(f"Picks not saved: {e}")
 
 
 def undo_last_void():
@@ -2656,6 +2686,7 @@ def open_display_settings():
                                     parent=fig.canvas.manager.window if fig is not None else None,
                                     positions=np.asarray(recv_pos, dtype=float),     # v12
                                     gain=gain_factor[0], on_gain=set_canvas_gain,
+                                    polarity=_canvas_polarity(), on_polarity=set_canvas_polarity,
                                     gain_range=(GAIN_MIN, GAIN_MAX))
     _keep_dialog(dlg)
     _with_help(dlg, 'traces-axes-gain')
@@ -2912,7 +2943,9 @@ def install_app_menus(fig):
     m_proc.addAction('Filter designer...  (f)', _run_from_menu(open_filter_designer_ui))
 
     m_picks = mb.addMenu('&Picks')
-    m_picks.addAction('Void picks on a trace...', _run_from_menu(open_void_picks_ui))
+    m_picks.addAction('Void picks on a receiver...', _run_from_menu(open_void_picks_ui))
+    m_picks.addAction('Delete picks in a receiver range...',
+                      _run_from_menu(lambda: open_void_picks_ui('range')))       # v15
     m_picks.addAction('Undo last void', _run_from_menu(undo_last_void))
     m_picks.addSeparator()
     m_picks.addAction('Save picks  (s)', _run_from_menu(_save_picks_menu))
@@ -2965,7 +2998,9 @@ def install_app_menus(fig):
                         ('Filter designer...', _run_from_menu(open_filter_designer_ui)),
                         ('Reciprocity and pick QC...', open_reciprocity_window),
                         ('Plotted traces, time axis and gain...', open_display_settings),
-                        ('Void picks on a trace...', _run_from_menu(open_void_picks_ui)),
+                        ('Void picks on a receiver...', _run_from_menu(open_void_picks_ui)),
+                        ('Delete picks in a receiver range...',
+                         _run_from_menu(lambda: open_void_picks_ui('range'))),
                         ('Undo last void', _run_from_menu(undo_last_void)),
                         ('Shortcuts...', show_shortcuts),
                         ('User manual (F1)', lambda: show_manual(None)),
@@ -2980,7 +3015,17 @@ def install_app_menus(fig):
     tb.addAction('\u2699 Preprocessing', _run_from_menu(open_preprocessing_ui))
     tb.addAction('\u224b Filter', _run_from_menu(open_filter_designer_ui))
     tb.addAction('\u21c4 Reciprocity && pick QC', open_reciprocity_window)
-    tb.addAction('\u2702 Void picks', _run_from_menu(open_void_picks_ui))
+    void_btn = QToolButton(tb)                # v15: void picks drop-down
+    void_btn.setText('\u2702 Void picks \u25be')
+    void_btn.setPopupMode(QToolButton.InstantPopup)
+    vm = QMenu(void_btn)
+    vm.addAction('On one receiver...', _run_from_menu(open_void_picks_ui))
+    vm.addAction('In a receiver range (e.g. 21-40, 55-60)...',
+                 _run_from_menu(lambda: open_void_picks_ui('range')))
+    vm.addSeparator()
+    vm.addAction('Undo last void', _run_from_menu(undo_last_void))
+    void_btn.setMenu(vm)
+    tb.addWidget(void_btn)
     auto = QToolButton(tb)                    # v11: automatic picking drop-down
     auto.setText('\u2728 Auto-pick \u25be')
     auto.setPopupMode(QToolButton.InstantPopup)
@@ -3014,7 +3059,8 @@ def open_filter_designer_ui(preview_shot=None, parent=None):
         wiggle_gain=gain_factor[0],                   # same gain / clip as the picker's wiggles
         wiggle_clip=CLIP_FRACTION,
         parent=parent,
-        pre_shift_s=filter_pre_shift())               # filter before the time shift (v9)
+        pre_shift_s=filter_pre_shift(),               # filter before the time shift (v9)
+        wiggle_polarity=_canvas_polarity())           # v15: preview starts like the canvas
     _with_help(dlg, 'filter')
     dlg.exec_()
     _keep_dialog(dlg)

@@ -60,6 +60,51 @@ def void_picks(final_picks_dict, x0, tol, shots=None):
     return removed
 
 
+def void_picks_at(final_picks_dict, xs, tol, shots=None):
+    """
+    Remove picks within tol of ANY receiver position in xs (v15: receiver ranges)
+    from the given shots (None = all). Returns the undo record, as void_picks().
+    """
+    xs = np.atleast_1d(np.asarray(xs, dtype=float))
+    removed = {}
+    if xs.size == 0:
+        return removed
+    for key in list(final_picks_dict):
+        if not key.startswith(_KEY):
+            continue
+        if shots is not None and _shot_of(key) not in shots:
+            continue
+        a = np.asarray(final_picks_dict[key])
+        if a.size == 0:
+            continue
+        hit = np.min(np.abs(a[0, :, 0][:, None] - xs[None, :]), axis=1) <= tol
+        if np.any(hit):
+            removed[key] = a[:, hit, :].copy()
+            final_picks_dict[key] = a[:, ~hit, :]
+    return removed
+
+
+def count_picks_at(final_picks_dict, xs, tol, shots=None):
+    """{shot index: number of picks within tol of any of xs} (only shots with picks there)."""
+    xs = np.atleast_1d(np.asarray(xs, dtype=float))
+    out = {}
+    if xs.size == 0:
+        return out
+    for key, arr in final_picks_dict.items():
+        if not key.startswith(_KEY):
+            continue
+        s_ = _shot_of(key)
+        if shots is not None and s_ not in shots:
+            continue
+        a = np.asarray(arr).reshape(-1, 2)
+        if a.size == 0:
+            continue
+        n = int(np.sum(np.min(np.abs(a[:, 0][:, None] - xs[None, :]), axis=1) <= tol))
+        if n:
+            out[s_] = n
+    return out
+
+
 def restore_picks(final_picks_dict, removed):
     """Put back picks removed by void_picks() (sorted by x, no duplicates)."""
     for key, back in removed.items():
@@ -100,13 +145,16 @@ if _HAVE_QT:
         called. valueChanged(float) fires on every change; on_change(v) too.
         """
         valueChanged = _Signal(float)
+        polarityChanged = _Signal(int)                 # v15: +1 Normal, -1 Reverse
         STEP = 1.25
         _N = 1000
 
-        def __init__(self, value=1.0, lo=0.1, hi=200.0, parent=None, label='Gain'):
+        def __init__(self, value=1.0, lo=0.1, hi=200.0, parent=None, label='Gain',
+                     polarity=None):
             super().__init__(parent)
             self.lo, self.hi = float(lo), float(hi)
             self.on_change = None
+            self.on_polarity = None
             self._busy = False
             h = _HB(self)
             h.setContentsMargins(0, 0, 0, 0)
@@ -138,7 +186,43 @@ if _HAVE_QT:
             for w in (self.b_minus, self.slider, self.b_plus, self.spin):
                 h.addWidget(w)
             h.setStretch(h.indexOf(self.slider), 1)
+            # v15: optional polarity switch beside the gain (polarity = +1 / -1 to show it)
+            self.rb_normal = self.rb_reverse = None
+            if polarity is not None:
+                from PyQt5.QtWidgets import QRadioButton as _RB, QButtonGroup as _BG, QFrame as _FR
+                sep = _FR()
+                sep.setFrameShape(_FR.VLine)
+                sep.setFrameShadow(_FR.Sunken)
+                h.addSpacing(6)
+                h.addWidget(sep)
+                h.addWidget(QLabel('Polarity'))
+                self.rb_normal = _RB('Normal')
+                self.rb_reverse = _RB('Reverse')
+                self.rb_normal.setToolTip('Wiggles as recorded')
+                self.rb_reverse.setToolTip('Wiggles flipped (x -1), display only')
+                self._pol_group = _BG(self)
+                self._pol_group.addButton(self.rb_normal)
+                self._pol_group.addButton(self.rb_reverse)
+                (self.rb_reverse if polarity < 0 else self.rb_normal).setChecked(True)
+                self.rb_reverse.toggled.connect(self._pol_changed)
+                h.addWidget(self.rb_normal)
+                h.addWidget(self.rb_reverse)
             self.setValue(value, emit=False)
+
+        def polarity(self):
+            """+1 (Normal) or -1 (Reverse); +1 when there is no polarity switch."""
+            return -1 if (self.rb_reverse is not None and self.rb_reverse.isChecked()) else 1
+
+        def setPolarity(self, pol):
+            if self.rb_reverse is None:
+                return
+            (self.rb_reverse if pol < 0 else self.rb_normal).setChecked(True)
+
+        def _pol_changed(self, *args):
+            pol = self.polarity()
+            self.polarityChanged.emit(pol)
+            if self.on_polarity is not None:
+                self.on_polarity(pol)
 
         # log mapping
         def _to_pos(self, v):
@@ -206,34 +290,58 @@ if _HAVE_QT:
 
     class VoidPicksDialog(QDialog):
         """
-        Choose a receiver and whether to void its picks on this shot or on all shots.
-        After exec_() == Accepted: .x0 (receiver position) and .shots (set of shot
-        indices, or None for all shots).
+        Remove picks at one receiver, or at every receiver in typed ranges (v15),
+        on this shot or on all shots.
+
+        After exec_() == Accepted:
+          .xs     receiver positions to clear (array)
+          .x0     the single receiver (one-receiver mode), else None
+          .shots  set of shot indices, or None for all shots
+          .label  text for the log, e.g. 'receivers 21-40, 55-60'
+        mode = 'receiver' | 'range' : which choice is selected when the dialog opens.
         """
 
         def __init__(self, final_picks_dict, recv_x, current_shot, dt_pick_ms=0.1,
-                     default_x=None, parent=None):
+                     default_x=None, parent=None, mode='receiver'):
             super().__init__(parent)
-            self.setWindowTitle('Void picks on a trace')
+            from PyQt5.QtWidgets import QLineEdit, QHBoxLayout
+            self.setWindowTitle('Void (delete) picks')
             self.picks = final_picks_dict
             self.recv_x = np.asarray(recv_x, dtype=float)
-            self.tol = 0.5 * float(np.min(np.diff(np.sort(self.recv_x)))) if len(self.recv_x) > 1 else 0.5
+            self.n = len(self.recv_x)
+            self.tol = 0.5 * float(np.min(np.diff(np.sort(self.recv_x)))) if self.n > 1 else 0.5
             self.current_shot = current_shot
             self.dt_ms = dt_pick_ms
-            self.x0, self.shots = None, None
+            self.x0, self.xs, self.shots, self.label = None, np.array([]), None, ''
 
             lay = QVBoxLayout(self)
-            form = QFormLayout()
+            g0 = QGroupBox('Which receivers')
+            f0 = QFormLayout(g0)
+            self.rb_one = QRadioButton('One receiver')
+            self.rb_range = QRadioButton('Receiver range(s)')
+            g_which = QButtonGroup(self)
+            g_which.addButton(self.rb_one)
+            g_which.addButton(self.rb_range)
             self.cb = QComboBox()
-            for xv in self.recv_x:
-                self.cb.addItem(f'{xv:g}', float(xv))
+            for k, xv in enumerate(self.recv_x):
+                self.cb.addItem(f'{k + 1}   ({xv:g} m)', float(xv))
             if default_x is not None:
                 self.cb.setCurrentIndex(int(np.argmin(np.abs(self.recv_x - default_x))))
-            self.cb.currentIndexChanged.connect(self._update)
-            form.addRow('Receiver position', self.cb)
-            lay.addLayout(form)
+            f0.addRow(self.rb_one, self.cb)
+            self.ed_range = QLineEdit()
+            self.ed_range.setPlaceholderText('e.g. 21-40   or   21-40, 55-60, 83')
+            self.ed_range.setToolTip('Comma-separated receiver numbers or ranges (both ends included).')
+            row = QHBoxLayout()
+            row.addWidget(self.ed_range, 1)
+            self.cb_units = QComboBox()
+            self.cb_units.addItem(f'receiver numbers (1 to {self.n})', 'trace')
+            self.cb_units.addItem(f'positions in m ({self.recv_x.min():g} to {self.recv_x.max():g})',
+                                  'position')
+            row.addWidget(self.cb_units)
+            f0.addRow(self.rb_range, row)
+            lay.addWidget(g0)
 
-            g = QGroupBox('Remove the pick(s) at this receiver from')
+            g = QGroupBox('Delete the picks from')
             gl = QVBoxLayout(g)
             self.rb_this = QRadioButton()
             self.rb_all = QRadioButton()
@@ -242,7 +350,6 @@ if _HAVE_QT:
             grp.addButton(self.rb_this)
             grp.addButton(self.rb_all)
             for rb in (self.rb_this, self.rb_all):
-                rb.toggled.connect(self._update)
                 gl.addWidget(rb)
             lay.addWidget(g)
 
@@ -252,32 +359,66 @@ if _HAVE_QT:
             lay.addWidget(self.info)
 
             self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-            self.bb.button(QDialogButtonBox.Ok).setText('Void picks')
             self.bb.accepted.connect(self._ok)
             self.bb.rejected.connect(self.reject)
             lay.addWidget(self.bb)
+            (self.rb_range if mode == 'range' else self.rb_one).setChecked(True)
+            for w in (self.rb_one, self.rb_range, self.rb_this, self.rb_all):
+                w.toggled.connect(self._update)
+            self.cb.currentIndexChanged.connect(self._update)
+            self.ed_range.textChanged.connect(self._update)
+            self.cb_units.currentIndexChanged.connect(self._update)
+            self.resize(520, self.sizeHint().height())
             self._update()
+            if mode == 'range':
+                self.ed_range.setFocus()
+
+        def _selection(self):
+            """(receiver positions, label, error)."""
+            if self.rb_one.isChecked():
+                x0 = self.cb.currentData()
+                k = int(np.argmin(np.abs(self.recv_x - x0)))
+                return np.array([x0]), f'receiver {k + 1} ({x0:g} m)', ''
+            txt = self.ed_range.text().strip()
+            if not txt:
+                return np.array([]), '', 'Type receiver numbers or ranges, e.g. 21-40, 55-60.'
+            try:
+                idx = parse_trace_ranges(txt, self.n, self.recv_x, self.cb_units.currentData())
+            except ValueError as e:
+                return np.array([]), '', str(e).replace('the gather: traces are', 'the line: receivers are')
+            unit = 'receivers' if self.cb_units.currentData() == 'trace' else 'receivers at'
+            suffix = '' if self.cb_units.currentData() == 'trace' else ' m'
+            return self.recv_x[idx], f'{unit} {txt}{suffix} ({len(idx)} receivers)', ''
 
         def _update(self, *args):
-            x0 = self.cb.currentData()
-            hits = picks_at_receiver(self.picks, x0, self.tol)
-            this = hits.get(self.current_shot)
-            self.rb_this.setText(f'This shot only (shot {self.current_shot + 1}): ' +
-                                 (f'1 pick at {this * self.dt_ms:.1f} ms' if this is not None
-                                  else 'no pick'))
-            self.rb_all.setText(f'ALL shots: {len(hits)} pick(s)')
-            if hits:
-                lst = ', '.join(f'{s + 1}' for s in sorted(hits))
-                self.info.setText(f'Shots with a pick at receiver {x0:g}: {lst}<br>'
-                                  f'<span style="color:#555;">Picks > Undo last void restores them.</span>')
+            self.cb.setEnabled(self.rb_one.isChecked())
+            for w in (self.ed_range, self.cb_units):
+                w.setEnabled(self.rb_range.isChecked())
+            xs, label, err = self._selection()
+            this = count_picks_at(self.picks, xs, self.tol, {self.current_shot}).get(self.current_shot, 0)
+            allc = count_picks_at(self.picks, xs, self.tol)
+            n_all = sum(allc.values())
+            self.rb_this.setText(f'This shot only (shot {self.current_shot + 1}): {this} pick(s)')
+            self.rb_all.setText(f'ALL shots: {n_all} pick(s) on {len(allc)} shot(s)')
+            if err:
+                self.info.setText(f'<span style="color:#c0392b;">{err}</span>')
+            elif n_all:
+                lst = ', '.join(f'{s + 1}' for s in sorted(allc))
+                self.info.setText(f'Selected: {label}.<br>Shots with picks there: {lst}<br>'
+                                  f'<span style="color:#555;">Picks &gt; Undo last void restores them.</span>')
             else:
-                self.info.setText(f'No shot has a pick at receiver {x0:g}.')
-            n = len(hits) if self.rb_all.isChecked() else (1 if this is not None else 0)
-            self.bb.button(QDialogButtonBox.Ok).setEnabled(n > 0)
-            self.bb.button(QDialogButtonBox.Ok).setText(f'Void {n} pick(s)')
+                self.info.setText(f'Selected: {label}. No shot has picks there.')
+            n = n_all if self.rb_all.isChecked() else this
+            ok = self.bb.button(QDialogButtonBox.Ok)
+            ok.setEnabled(n > 0 and not err)
+            ok.setText(f'Delete {n} pick(s)')
 
         def _ok(self):
-            self.x0 = self.cb.currentData()
+            xs, label, err = self._selection()
+            if err or xs.size == 0:
+                return
+            self.xs, self.label = xs, label
+            self.x0 = float(xs[0]) if self.rb_one.isChecked() else None
             self.shots = None if self.rb_all.isChecked() else {self.current_shot}
             self.accept()
 
@@ -398,7 +539,8 @@ if _HAVE_QT:
             """
 
             def __init__(self, settings, t_max_ms, x_min, x_max, on_apply=None, parent=None,
-                         positions=None, gain=None, on_gain=None, gain_range=(0.1, 200.0)):
+                         positions=None, gain=None, on_gain=None, gain_range=(0.1, 200.0),
+                         polarity=None, on_polarity=None):
                 super().__init__(parent)
                 self.setWindowTitle('Plotted traces, time axis and gain')
                 self.on_apply, self.on_gain = on_apply, on_gain
@@ -482,9 +624,13 @@ if _HAVE_QT:
                 lay.addWidget(g)
 
                 # ---------------- gain ----------------
-                g = QGroupBox('Gain (applied at once)')
+                g = QGroupBox('Gain and polarity (applied at once)')
                 h = QHBoxLayout(g)
-                self.gain_ctl = GainControl(gain if gain is not None else 1.0, *gain_range)
+                self.on_polarity = on_polarity
+                self.gain_ctl = GainControl(gain if gain is not None else 1.0, *gain_range,
+                                            polarity=(polarity if polarity is not None else 1)
+                                            if on_polarity is not None else None)
+                self.gain_ctl.on_polarity = lambda v: self.on_polarity(v) if self.on_polarity else None
                 self.gain_ctl.setEnabled(on_gain is not None)
                 self.gain_ctl.on_change = lambda v: self.on_gain(v) if self.on_gain else None
                 h.addWidget(self.gain_ctl)

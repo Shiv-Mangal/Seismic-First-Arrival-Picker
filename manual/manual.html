@@ -17,7 +17,7 @@ table.note { background-color: #fef9e7; margin-top: 8px; margin-bottom: 10px; }
 a { color: #1f618d; }
 </style></head><body>
 <h1 id="top">First-Arrival Picker: User Manual</h1>
-<p class="sub">Version 14 · first-break picking of SEG-Y shot gathers for refraction tomography</p>
+<p class="sub">Version 15 · first-break picking of SEG-Y shot gathers for refraction tomography</p>
 
 <p>This manual explains every window of the picker, in the order you use them. Every figure was made with the picker itself on a synthetic survey (<a href="#example-data">About the example data</a>), so the numbers in the figures can be checked against known true travel times. Inside the picker, <b>Help &gt; User manual</b> (F1) opens this manual beside the canvas. F1 in any window opens the section for that window. <b>Help &gt; Open the PDF manual</b> opens this same text as a PDF.</p>
 
@@ -178,11 +178,11 @@ a { color: #1f618d; }
 
 <h2 id="traces-axes-gain">7. Traces, axes and gain</h2>
 <p><b>Traces, axes &amp; gain &gt; Plotted traces, time axis and gain…</b> (Ctrl+D, or <i>Traces / axes / gain</i> on the toolbar) sets what the canvas plots.</p>
-<p class="fig"><img src="images/display_dialog.png" data-w="560" alt="Plotted traces dialog"><br><span class="cap">Figure 13. Traces 1–30 and 61–96, 0–250 ms.</span></p>
+<p class="fig"><img src="images/display_dialog.png" data-w="589" alt="Plotted traces dialog"><br><span class="cap">Figure 13. Traces 1–30 and 61–96, 0–250 ms.</span></p>
 <ul>
 <li><b>Traces to plot (x axis)</b>: <i>All traces</i>, or ranges such as <code>1-100</code> or <code>1-20, 50-60</code>, as trace numbers or receiver positions in metres. Traces in the gaps are not drawn and their space stays empty. <i>Quick</i> buttons pick halves or the first or last 50. <i>Plot every Nth trace</i> thins the selection (picks still show on every receiver). The line below counts the plotted traces; a range outside the gather is refused.</li>
 <li><b>Time axis (y axis)</b>: labels in ms or samples (0.1 ms after resampling), and the window <i>Show from … to …</i>. Picks are only accepted inside it.</li>
-<li><b>Gain</b>: applied at once; the canvas slider follows and the zoom stays.</li>
+<li><b>Gain and polarity</b>: applied at once; the canvas slider and the DATA POLARITY switch follow, and the zoom stays.</li>
 <li><b>Wiggles</b>:
 <ul>
 <li><i>Balance</i>: per-trace RMS, which makes far offsets as strong as near ones, or true amplitude.</li>
@@ -218,19 +218,26 @@ a { color: #1f618d; }
 <li><b>Low-cut / high-cut</b> with transition widths, and <b>notch filters</b> (frequency and Q in a table: <i>Add notch</i>, <i>Remove selected</i>). The default is the original configuration: minimum-phase 10–80 Hz (transitions 20 and 40 Hz, 131 and 51 taps) with a notch at 199 Hz (Q 8) for the accelerometer resonance.</li>
 <li><b>Timing presets</b>: <i>Original (default)</i> (10–80 Hz), <i>Wider band</i> (10–150 Hz, the v9–v13 default: more high-frequency detail, slightly earlier peaks), <i>No high-cut</i> (low-cut only). The <b>timing line</b> reports, on the preview shot, how far the filter moves the first-break onsets and the first peaks, and the impulse delay.</li>
 </ul>
-<p class="fig"><img src="images/filter_response.png" data-w="1600" alt="Filter response"><br><span class="cap">Figure 17. Response tab: realized amplitude response, impulse response and the spectrum of the shot before and after.</span></p>
-<p class="fig"><img src="images/filter_preview.png" data-w="1600" alt="Filter preview"><br><span class="cap">Figure 18. Data preview tab: the shot before (top) and after (bottom) the filter, with the shared gain control.</span></p>
+<p class="fig"><img src="images/filter_response.png" data-w="1621" alt="Filter response"><br><span class="cap">Figure 17. Response tab: realized amplitude response, impulse response and the spectrum of the shot before and after.</span></p>
+<p class="fig"><img src="images/filter_preview.png" data-w="1621" alt="Filter preview"><br><span class="cap">Figure 18. Data preview tab: the shot before (top) and after (bottom) the filter, with the shared gain control.</span></p>
 <h3 id="gain-control">The gain control in preview windows</h3>
 <p>The filter designer, the preprocessing window and the auto-pick preview share one gain control:</p>
 <ul>
 <li>a log slider from 0.1 to 200, with − / + (×1.25) and a typed value;</li>
-<li>Ctrl + mouse wheel over the plot.</li>
+<li>Ctrl + mouse wheel over the plot;</li>
+<li>a <b>Polarity</b> switch (<i>Normal</i> / <i>Reverse</i>) beside it, which opens the way the canvas shows the data.</li>
 </ul>
-<p>It only rescales the wiggles; the zoom stays.</p>
+<p>Both only change the display; the zoom stays. The <i>Traces, axes &amp; gain</i> window has the same pair and drives the canvas.</p>
 
 <h2 id="void">10. Void picks</h2>
-<p><b>Picks &gt; Void picks on a trace…</b> removes the picks of one receiver, on this shot or on ALL shots. Use it for a receiver that was bad during the whole survey. The receiver under the mouse is proposed. <b>Undo last void</b> puts the picks back.</p>
-<p class="fig"><img src="images/void_dialog.png" data-w="334" alt="Void picks"><br><span class="cap">Figure 19. Void picks at receiver 75 m (the dead trace of the example).</span></p>
+<p><b>Void picks ▾</b> on the toolbar (or the Picks menu) deletes picks without clicking on the canvas:</p>
+<ul>
+<li><b>On one receiver…</b>: the picks of one receiver (the one under the mouse is proposed). Use it for a receiver that was bad during the whole survey.</li>
+<li><b>In a receiver range…</b>: type receiver numbers or ranges, e.g. <code>21-40</code> or <code>21-40, 55-60, 83</code> (both ends included), or positions in metres. Every pick on those receivers goes.</li>
+<li>Choose <i>This shot only</i> or <i>ALL shots</i>; the dialog counts the picks before you delete them, and refuses a range outside the line.</li>
+<li><b>Undo last void</b> puts the picks back. The pick file is saved after each void.</li>
+</ul>
+<p class="fig"><img src="images/void_dialog.png" data-w="520" alt="Void picks"><br><span class="cap">Figure 19. Void picks: one receiver, or receiver ranges such as 21-40, 55-60, on this shot or all shots.</span></p>
 
 <h2 id="autopick">11. Automatic picking</h2>
 <p><b>Auto-pick ▾ &gt; STA/LTA (settings + preview)…</b> on the toolbar, or <b>Picks &gt; Automatic picking</b>, opens the settings with a live preview on any shot. Every change re-picks the preview shot, so you can tune before applying.</p>
@@ -412,8 +419,9 @@ a { color: #1f618d; }
 <tr><td>v11</td><td>Automatic picking (STA/LTA, MER, original routine; AIC; post-processing) with live preview; shot spectra.</td></tr>
 <tr><td>v12</td><td>File menu with import from the picker; trace ranges; gain in every preview; spectra corrected for the sensor response.</td></tr>
 <tr><td>v13</td><td>This manual: built into the picker (Help menu, F1, side panel) and as a PDF.</td></tr>
+<tr><td>v15</td><td>Polarity switch beside every preview gain; Delete-mode zoom fixes (r no longer jumps to an old view, no flash after deleting); delete picks in typed receiver ranges; larger MODE / GAIN boxes and legend.</td></tr>
 <tr><td>v14</td><td>Default filter back to the original configuration (minimum-phase 10–80 Hz, notch 199 Hz); 10–150 Hz kept as the <i>Wider band</i> preset.</td></tr>
 </table>
 
-<p class="sub">Built 16 November 2026. The same text is in First_Arrival_Picker_User_Manual.pdf.</p>
+<p class="sub">Built 17 November 2026. The same text is in First_Arrival_Picker_User_Manual.pdf.</p>
 </body></html>

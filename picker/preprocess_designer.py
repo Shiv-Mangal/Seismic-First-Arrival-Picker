@@ -415,7 +415,8 @@ if _HAVE_QT:
         """
 
         def __init__(self, params=None, raw=None, dt=0.001, x=None, shot=0, on_apply=None,
-                     wiggle_gain=3.5, wiggle_clip=1.0, preview_ms=450, note='', parent=None):
+                     wiggle_gain=3.5, wiggle_clip=1.0, preview_ms=450, note='', parent=None,
+                     wiggle_polarity=1):
             super().__init__(parent)
             self.setWindowTitle('Preprocessing: trace edits, integration, time shift')
             self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
@@ -430,6 +431,7 @@ if _HAVE_QT:
             self._start = (params or PreprocParams()).copy()
             self.p = self._start.copy()            # working copy (kill lists edited in place)
             self._gain, self._clip, self._win_ms = wiggle_gain, wiggle_clip, preview_ms
+            self._polarity = -1 if wiggle_polarity < 0 else 1          # v15
             self._note = note
             self._building = True
             self._result = None
@@ -644,8 +646,9 @@ if _HAVE_QT:
             ctl = QHBoxLayout()
             ds = self._display_changed
             import pick_tools as _ptl                  # v12: shared gain control (slider, -/+, typed, Ctrl+wheel)
-            self.sp_gain = _ptl.GainControl(self._gain, 0.1, 200.0)
+            self.sp_gain = _ptl.GainControl(self._gain, 0.1, 200.0, polarity=self._polarity)
             self.sp_gain.valueChanged.connect(lambda *_: ds())
+            self.sp_gain.polarityChanged.connect(lambda *_: ds())
             self.sp_gain.attach_wheel(self.canvas_data)
             self.sp_clip = self._dspin(0.1, 5, 0.1, 2, ' traces', slot=ds, track=True)
             self.sp_clip.setValue(self._clip)
@@ -971,6 +974,7 @@ if _HAVE_QT:
             else:
                 keep, first = None, False
             for q, ax, pnl in zip(qs, self._axes, self._panels):
+                pnl.polarity = self.sp_gain.polarity()
                 pnl.draw(self.sp_gain.value(), self.sp_clip.value(),
                          f'{q.capitalize()}' + ('  (input)' if q == self._params.input_quantity else ''))
                 if ax is not self._axes[-1]:

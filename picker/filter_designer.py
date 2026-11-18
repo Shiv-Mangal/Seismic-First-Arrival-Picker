@@ -552,6 +552,7 @@ class WigglePanel:
         self.lc = None
         self.poly = None
         self.d = None
+        self.polarity = 1                               # v15: -1 flips the wiggles (display only)
 
     def reset(self):
         """Forget the artists (call after ax.clear())."""
@@ -579,7 +580,7 @@ class WigglePanel:
 
     def draw(self, gain, clip, title=None):
         from matplotlib.collections import LineCollection, PolyCollection
-        tr = self.d * (gain * self.sp)
+        tr = self.d * (gain * self.sp * (-1.0 if self.polarity < 0 else 1.0))
         if clip is not None:
             np.clip(tr, -clip * self.sp, clip * self.sp, out=tr)
         tr[0, :] = tr[-1, :] = 0
@@ -725,7 +726,7 @@ if _HAVE_QT:
 
         def __init__(self, params=None, fs=1000.0, preview=None, x=None, shot_label='',
                      on_apply=None, preview_ms=400, wiggle_gain=3.5, wiggle_clip=1.0,
-                     parent=None, pre_shift_s=0.0):
+                     parent=None, pre_shift_s=0.0, wiggle_polarity=1):
             super().__init__(parent)
             self.pre_shift_s = float(pre_shift_s or 0.0)
             self.setWindowTitle('Filter designer')
@@ -736,6 +737,7 @@ if _HAVE_QT:
             self.preview = None if preview is None else np.asarray(preview, dtype=float)
             self._preview_ms = float(preview_ms)
             self._wiggle_gain = float(wiggle_gain)
+            self._wiggle_polarity = -1 if wiggle_polarity < 0 else 1    # v15
             self._wiggle_clip = 1.0 if wiggle_clip is None else float(wiggle_clip)
             self._stages = None               # current filter chain
             self._after = None                # current shot after filtering
@@ -928,8 +930,10 @@ if _HAVE_QT:
             self.cb_disp.currentIndexChanged.connect(self._display_changed)
             ds = self._display_changed
             import pick_tools as _ptl                  # v12: shared gain control (slider, -/+, typed, Ctrl+wheel)
-            self.sp_gain = _ptl.GainControl(self._wiggle_gain, 0.1, 200.0)
+            self.sp_gain = _ptl.GainControl(self._wiggle_gain, 0.1, 200.0,
+                                            polarity=self._wiggle_polarity)   # v15: + polarity
             self.sp_gain.valueChanged.connect(lambda *_: ds())
+            self.sp_gain.polarityChanged.connect(lambda *_: ds())
             self.sp_gain.attach_wheel(self.canvas_data)
             self.sp_clip = self._dspin(0.1, 5.0, 0.1, 2, ' traces', slot=ds, track=True)
             self.sp_clip.setValue(self._wiggle_clip)
@@ -1170,6 +1174,8 @@ if _HAVE_QT:
                     self.panels[1].prepare(self._after[w], self.fs, self.x, step, osf)
                     self._prep_key = prep
                 gain, clip = self.sp_gain.value(), self.sp_clip.value()
+                for _pn in self.panels:
+                    _pn.polarity = self.sp_gain.polarity()
                 self.panels[0].draw(gain, clip, 'Before')
                 self.panels[1].draw(gain, clip, 'After')
                 self.ax_after.set_xlabel('Receiver position')
