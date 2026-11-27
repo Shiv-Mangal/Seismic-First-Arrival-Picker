@@ -3,8 +3,8 @@
 inversion_runner.py  (v20)
 ==========================
 Runs one pyGIMLi inversion in a process of its own, so the picker and the inversion window
-stay responsive and the run keeps going if the window is closed (as FWI Studio's
-stage_runner). The window starts it and follows status.json, history.csv and iterations/.
+stay responsive and the run keeps going if the window is closed.
+The window starts it and follows status.json, history.csv and iterations/.
 
     python inversion_runner.py --run <run folder>          (settings.json in the folder)
     python inversion_runner.py --data file.txt --out <folder> [--lam 30 ...]   (without the window)

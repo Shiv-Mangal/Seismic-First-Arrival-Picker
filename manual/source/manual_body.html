@@ -13,6 +13,7 @@
 <li><b>Pick</b> by hand (click or drag across traces) or automatically (STA/LTA family plus post-processing). Both write to the same pick file.</li>
 <li><b>QC</b>: reciprocity says that the time from A to B equals the time from B to A. The guider on the canvas and the <i>Reciprocity and pick QC</i> window show where picks disagree, so you can delete and pick them again.</li>
 <li><b>Export</b> the picks for the inversion: <b>File &gt; Export picks for inversion</b> (Ctrl+E, or <i>Export</i> beside <i>Save picks</i>) writes S G T with station numbers, S G T with x positions, or a pyGIMLi data file.</li>
+<li><b>Invert</b> the travel times with pyGIMLi and estimate the uncertainty of the velocity model with Monte Carlo runs (Inversion menu, Ctrl+I).</li>
 </ol>
 <h3 id="modules">Program files</h3>
 <p>Keep these files, and the <code>manual</code> folder, together in one folder:</p>
@@ -29,6 +30,10 @@
 <tr><td><code>reciprocity_analyzer.py</code></td><td>Reciprocity and pick QC window.</td></tr>
 <tr><td><code>pick_tools.py</code></td><td>Delete picks dialog, the plotted traces / time axis / gain window, shared gain control.</td></tr>
 <tr><td><code>help_manual.py</code></td><td>This manual inside the picker (Help menu, F1).</td></tr>
+<tr><td><code>figure_export.py</code>, <code>session_store.py</code>, <code>wheel_guard.py</code></td><td>Figure export; session backups of the pick file; the scroll-wheel guard.</td></tr>
+<tr><td><code>run_picker.py</code>, <code>run_inversion.py</code></td><td>Start the picker, or only the inversion window, from a terminal.</td></tr>
+<tr><td><code>inversion_core.py</code>, <code>inversion_runner.py</code>, <code>inversion_window.py</code>, <code>model_viewer.py</code></td><td>Travel-time inversion with pyGIMLi: calculation, the run process, the window, the model viewer.</td></tr>
+<tr><td><code>mc_core.py</code>, <code>mc_runner.py</code>, <code>mc_analysis.py</code>, <code>mc_panel.py</code></td><td>Monte Carlo sets: runs, the parallel run process, statistics, the tab.</td></tr>
 </table>
 <h3 id="example-data">About the example data</h3>
 <p>The figures use a synthetic survey written as ordinary SEG-Y files (<code>SYN_0900_*.segy</code>), so the import runs exactly as on field data:</p>
@@ -144,14 +149,14 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <h2 id="topography">4. Topography and the x origin</h2>
 <h3 id="tape">Tape positions and x = 0</h3>
 <p>The picker works on <b>picker positions</b>: the tape distance (m) of every station as laid out in the field. In the usual layout the first shot is at tape 0 m and the receivers start at 1 m. A 100 m line with 1 m receivers and 10 m shots has receivers at 1, 2 … 100 m and shots at 0, 10, 20 … 100 m. The picks are stored against these positions; the import window derives them from the headers (or from the manual geometry).</p>
-<p>The <b>x along the line</b> (m) is the true distance: from the header coordinates or from a topography table. Headers measure it from receiver 1. The picker and the export put <b>x = 0 at tape position 0 m</b> instead. The station at 0 m, usually the first shot, defines x = 0. If no station is at 0 m, x(0) is extrapolated from the two receivers nearest to it. For Line 101 shot 1 is at tape 0 m, 0.976 m before receiver 1. So shot 1 is at x = 0 and receiver 1 at x = 0.976 m, as in <code>SLF_Line_101_topo_0m.txt</code>. The offset view of the canvas, the titles and the export (default <i>Tape origin</i>, <a href="#export">section 17</a>) all use this origin.</p>
+<p>The <b>x along the line</b> (m) is the true distance: from the header coordinates or from a topography table. Headers measure it from receiver 1. The picker and the export put <b>x = 0 at tape position 0 m</b> instead. The station at 0 m, usually the first shot, defines x = 0. If no station is at 0 m, x(0) is extrapolated from the two receivers nearest to it. Example: with shot 1 at tape 0 m and receiver 1 surveyed 0.976 m further, shot 1 is at x = 0 and receiver 1 at x = 0.976 m. The offset view of the canvas, the titles and the export (default <i>Tape origin</i>, <a href="#export">section 17</a>) all use this origin.</p>
 <p>If your stations are numbered differently (e.g. 101 … 270), choose another x origin in the export window: <i>smallest x at 0</i> or <i>first receiver at 0</i>.</p>
 <h3 id="topo-tables">Topography tables</h3>
 <p>A topography table (csv, txt, dat, xls or xlsx) replaces the coordinates and elevations of the headers. Choose the columns: <i>x</i> and <i>Elevation</i> are required. With a <i>y</i> column, x and y are map coordinates; without it, x is the distance along the line. Two layouts are read:</p>
 <table class="grid">
 <tr><th>Rows</th><th>Meaning</th></tr>
 <tr><td>One row per receiver (trace)</td><td>Row 1 = trace 1, … (or a <i>Receiver number</i> column). Shots are placed from the headers, from a shot file, or at the geophones.</td></tr>
-<tr><td>One row per station along the tape</td><td>Shots and receivers share the table: one row per tape position, e.g. 171 rows for 0, 1 … 170 m (<code>SLF_Line_101_topo_0m.txt</code>). Receivers and shots take the row at their position. The first row is at the smallest shot or receiver position (or the position you type), and the rows are one receiver spacing apart (or the step you type). A <i>Station position</i> column can give the positions instead. A table with as many rows as stations, and a different number from the receivers, is recognised automatically.</td></tr>
+<tr><td>One row per station along the tape</td><td>Shots and receivers share the table: one row per tape position, e.g. 171 rows for 0, 1 … 170 m. Receivers and shots take the row at their position. The first row is at the smallest shot or receiver position (or the position you type), and the rows are one receiver spacing apart (or the step you type). A <i>Station position</i> column can give the positions instead. A table with as many rows as stations, and a different number from the receivers, is recognised automatically.</td></tr>
 </table>
 <h3 id="topo-apply">Applying a topography at any time</h3>
 <p><b>File &gt; Topography…</b> (Ctrl+T), <b>Data &gt; Apply a topography file…</b> or <i>Tools ▾</i> opens the topography window. The same controls are in group 3b of the import window. The window previews the new elevations and the change of every station's x against the headers. <b>Apply</b> replaces the geometry, and <b>Restore header geometry</b> goes back. Applying again replaces the earlier topography instead of adding to it.</p>
@@ -368,7 +373,7 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <p>A shot and a receiver count as the same station when they are at most this far apart. The tolerance decides which shot pairs are reciprocal (Δt, the checkerboard, the flags) and where the blue ✕ marks of the reciprocity guider appear on the canvas. A short explanation sits under the top bar of the window.</p>
 <ul>
 <li><i>auto (½ spacing)</i>, the default, pairs exact stations only.</li>
-<li>Raise it to about one receiver spacing to include a shot that sits between receivers or just beyond the spread. Line 101's shot 1 is at 0 m and the first receiver at 1 m, so at <i>auto</i> shot 1 has no pairs: its row and column of the checkerboard are blank and hatched, and the title names it. At 1 m it pairs with receiver 1. That pair's Δt then also contains the travel time across the 1 m (about 1–3 ms at 300–1000 m/s).</li>
+<li>Raise it to about one receiver spacing to include a shot that sits between receivers or just beyond the spread. Example: with shot 1 at 0 m and the first receiver at 1 m, at <i>auto</i> shot 1 has no pairs: its row and column of the checkerboard are blank and hatched, and the title names it. At 1 m it pairs with receiver 1. That pair's Δt then also contains the travel time across the 1 m (about 1–3 ms at 300–1000 m/s).</li>
 <li><i>on tape positions</i> compares picker positions. <i>on true distance along the line</i> compares the distances from the headers or the topography; use it when shots were surveyed off the geophones.</li>
 </ul>
 <p class="fig"><img src="images/qc_tab0.png" data-w="1600" alt="QC picks"><br><span class="cap">Figure 28. Picks (all shots): every pick of every shot on one canvas, coloured by shot position, with the shot on the picker canvas in black. Red rings flag picks whose reciprocal |Δt| exceeds the threshold. Right: the reciprocal-error map. The 9 ms segment of shot 7 shows as dark cells in row and column 7.</span></p>
@@ -435,13 +440,13 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 </table>
 <p>A typical picks folder after a few sessions:</p>
 <pre>picks/
-  SLF_101_displacement_picks.pkl            the picks (working file)
-  SLF_101_displacement_import.json          the import record
-  SLF_101_displacement_sessions/            one backup per session
-    SLF_101_displacement_session_20261124_093015.pkl
-    SLF_101_displacement_session_20261126_141002.pkl
-  SLF_101_exports/
-    SLF_101_SGT_xpositions.csv  SLF_101_pygimli.txt  SLF_101_pygimli_topo.txt ...
+  Line01_displacement_picks.pkl            the picks (working file)
+  Line01_displacement_import.json          the import record
+  Line01_displacement_sessions/            one backup per session
+    Line01_displacement_session_20261124_093015.pkl
+    Line01_displacement_session_20261126_141002.pkl
+  Line01_exports/
+    Line01_SGT_xpositions.csv  Line01_pygimli.txt  Line01_pygimli_topo.txt ...
     shots/shot_012/  reciprocity/  filters/  preprocessing/  sessions/ ...
     reciprocity_analysis/</pre>
 <h3 id="sessions">Session backups and continuing a session</h3>
@@ -455,25 +460,7 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 </ul>
 <p class="fig"><img src="images/session_resume.png" data-w="1150" alt="Continue a picking session"><br><span class="cap">Figure 2b. Continue a picking session? The working file and its session backups, with all picks of the selected row.</span></p>
 <h3 id="sgt">The S G T file of the end-of-session cells</h3>
-<p>The export window (<a href="#export">section 17</a>) replaces these cells; they are kept for scripts that use them. After picking, run the cells below <i>End of the picking session</i> one at a time. They:</p>
-<ol>
-<li>count the picked shots;</li>
-<li>sort the picks by shot;</li>
-<li>convert them to three columns;</li>
-<li>write the SGT file.</li>
-</ol>
-<p>The columns are:</p>
-<ul>
-<li><b>S</b>: the shot position + 1 (the convention of the earlier exports).</li>
-<li><b>G</b>: the receiver position + 1.</li>
-<li><b>T</b>: the first-arrival time in seconds after the time shift, with 0.1 ms resolution.</li>
-</ul>
-<p>The first rows for the example survey (true times) would be:</p>
-<pre>1.000000 1.000000 0.000000
-1.000000 3.000000 0.004400
-1.000000 5.000000 0.008900
-...</pre>
-<p>The import reads such a file back (and detects the convention), so you can continue picking from an exported SGT.</p>
+<p>The cells below <i>End of the picking session</i> still write the classic S G T file (S = shot position + 1, G = receiver position + 1, T in seconds, 0.1 ms resolution) for scripts that use it; the export window (<a href="#export">section 17</a>) replaces them. The import reads such a file back and detects its convention, so picking can continue from it.</p>
 
 <h2 id="export">17. Exporting picks for inversion</h2>
 <p><b>File &gt; Export picks for inversion…</b> (Ctrl+E), <i>Export</i> on the toolbar (beside <i>Save picks</i>), or <i>Tools ▾</i> opens the export window. Unfinished clicks or strokes on the canvas are finished first. The window shows the file as it will be written, updates the preview with every change, and lists what it left out and why.</p>
@@ -481,7 +468,7 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <h3 id="export-formats">The three formats</h3>
 <table class="grid">
 <tr><th>Format</th><th>Columns</th><th>Files</th></tr>
-<tr><td><b>S G T, station numbers</b></td><td><code>s g t</code>: s = station number of the geophone the shot was fired at; g = station number of the geophone; t = first-arrival time. Numbers count along the receiver grid from the first station (shot or receiver) = 1. For Line 101 (shot 1 one metre before receiver 1) this gives shot 1 = 1, receiver 1 = 2, …, the convention of the earlier exports and of pyGIMLi.</td><td>.txt or .csv, any delimiter</td></tr>
+<tr><td><b>S G T, station numbers</b></td><td><code>s g t</code>: s = station number of the geophone the shot was fired at; g = station number of the geophone; t = first-arrival time. Numbers count along the receiver grid from the first station (shot or receiver) = 1. For example, with shot 1 one metre before receiver 1 this gives shot 1 = 1, receiver 1 = 2, …, the convention of the earlier exports and of pyGIMLi.</td><td>.txt or .csv, any delimiter</td></tr>
 <tr><td><b>S G T, x positions</b></td><td><code>s g t</code>: s and g are the x of the shot and the geophone along the 2D line in metres (from the headers or the topography file), t the time. Shots need not sit on geophones.</td><td>.txt or .csv, any delimiter</td></tr>
 <tr><td><b>pyGIMLi data file</b></td><td>The pyGIMLi unified data format (see below): a table of sensor positions, then <code>s g t</code> with s and g pointing into that table, plus optional <code>err</code> and <code>valid</code>.</td><td>.txt or .dat, space or tab</td></tr>
 </table>
@@ -505,7 +492,7 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <li>Line 1: the number of sensors. Then one row per sensor: x along the line and y = elevation (pyGIMLi's 2D convention: y is the vertical). <i>x y z</i> writes a third column z = 0 instead.</li>
 <li>Shots and geophones share <b>one</b> sensor table without duplicates: a shot fired at a geophone is that geophone's row; a shot beyond the spread gets its own row. The rows are sorted by x.</li>
 <li>Then the number of data and a token line <code>#s g t err valid</code>. <b>s</b> and <b>g</b> are row numbers of the sensor table, counted from 1 (pyGIMLi counts from 0 internally and converts). <b>t</b> is in seconds.</li>
-<li><b>err</b> (optional) is the absolute error of t in seconds: <i>a</i> ms + <i>b</i> ms × offset / line length + <i>c</i> % of t. The line length is the span from the first to the last exported shot, as in <code>convertPicks2Gimli</code>. The defaults (1 ms + 3 ms × offset / line length) are the script's <code>minError</code> = 0.001 and <code>maxError</code> = 0.003: 1 ms at zero offset, 4 ms at the far end.</li>
+<li><b>err</b> (optional) is the absolute error of t in seconds: <i>a</i> ms + <i>b</i> ms × offset / line length + <i>c</i> % of t. The line length is the span from the first to the last exported shot. The defaults (1 ms + 3 ms × offset / line length) give 1 ms at zero offset and 4 ms at the far end.</li>
 <li><b>valid</b> (optional) writes 1 for every row.</li>
 <li>The final <code>0</code> says there is no topology section, as pyGIMLi writes its own files.</li>
 </ul>
@@ -518,7 +505,7 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <tr><td>Time unit, decimals</td><td>Seconds (pyGIMLi) or milliseconds for the S G T formats. Picks are 0.1 ms apart, so 4 decimals in seconds are exact; 5 is the default.</td></tr>
 <tr><td>Shot x / elevation</td><td><i>At the geophone of the shot position</i> (default): a shot fired at a geophone uses that geophone's x and elevation, so both are one sensor. <i>At the surveyed shot coordinates</i>: every shot keeps its own x and elevation; one closer than the tolerance to a geophone shares its row.</td></tr>
 <tr><td>x origin</td><td><i>Tape origin</i> (default): x = 0 at tape position 0 m, normally the first shot (<a href="#tape">section 4</a>). Or: as in the geometry (the first receiver is at 0 when the distances come from the headers), the smallest x at 0, or the first receiver at 0.</td></tr>
-<tr><td>Companion files</td><td><code>&lt;name&gt;_topo.txt</code>: x and elevation of every sensor, the topography file of the inversion script (same x as the export). <code>&lt;name&gt;_line_ends.txt</code>: map coordinates of x = 0 (SoL) and of the end of the line (EoL) on the straight line through the receivers, for placing the inversion results on the map; written only when map coordinates are known.</td></tr>
+<tr><td>Companion files</td><td><code>&lt;name&gt;_topo.txt</code>: x and elevation of every sensor, a topography file with the same x as the export. <code>&lt;name&gt;_line_ends.txt</code>: map coordinates of x = 0 (SoL) and of the end of the line (EoL) on the straight line through the receivers, for placing the inversion results on the map; written only when map coordinates are known.</td></tr>
 <tr><td>Numbering starts at</td><td>Station numbers: the first station (shot or receiver) or the first receiver, with the number you choose (1 by default).</td></tr>
 <tr><td>Shots</td><td>All, or a list such as <code>1-5, 9</code>.</td></tr>
 <tr><td>Zero offset</td><td>Picks at shot = geophone are left out by default (their time is 0).</td></tr>
@@ -528,14 +515,12 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <p class="fig"><img src="images/export_offset.png" data-w="1450" alt="x positions"><br><span class="cap">Figure 38. S G T with x positions along the line (comma-delimited .csv). Shot 1 lies at the first receiver.</span></p>
 <h3 id="export-check">The check after writing</h3>
 <p>After writing, the window reads the file back and compares it with what it meant to write: S G T files with <code>numpy.loadtxt</code>, pyGIMLi files with pyGIMLi itself when it is installed (otherwise with a built-in reader of the same format). The result is shown under the preview and printed in the console. The file is first written under a temporary name and renamed when complete, so an interrupted export never leaves half a file.</p>
-<table class="note"><tr><td><b>Checked against the inversion script.</b> With <code>SLF_Line_101_topo_0m.txt</code> applied as a station table, the x-position export of the same picks reproduces <code>SLF_Line_101_picks_V2.txt</code> exactly (2301 rows), and the companion <code>_topo.txt</code> reproduces the topography file. The pyGIMLi export equals what <code>convertPicks2Gimli(picks, topo, 0.001, 0.003)</code> of <code>StreamLineInversion_SLF_Line_101.py</code> writes: the same sensors, s, g, t and err. From the headers alone, x agrees within 0.2 mm and the elevation of shot 1 differs by 5 cm (692.80 m in the header, 692.75 m in the file).<br><br>Two things about the script itself. <code>convertPicks2Gimli</code> writes the last pick of the file twice: the file ends with a newline, and for that empty line the check that appends a pick still runs with the previous values. Moving the <code>if tPick &gt; 0 and xPick != sPick:</code> block inside <code>if tmpString != '':</code> fixes it. And <code>np.row_stack</code> no longer exists in recent NumPy 2 releases; <code>np.vstack</code> does the same.</td></tr></table>
-<table class="note"><tr><td><b>Earlier Line 101 pyGIMLi file.</b> Exported from the same picks, all three formats give exactly the same 2302 s–g–t rows as <code>SLF_line_101_gimliInput.txt</code>. The sensor table differs: that file gave sensor <i>k</i> the coordinates of receiver <i>k</i>, while its data used <i>k</i> = position + 1. So every sensor sat one station (about 1 m) along the line from its true place, and each elevation was paired with the neighbouring station. The offsets were nearly the same. The export writes every sensor at its own surveyed position, as <code>SLF_Line_101_topo_0m.txt</code> does.</td></tr></table>
 
 <h2 id="figures">18. Figures for papers and slides</h2>
-<p>Every plot has <b>⤓ Export</b> at the right end of its toolbar: the picking canvas, the reciprocity map, <i>Picks (all shots)</i> and the checkerboard, the filter response and before / after preview, the preprocessing spectra and preview, the auto-pick previews, the import, geometry and spectra plots, and the session window. The export window is the same as FWI Studio's:</p>
+<p>Every plot has <b>⤓ Export</b> at the right end of its toolbar: the picking canvas, the reciprocity map, <i>Picks (all shots)</i> and the checkerboard, the filter response and before / after preview, the preprocessing spectra and preview, the auto-pick previews, the import, geometry and spectra plots, and the session window. The export window:</p>
 <table class="grid">
 <tr><th>Field</th><th>Meaning</th></tr>
-<tr><td>Prefix</td><td>Start of every file name, by default the line name (e.g. <code>SLF_101</code>); remembered for the line.</td></tr>
+<tr><td>Prefix</td><td>Start of every file name, by default the line name (e.g. <code>Line01</code>); remembered for the line.</td></tr>
 <tr><td>Name</td><td>Proposed from the window (e.g. <code>shot_012_displacement</code>, <code>reciprocity_map</code>, <code>filter_response</code>).</td></tr>
 <tr><td>Format</td><td><b>png</b>, <b>tiff</b> (LZW) or <b>jpg</b>: pixels at the chosen dpi; <b>pdf</b>, <b>svg</b> or <b>eps</b>: vector, sharp at any zoom (svg opens in Inkscape or Illustrator for labels).</td></tr>
 <tr><td>Resolution</td><td>300 dpi for journal figures, 600 dpi for line art; 150 dpi is enough for slides.</td></tr>
@@ -549,24 +534,23 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <p class="fig"><img src="images/figure_export_dialog.png" data-w="738" alt="Export figure"><br><span class="cap">Figure 18. The export window: double column at 300 dpi as a PDF, the picking canvas without its controls.</span></p>
 
 <h2 id="inversion">19. Travel-time inversion (pyGIMLi)</h2>
-<p><b>Inversion &gt; Travel-time inversion (pyGIMLi)…</b> (Ctrl+I; also in <i>Tools</i> and on the toolbar) opens the inversion window. It follows <code>StreamLineInversion_SLF_Line_101.py</code> and the Monte Carlo scripts step by step (data, error model, mesh, inversion, result files) and adds a live view of every iteration. Its layout is FWI Studio's: numbered tabs, a run in a process of its own, live results.</p>
-<p>The window can also be opened without a picking session: <code>python run_inversion.py SLF_101_pygimli.txt</code>.</p>
+<p><b>Inversion &gt; Travel-time inversion (pyGIMLi)…</b> (Ctrl+I; also in <i>Tools</i> and on the toolbar) opens the inversion window: data and error model, mesh, inversion with a live view of the misfit and the model, statistics and result files, in numbered tabs. Each run goes in a process of its own.</p>
+<p>The window can also be opened without a picking session: <code>python run_inversion.py Line01_pygimli.txt</code>.</p>
 <h3 id="inv-data">Tab 0: data and errors</h3>
 <ul>
 <li><b>Data</b>: a pyGIMLi data file (sensors + <code>s g t</code>), by default the newest pyGIMLi export in the exports folder. <b>Use the current picks</b> writes the picks to <code>&lt;line&gt;_exports/&lt;line&gt;_pygimli_for_inversion.txt</code> with the export window's last pyGIMLi settings, the topography and the line ends, and uses that file.</li>
-<li><b>Remove t ≤ 0</b>, as the scripts (<code>data.remove(data['t'] &lt;= 0)</code>).</li>
-<li><b>Error model</b>: <i>min + max × offset / L</i> (the scripts' <code>add_error_to_sgt</code>, defaults 0.5 and 2 ms), <i>absolute + relative %</i>, or the file's own <code>err</code> column. L is the shot span (as <code>convertPicks2Gimli</code>), the sensor span or a value you type.</li>
+<li><b>Remove t ≤ 0</b>: pyGIMLi needs positive travel times.</li>
+<li><b>Error model</b>: <i>min + max × offset / L</i> (defaults 0.5 and 2 ms), <i>absolute + relative %</i>, or the file's own <code>err</code> column. L is the shot span (first to last shot), the sensor span or a value you type.</li>
 <li>The plots show every travel time against x, coloured by shot, and the error against offset. The text gives the counts, extents, error range and the apparent velocities (offset / t) at short and long offsets as a guide for the starting model.</li>
 </ul>
-<table class="note"><tr><td><b>Corrected here.</b> In <code>add_error_to_sgt</code> of the Monte Carlo scripts, the offset is taken between <code>geoLocs[g - 1]</code> and <code>geoLocs[s - 1]</code>. pyGIMLi already numbers s and g from 0, so every pick got the offset of the neighbouring sensor pair: on Line 101 up to 168 m wrong, with the error weights wrong accordingly. The line length was the 3-D diagonal of the sensor box. The window uses <code>geoLocs[g]</code>, <code>geoLocs[s]</code> and the shot span.</td></tr></table>
 <p class="fig"><img src="images/inv_tab_data.png" data-w="1550" alt="Inversion: data"><br><span class="cap">Figure 19a. Tab 0 on the synthetic survey: the travel times by shot and the error model.</span></p>
 <h3 id="inv-mesh">Tab 1: mesh</h3>
 <p>The parameter mesh of <code>TravelTimeManager.createMesh</code> is built as you change a value (or with <b>Build mesh</b>):</p>
 <table class="grid">
 <tr><th>Field</th><th>pyGIMLi</th><th>Meaning</th></tr>
-<tr><td>Depth</td><td><code>paraDepth</code></td><td>Depth of the model below the surface (scripts: 17.5 m; 0 = automatic).</td></tr>
+<tr><td>Depth</td><td><code>paraDepth</code></td><td>Depth of the model below the surface (0 = automatic).</td></tr>
 <tr><td>Surface spacing</td><td><code>paraDX</code></td><td>Node spacing at the surface, relative to the sensor spacing (0.1 = ten nodes per spacing).</td></tr>
-<tr><td>Largest cell</td><td><code>paraMaxCellSize</code></td><td>Largest triangle in m² (the scripts' <code>maxTriArea</code>, 1 m²).</td></tr>
+<tr><td>Largest cell</td><td><code>paraMaxCellSize</code></td><td>Largest triangle in m² (often called maxTriArea).</td></tr>
 <tr><td>Margin</td><td><code>paraBoundary</code></td><td>Model beyond the first and last sensor (m).</td></tr>
 <tr><td>Quality</td><td><code>quality</code></td><td>Smallest triangle angle.</td></tr>
 <tr><td>Secondary nodes</td><td><code>secNodes</code></td><td>Extra nodes per edge for the ray tracing (more accurate, slower).</td></tr>
@@ -577,11 +561,11 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <h3 id="inv-run">Tab 2: inversion and live results</h3>
 <table class="grid">
 <tr><th>Field</th><th>pyGIMLi</th><th>Meaning</th></tr>
-<tr><td>Smoothing</td><td><code>lam</code></td><td>Weight of the smoothness: larger = smoother (scripts: 30 and 80).</td></tr>
-<tr><td>Vertical weight</td><td><code>zWeight</code></td><td>0–1: small values allow lateral changes (scripts: 0.1).</td></tr>
+<tr><td>Smoothing</td><td><code>lam</code></td><td>Weight of the smoothness: larger = smoother (typically 10–100).</td></tr>
+<tr><td>Vertical weight</td><td><code>zWeight</code></td><td>0–1: small values allow lateral changes (e.g. 0.1).</td></tr>
 <tr><td>Start: v at the top / bottom</td><td><code>vTop</code>, <code>vBottom</code></td><td>The gradient starting model.</td></tr>
-<tr><td>Lowest / highest v allowed</td><td><code>limits</code></td><td>Bounds of the model (scripts: 100–3000 m/s).</td></tr>
-<tr><td>Iterations</td><td><code>maxIter</code></td><td>Most iterations (scripts: 20); usually the inversion converges earlier.</td></tr>
+<tr><td>Lowest / highest v allowed</td><td><code>limits</code></td><td>Bounds of the model velocities.</td></tr>
+<tr><td>Iterations</td><td><code>maxIter</code></td><td>Most iterations (e.g. 20); usually the inversion converges earlier.</td></tr>
 <tr><td>Stop at chi² ≤ 1</td><td><code>stopAtChi1</code></td><td>Stop once the data are fitted within their errors (on by default, as in pyGIMLi).</td></tr>
 <tr><td>Stop when dPhi &lt;</td><td><code>dPhi</code></td><td>Stop when the objective function Φ (data misfit plus regularization) changes by less than this between iterations (default 1 %; pyGIMLi checks it from iteration 3). The dPhi shown in the log and the plots is this one, as pyGIMLi prints it.</td></tr>
 <tr><td>RMS goal</td><td></td><td>The RMS misfit aimed at (default 2 ms): drawn in the plots and checked in the summary; it does not stop the inversion.</td></tr>
@@ -592,13 +576,13 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <p><b>▶ Run inversion</b> starts the inversion in a process of its own: the picker and this window stay responsive, and the run goes on when the window or the picker is closed. Open the window again and choose the run in the <b>Run</b> list to follow it. <b>■ Stop</b> ends it after the current iteration and still writes the last model. During the run the right side shows chi² (log scale) and the RMS misfit for each iteration, with chi² = 1 and the RMS goal as dotted lines, and the latest model. Only the latest model is written while it runs, and the final one afterwards; tick <b>keep the model of every iteration</b> to step through all of them with the slider later. <b>Ray paths</b> (a few MB) can be left out.</p>
 <p class="fig"><img src="images/inv_tab_run_live.png" data-w="1550" alt="Inversion: running"><br><span class="cap">Figure 19c. Tab 2 during a run: misfit per iteration and the model of the latest iteration.</span></p>
 <h3 id="inv-stats">Tab 3: inversion stats</h3>
-<p>Six panels for the chosen run: chi² and RMS per iteration; the change of the objective function (dPhi) per iteration with the stopping limit; the RMS misfit per shot, with the largest labelled (shots to check or reprocess, as the scripts' <code>calculate_shotwise_misfit</code>); observed against modelled times; residuals against offset with the error band; and the fit of one shot (chosen above the plot, the worst first).</p>
+<p>Six panels for the chosen run: chi² and RMS per iteration; the change of the objective function (dPhi) per iteration with the stopping limit; the RMS misfit per shot, with the largest labelled (shots to check or reprocess); observed against modelled times; residuals against offset with the error band; and the fit of one shot (chosen above the plot, the worst first).</p>
 <p class="fig"><img src="images/inv_tab_stats.png" data-w="1550" alt="Inversion stats"><br><span class="cap">Figure 19d. Tab 3: convergence, misfit per shot, data fit and residuals.</span></p>
 <h3 id="inv-model">Tab 4 and the model viewer</h3>
 <p>Tab 4 shows the final model masked below the depth of investigation, the list of result files and <b>Open model viewer…</b>, a separate window with every display setting. Its settings are in seven sections on the left whose titles are always visible; click a title to open that section:</p>
 <table class="grid">
 <tr><th>Group</th><th>Settings</th></tr>
-<tr><td>Model</td><td>Field: P-wave velocity, vertical gradient (−dV/dz, as the scripts' <code>-vertGrad[:, 1]</code>), horizontal gradient, ray coverage (log10), standardized coverage; any iteration (slider). Display on the mesh cells, or regridded and smoothed: grid dx, dy, Gaussian lengths along and across in metres, interpolation, number of colour levels.</td></tr>
+<tr><td>Model</td><td>Field: P-wave velocity, vertical gradient (−dV/dz), horizontal gradient, ray coverage (log10), standardized coverage; any iteration (slider). Display on the mesh cells, or regridded and smoothed: grid dx, dy, Gaussian lengths along and across in metres, interpolation, number of colour levels.</td></tr>
 <tr><td>Colours and contours</td><td>Colour map, limits (empty = automatic; gradients centred on zero), contour lines at given values with labels.</td></tr>
 <tr><td>Coverage mask</td><td>None; depth of investigation (the deepest cell with standardized coverage 1, per bin along the line, smoothed) with a buffer below; standardized coverage = 1; or log10 coverage above a threshold. The depth of investigation can be drawn as a line.</td></tr>
 <tr><td>Ray paths</td><td>On / off, colour, width, opacity, every n-th ray.</td></tr>
@@ -607,7 +591,7 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <tr><td>Axes</td><td>Title, axis labels, limits, vertical exaggeration (<i>fill the window</i> by default; 1 = true scale for a paper), grid lines, font size.</td></tr>
 </table>
 <p><b>⤓ Export</b> saves the figure for the paper (<a href="#figures">section 18</a>), into <code>&lt;line&gt;_exports/inversion/</code>. <b>Export grid (CSV)</b> writes the regridded, smoothed and masked values. <b>Save view / Load view</b> keep every setting in a JSON file, so the figures of several runs look the same.</p>
-<table class="note"><tr><td><b>Smoothing near the edges.</b> The notebook's <code>interpolate_to_grid</code> fills the grid by nearest neighbour and then smooths, so values from outside the model (above the surface, below the bottom) are mixed into the edge. The viewer smooths only inside the model (normalised convolution) and masks afterwards.</td></tr></table>
+<p>Smoothing is done inside the model only and the mask is applied afterwards, so values from above the surface or below the model are not mixed into its edges.</p>
 <p class="fig"><img src="images/model_viewer.png" data-w="1500" alt="Model viewer"><br><span class="cap">Figure 19e. The model viewer: regridded and smoothed velocity below the depth of investigation, rays, contour lines and a borehole marker.</span></p>
 <h3 id="inv-files">Run folders and files</h3>
 <p>Each run gets a folder <code>&lt;picks&gt;/&lt;line&gt;_inversion/run_&lt;date&gt;_&lt;time&gt;[_label]/</code>:</p>
@@ -617,19 +601,19 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <tr><td><code>status.json</code>, <code>history.csv</code>, <code>run.log</code></td><td>State while it runs; chi², RMS, dPhi, lambda and time per iteration; the log.</td></tr>
 <tr><td><code>final.npz</code></td><td>Velocity of every cell and the modelled times of the final model (<code>latest.npz</code> while it runs).</td></tr>
 <tr><td><code>iterations/iter_000.npz</code> …</td><td>Only with <i>keep the model of every iteration</i>.</td></tr>
-<tr><td><code>&lt;line&gt;_inversion_summary.txt</code></td><td>As the scripts, with the iterations actually done (the scripts printed <code>maxIter</code>).</td></tr>
+<tr><td><code>&lt;line&gt;_inversion_summary.txt</code></td><td>Settings, chi², RMS, iterations done and why the run stopped.</td></tr>
 <tr><td><code>&lt;line&gt;_Inverted_Model.csv</code></td><td>x, y, z, velocity, Vertical_vel_gradient, Horizontal_vel_gradient, coverage (standardized), coverage_raw, coverage_log10 per cell.</td></tr>
 <tr><td><code>&lt;line&gt;_Modeled_VS_Obs_TravelTimes.csv</code></td><td>Observed and modelled time, s, g, offset, residual and error per pick.</td></tr>
 <tr><td><code>&lt;line&gt;_shot_misfit.csv</code>, <code>&lt;line&gt;_ray_paths.pkl</code></td><td>RMS misfit and number of picks per shot; the ray paths.</td></tr>
-<tr><td><code>&lt;line&gt;_VTK_local.vtk</code>, <code>&lt;line&gt;_VTK_UTM.vtk</code></td><td>For ParaView; the UTM copy uses the line ends (SoL, EoL) from the export's <code>_line_ends.txt</code>, as <code>spatiallyLocateVTKFile</code>.</td></tr>
+<tr><td><code>&lt;line&gt;_VTK_local.vtk</code>, <code>&lt;line&gt;_VTK_UTM.vtk</code></td><td>For ParaView; the UTM copy uses the line ends (SoL, EoL) from the export's <code>_line_ends.txt</code>.</td></tr>
 </table>
-<p>Without a window, e.g. on a cluster: <code>python inversion_runner.py --data SLF_101_pygimli.txt --out runs --lam 30 --max-iter 20</code> makes the same run folder.</p>
+<p>Without a window, e.g. on a cluster: <code>python inversion_runner.py --data Line01_pygimli.txt --out runs --lam 30 --max-iter 20</code> makes the same run folder.</p>
 
 <h2 id="monte-carlo">20. Monte Carlo uncertainty</h2>
-<p>Tab <b>5 Monte Carlo</b> of the inversion window repeats the inversion of tabs 0–2 many times, each time with a different starting model (vTop, vBottom) and, if you want, with randomly perturbed picks. The runs share one mesh, so they can be compared cell by cell, and they run in parallel on several CPU cores. Afterwards the ensemble and bootstrap statistics show how much of the model depends on the starting model and the picks, and how well the mean model is determined. The workflow is that of <code>monte_carlo_inversion_SLF_Line_101_*_ARC.py</code> and <code>MC_inversions_post_processing_SLF_line_101.ipynb</code>.</p>
+<p>Tab <b>5 Monte Carlo</b> of the inversion window repeats the inversion of tabs 0–2 many times, each time with a different starting model (vTop, vBottom) and, if you want, with randomly perturbed picks. The runs share one mesh, so they can be compared cell by cell, and they run in parallel on several CPU cores. Afterwards the ensemble and bootstrap statistics show how much of the model depends on the starting model and the picks, and how well the mean model is determined.</p>
 <h3 id="mc-setup">a: Setup</h3>
 <ul>
-<li><b>Starting models</b>: a table of vTop and vBottom that you can type into, with <b>+ Row</b>, <b>− Selected</b> and <b>Clear</b>. <b>Load csv / txt…</b> reads a table with any delimiter (comma, semicolon, tab, spaces), with or without a header; columns named like <code>Vp_top</code> / <code>Vp_bottom</code> are found, otherwise the first two numeric columns are used. Your <code>initial_model_perturbations.csv</code> (46 models) loads as it is. <b>Save…</b> writes the table.</li>
+<li><b>Starting models</b>: a table of vTop and vBottom that you can type into, with <b>+ Row</b>, <b>− Selected</b> and <b>Clear</b>. <b>Load csv / txt…</b> reads a table with any delimiter (comma, semicolon, tab, spaces), with or without a header; columns named like <code>Vp_top</code> / <code>Vp_bottom</code> are found, otherwise the first two numeric columns are used. <b>Save…</b> writes the table.</li>
 <li><b>Generate</b>: a <i>grid</i> (every vTop with every vBottom, n values each) or a <i>Latin hypercube</i> (n models spread evenly over both ranges, repeatable with a seed), optionally only with vBottom &gt; vTop; replace or add to the table.</li>
 <li><b>Pick perturbations</b>: none, Gaussian with sigma = scale × the pick error, Gaussian with sigma in ms, or uniform ± ms, and the number of realizations per starting model. The errors stay those of the original picks. Each run draws its own noise from the seed and its model and realization numbers, so a set can be repeated exactly.</li>
 <li><b>Worker processes</b>: how many inversions run at once (default: the number of CPU cores less one). Each pyGIMLi inversion is serial; the worker processes use one thread each, so the cores are not oversubscribed.</li>
@@ -652,9 +636,9 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <tr><td>Bootstrap standard error of the mean</td><td>The spread of the mean over bootstrap resamples of the models (with replacement): how well the mean model is determined. It shrinks like 1/√N with more runs.</td></tr>
 <tr><td>Mean coverage</td><td>Mean standardized coverage of the runs.</td></tr>
 <tr><td>Sensitivity to vTop / vBottom, R²</td><td>A linear fit v = c0 + c1 vTop + c2 vBottom per cell: the change of the velocity per 100 m/s of the starting velocities, and how much of the differences the starting model explains.</td></tr>
-<tr><td>Run closest to the mean</td><td>The run with the smallest RMS difference to the mean where the rays reach (the notebook's optimal initial model).</td></tr>
+<tr><td>Run closest to the mean</td><td>The run with the smallest RMS difference to the mean where the rays reach.</td></tr>
 </table>
-<table class="note"><tr><td><b>Corrected here.</b> The notebook's <code>bootstrap_mc_analysis</code> reported the standard deviation of the bootstrap <i>means</i> as the model uncertainty. With N runs that is the spread of the models divided by about √N (46 runs: about 6.8 times smaller). Both are shown here, labelled; the summary gives their ratio. The per-point Python loops are vectorised (a second instead of minutes).</td></tr></table>
+<table class="note"><tr><td><b>Spread or standard error?</b> The bootstrap standard error of the mean is the spread of the models divided by about √N (46 runs: about 6.8 times smaller). It tells how well the mean model is determined, not how uncertain the velocities are; report the spread (std or percentile interval) as the model uncertainty. The summary gives their ratio.</td></tr></table>
 <p><b>Compute and save statistics</b> writes <code>analysis/uncertainty_results.csv</code> (x, y and every field per cell), <code>analysis/summary_statistics.json</code> (the summary and every run with its use) and <code>analysis/ensemble.npz</code> (all models). The diagnostics show the chi² of the runs (used and left out), chi² over the starting models, and the spread and the standard error with depth. <b>Open in the model viewer…</b> offers every statistic as a field of the model viewer (<a href="#inv-model">section 19</a>): smoothing, mask, colours, axes, legend and export.</p>
 <p class="fig"><img src="images/mc_stats.png" data-w="1550" alt="Monte Carlo statistics"><br><span class="cap">Figure 20d. Statistics of a set: the spread of the models below the depth of investigation, and the diagnostics.</span></p>
 <h3 id="mc-files">Set folders</h3>
@@ -718,21 +702,20 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <h2 id="history">23. Version history</h2>
 <table class="grid">
 <tr><th>Version</th><th>Main changes</th></tr>
-<tr><td>v1–v4</td><td>Filters merged (minimum-phase FIR, zero-phase FIR, IIR), balanced wiggles, filter designer with live preview, resampling ×10 for picking.</td></tr>
-<tr><td>v5</td><td>Live reciprocity window with robust shot offsets and flags.</td></tr>
-<tr><td>v6–v7</td><td>Preprocessing window, quantity switch, menus and toolbar, log gain slider to 200, deleting picks on a receiver, Prev / Next.</td></tr>
-<tr><td>v8–v9</td><td>SEG-Y import window (headers, geometry, time zero, automatic names, import record), continuing from .pkl or SGT, filter timing presets.</td></tr>
+<tr><td>v22</td><td>pyGIMLi stopping criteria (chi² ≤ 1, dPhi limit) with the reason shown; RMS goal; only the final model written by default; start and allowed velocities on the mesh tab; readable plots; model viewer settings in sections; exports fitted to the page; the wheel changes a field only after a click.</td></tr>
+<tr><td>v21</td><td>Monte Carlo uncertainty: starting models typed, generated or loaded; pick perturbations; parallel runs; ensemble and bootstrap statistics.</td></tr>
+<tr><td>v20</td><td>Travel-time inversion with pyGIMLi: error model, live mesh, runs in their own process with live misfit and model, inversion statistics, model viewer. v20.1: works on Python 3.10–3.11.</td></tr>
+<tr><td>v19</td><td>Export button on every plot; one exports folder per line; session backups of the pick file with a resume window; start from a terminal (<code>run_picker.py</code>).</td></tr>
+<tr><td>v18</td><td>Topography at any time, station tables, x = 0 at tape position 0 m; companion topography and line-end files; reciprocity station-match tolerance.</td></tr>
+<tr><td>v17</td><td>Export window (S G T with station numbers or x positions; pyGIMLi data files, checked after writing); Seismic Unix import; topography files; writing the geometry into the headers; offset x axis.</td></tr>
+<tr><td>v16</td><td>One undo / redo history for every pick edit; “Delete picks”.</td></tr>
+<tr><td>v15</td><td>Polarity switches beside every gain; delete picks in receiver ranges; zoom fixes.</td></tr>
+<tr><td>v14</td><td>Default filter: minimum-phase 10–80 Hz with a 199 Hz notch.</td></tr>
+<tr><td>v13</td><td>This manual, inside the program (F1) and as a PDF.</td></tr>
+<tr><td>v12</td><td>File menu with import from the picker; trace ranges; spectra corrected for the sensor response.</td></tr>
+<tr><td>v11</td><td>Automatic picking (STA/LTA, MER, AIC, post-processing); shot spectra.</td></tr>
 <tr><td>v10</td><td>Display settings, time axis in ms, Reciprocity and pick QC with all picks, delete mode, undo / redo.</td></tr>
-<tr><td>v11</td><td>Automatic picking (STA/LTA, MER, original routine; AIC; post-processing) with live preview; shot spectra.</td></tr>
-<tr><td>v12</td><td>File menu with import from the picker; trace ranges; gain in every preview; spectra corrected for the sensor response.</td></tr>
-<tr><td>v13</td><td>This manual: built into the picker (Help menu, F1, side panel) and as a PDF.</td></tr>
-<tr><td>v22</td><td>Inversion: pyGIMLi's stopping criteria (chi² ≤ 1 on by default, dPhi of the objective function below a limit, default 1 %), the reason in the status, summary and stats; RMS goal line. Only the latest and final models are written (every iteration on request); ray paths optional; Monte Carlo runs keep only what the statistics need. Start and allowed velocities on the mesh tab. Readable plots (screen dpi, larger text and lines; models fill the window). Model viewer settings in seven sections with visible titles. Figure export: automatic text size for the page and <i>fit the layout to the page</i> (wrapped titles, thinned tick labels). The scroll wheel changes spin boxes, drop-downs and sliders only after they are clicked (as FWI Studio; File menu switch).</td></tr>
-<tr><td>v21</td><td>Monte Carlo uncertainty (Inversion window, tab 5): starting models typed, generated (grid or Latin hypercube) or read from csv / txt with any delimiter; pick perturbations; a chart of every starting model; parallel runs on a chosen number of worker processes in their own process, with stop and carry on; ensemble and bootstrap statistics (mean, median, spread, CV, percentile interval, bootstrap standard error of the mean, coverage, sensitivity to vTop / vBottom, run closest to the mean) with acceptance by chi² / RMS, saved to the set's analysis folder and shown in the model viewer. Corrected from the post-processing notebook: the bootstrap standard error is no longer reported as the model uncertainty; vectorised statistics. v20.1: the Inversion menu works on Python 3.10 and 3.11.</td></tr>
-<tr><td>v20</td><td>Travel-time inversion with pyGIMLi (Inversion menu, Ctrl+I; <code>run_inversion.py</code>): data and error model, live mesh with boundary markers, sensors and starting model, the scripts' parameters, runs in their own process with live misfit and the model of every iteration, inversion stats (convergence, dPhi, misfit per shot, data fit), and a model viewer window (rays, coverage mask / depth of investigation, regridding and smoothing, gradients, contours, colour bar, axes, legend, markers). Result files as the scripts, plus history and every iteration. Corrected from the scripts: error offsets (0-based sensors), line length, iterations in the summary. GitHub: automatic tests on every push; SGT files with station numbers read back on any receiver spacing; <code>environment.yml</code>.</td></tr>
-<tr><td>v19</td><td>⤓ Export on every plot (FWI Studio's export window: prefix, sizes in cm, dpi, font and line scale, png / tiff / pdf / svg / eps, main plot only). One exports folder per line (<code>&lt;line&gt;_exports</code>) for figures, the export window's files, reports and the SGT file. Session backups of the pick file and the <i>Continue a picking session?</i> window with all picks of each session. Start from a terminal or the Anaconda Prompt (<code>python run_picker.py</code>); pyGIMLi is required; segypy and bruges optional.</td></tr>
-<tr><td>v18</td><td>Topography at any time (File &gt; Topography, Ctrl+T; Data; Tools) without moving picks, with preview and restore. Station tables: one row per tape station, shots and receivers together (recognised automatically). x = 0 at tape position 0 m (the first shot) in the offset view and the export. Export: companion topography and line-end files; err line length = shot span and t ≤ 0 left out, as in <code>convertPicks2Gimli</code>; checked against that script. Reciprocity: station match tolerance in the QC window, shared with the canvas guider; the guider uses the pick at the shot, not the first within 1 m; shots without a receiver are hatched on the checkerboard.</td></tr>
-<tr><td>v17</td><td>Export window (S G T with station numbers or x positions, any delimiter; pyGIMLi data files with err / valid; checked after writing). Seismic Unix (.su) import. Topography files (csv, txt, xls, xlsx) for receivers and shots, or shots at the geophones. Writing the geometry into the trace headers with a backup. Index / offset x axis on the canvas.</td></tr>
-<tr><td>v16</td><td>One undo / redo history for every pick edit (u, Ctrl+Z / Ctrl+Y; unfinished strokes one at a time); no wheel zoom while dragging; “Delete picks” everywhere (was “void”); fix: a second delete range no longer fails.</td></tr>
-<tr><td>v15</td><td>Polarity switch beside every preview gain; Delete-mode zoom fixes (r no longer jumps to an old view, no flash after deleting); delete picks in typed receiver ranges; larger MODE / GAIN boxes and legend.</td></tr>
-<tr><td>v14</td><td>Default filter back to the original configuration (minimum-phase 10–80 Hz, notch 199 Hz); 10–150 Hz kept as the <i>Wider band</i> preset.</td></tr>
+<tr><td>v8–v9</td><td>Import window (headers, geometry, time zero, automatic names, import record); continuing from a pick file or S G T.</td></tr>
+<tr><td>v5–v7</td><td>Reciprocity window; preprocessing; menus and toolbar; gain slider; Prev / Next.</td></tr>
+<tr><td>v1–v4</td><td>Filters (minimum-phase, zero-phase, IIR), balanced wiggles, filter designer, resampling for picking.</td></tr>
 </table>

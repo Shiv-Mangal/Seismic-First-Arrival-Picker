@@ -2,8 +2,7 @@
 """
 wheel_guard.py  (v22)
 =====================
-The scroll wheel / trackpad no longer changes a value just by passing over it (as in FWI
-Studio). Spin boxes (cut-offs, transition widths, gains, ...), drop-downs and sliders take
+The scroll wheel / trackpad no longer changes a value just by passing over it. Spin boxes (cut-offs, transition widths, gains, ...), drop-downs and sliders take
 wheel steps only after you click them (or reach them with Tab); otherwise the wheel scrolls
 the panel underneath as if the widget were not there. When a panel starts scrolling, a
 clicked widget inside it lets go, so momentum scrolling cannot change it either.

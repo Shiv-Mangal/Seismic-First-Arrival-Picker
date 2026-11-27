@@ -49,7 +49,7 @@ PAGE = 24                                  # starting models per page of the ini
 
 
 def _best_columns(n, fig_w, fig_h, box, cbar=0.0, label=0.12):
-    """Columns that give the largest panels (as FWI Studio's models tab)."""
+    """Columns that give the largest panels ."""
     best, size = 1, 0.0
     for nc in range(1, min(n, 8) + 1):
         nr = int(np.ceil(n / nc))

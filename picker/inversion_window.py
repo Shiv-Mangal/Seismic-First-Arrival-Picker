@@ -3,13 +3,13 @@
 inversion_window.py  (v20)
 ==========================
 Travel-time inversion with pyGIMLi inside the picker (Tools > Inversion, Ctrl+I), laid out
-like FWI Studio: numbered tabs, a run in its own process that keeps going when the window is
+in numbered tabs, with a run in its own process that keeps going when the window is
 closed, and live results while it runs.
 
     0  Data & errors     data file (or the current picks), t <= 0 removed, error model, plots
     1  Mesh              parameter mesh built live: cells, boundary markers, receivers, shots,
                          starting model
-    2  Inversion         parameters of the scripts, Run / Stop, live misfit and the model of
+    2  Inversion         inversion parameters, Run / Stop, live misfit and the model of
                          every iteration
     3  Inversion stats   chi2 / RMS and dPhi per iteration, misfit per shot, observed vs
                          modelled, residuals against offset, fit of one shot
@@ -161,7 +161,7 @@ class InversionWindow(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(QLabel('Data'))
         self.ed_data = QLineEdit(self.settings.data_file)
-        self.ed_data.setPlaceholderText('pyGIMLi data file (sensors + s g t), e.g. SLF_101_pygimli.txt')
+        self.ed_data.setPlaceholderText('pyGIMLi data file (sensors + s g t), e.g. Line01_pygimli.txt')
         self.ed_data.editingFinished.connect(lambda: self._data_timer.start(100))
         top.addWidget(self.ed_data, 1)
         b = QPushButton('Browse…')
@@ -268,11 +268,11 @@ class InversionWindow(QMainWindow):
         w = QSplitter(Qt.Horizontal)
         left = QWidget()
         f = QFormLayout(left)
-        self.chk_t0 = QCheckBox('remove travel times t <= 0 (as the scripts)')
+        self.chk_t0 = QCheckBox('remove travel times t <= 0 (pyGIMLi needs t > 0)')
         self.chk_t0.setChecked(s.remove_nonpositive)
         f.addRow(self.chk_t0)
         self.cb_err = QComboBox()
-        for d, t in (('offset', 'min + max x offset / L  (the scripts\' add_error_to_sgt)'),
+        for d, t in (('offset', 'min + max x offset / L  (grows with offset)'),
                      ('relative', 'absolute + relative % of t'), ('file', 'the err column of the file')):
             self.cb_err.addItem(t, d)
         self.cb_err.setCurrentIndex(max(0, self.cb_err.findData(s.error_mode)))
@@ -284,16 +284,15 @@ class InversionWindow(QMainWindow):
         f.addRow('Maximum (at offset L)', self.sp_emax)
         f.addRow('Relative', self.sp_erel)
         self.cb_len = QComboBox()
-        for d, t in (('shot_span', 'shot span (convertPicks2Gimli)'), ('sensor_span', 'sensor span'),
+        for d, t in (('shot_span', 'shot span (first to last shot)'), ('sensor_span', 'sensor span'),
                      ('custom', 'custom')):
             self.cb_len.addItem(t, d)
         self.cb_len.setCurrentIndex(max(0, self.cb_len.findData(s.err_length)))
         f.addRow('Line length L', self.cb_len)
         self.sp_len = _dspin(0, 1e5, s.err_length_m, 1, 1, ' m')
         f.addRow('Custom L', self.sp_len)
-        note = QLabel('Offsets use the sensors s and g directly: pyGIMLi numbers them from 0. The Monte Carlo '
-                      'scripts\' add_error_to_sgt used geoLocs[g - 1] (the neighbouring sensors) and the 3-D '
-                      'diagonal of the sensor box as L; this is corrected here.')
+        note = QLabel('Offsets are the distances between the shot and receiver sensors; L is the line length '
+                      'chosen above.')
         note.setWordWrap(True)
         note.setStyleSheet('color:#555;')
         f.addRow(note)
@@ -404,7 +403,7 @@ class InversionWindow(QMainWindow):
         self.sp_pdx = _dspin(0.01, 5, s.para_dx, 0.05, 2, '', 'paraDX: node spacing at the surface between '
                              'sensors, relative to the sensor spacing (0.1 = ten nodes per spacing)')
         self.sp_cell = _dspin(0.01, 1000, s.para_max_cell, 0.25, 2, ' m²', 'paraMaxCellSize: largest '
-                              'triangle (maxTriArea in the scripts)')
+                              'triangle (often called maxTriArea)')
         self.sp_bound = _dspin(0, 1000, s.para_boundary, 0.5, 1, ' m', 'paraBoundary: margin beyond the '
                                'first and last sensor')
         self.sp_qual = _dspin(20, 34, s.quality, 0.5, 1, '°', 'Smallest triangle angle (mesh quality)')
@@ -559,7 +558,7 @@ class InversionWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         left = QWidget()
         lv = QVBoxLayout(left)
-        g = QGroupBox('Inversion parameters (as the scripts)')
+        g = QGroupBox('Inversion parameters')
         f = QFormLayout(g)
         self.sp_lam = _dspin(0.001, 1e5, s.lam, 5, 2, '', 'lam (smoothing): larger = smoother model')
         self.sp_zw = _dspin(0.0, 1.0, s.z_weight, 0.05, 3, '', 'zWeight: vertical vs horizontal smoothness, '

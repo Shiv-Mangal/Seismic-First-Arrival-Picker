@@ -2,7 +2,7 @@
 figure_export.py  (v19)
 =======================
 Publication-quality figure export for every plot in the picker, with the same dialog and
-conventions as FWI Studio's exporter (prefix + name, sizes in cm, font scale, folders).
+conventions throughout (prefix + name, sizes in cm, font scale, folders).
 
 * `install()` adds "⤓ Export" to every matplotlib Qt toolbar created afterwards: the picker
   canvas, misfit / reciprocity windows, filter and preprocessing designers, import, geometry
@@ -100,7 +100,7 @@ def slug(text):
 
 
 def file_path(subdir, stem, ext, pre=None):
-    """<exports>/<subdir>/<prefix>_<stem>.<ext> (FWI Studio's naming)."""
+    """<exports>/<subdir>/<prefix>_<stem>.<ext> ."""
     pre = prefix() if pre is None else pre
     stem = slug(stem) or 'figure'
     name = stem if (pre and stem.lower().startswith(slug(pre).lower())) else \
@@ -125,7 +125,7 @@ def default_filename(tag, ext='.png', subdir='', folder=None):
 # ---------------------------------------------------------------------
 SIZES = [('as on screen', None), ('single column (8.5 cm)', 8.5), ('1.5 column (12 cm)', 12.0),
          ('double column (17.5 cm)', 17.5), ('slide (25 cm)', 25.0), ('slide, full 16:9 (33.9 x 19 cm)', 33.9),
-         ('custom', -1)]                       # FWI Studio's list (+ a full 16:9 slide)
+         ('custom', -1)]                       # journal columns and slides
 RASTER = ('png', 'tif', 'tiff', 'jpg', 'jpeg')
 VECTOR = ('pdf', 'svg', 'eps')
 FORMATS = ['png', 'pdf', 'svg', 'tiff', 'eps', 'jpg']
@@ -450,7 +450,7 @@ except Exception:                                   # pragma: no cover
 if _HAVE_QT:
 
     class FigureExportDialog(QDialog):
-        """FWI Studio's export dialog, plus line width, crop, 'main plot only' and a PDF copy."""
+        """Export dialog: name, format, size, resolution, text and line scale, crop, main plot only, PDF copy."""
 
         def __init__(self, fig, stem='figure', subdir='figures', parent=None):
             super().__init__(parent)
@@ -460,7 +460,7 @@ if _HAVE_QT:
             o = LAST.copy()
             w0, h0 = fig.get_size_inches()
             self.ed_prefix = QLineEdit(prefix())
-            self.ed_prefix.setToolTip('Start of every exported file name (e.g. SLF_101); remembered for the line')
+            self.ed_prefix.setToolTip('Start of every exported file name (e.g. Line01); remembered for the line')
             self.ed_stem = QLineEdit(stem)
             self.cb_fmt = QComboBox()
             self.cb_fmt.addItems(FORMATS)

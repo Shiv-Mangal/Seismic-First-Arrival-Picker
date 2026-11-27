@@ -45,7 +45,7 @@ from matplotlib.ticker import FuncFormatter
 import figure_export as fx
 import session_store as sstore
 fx.install()
-import wheel_guard as wg                 # v22: the wheel changes a value only after a click (as FWI Studio)
+import wheel_guard as wg                 # v22: the wheel changes a value only after a click
 wg.install()
 
 # seismic data reading
