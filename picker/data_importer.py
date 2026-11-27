@@ -108,8 +108,18 @@ def output_names(files, quantity, out_dir=None):
         out_dir = os.path.join(base, 'picks')
     q = (quantity or 'data').lower()
     stem = os.path.join(out_dir, f'{line}_{q}')
-    return dict(line=line, out_dir=out_dir, pkl=stem + '_picks.pkl', sgt=stem + '_SGT.txt',
-                record=stem + '_import.json')
+    sgt = os.path.join(out_dir, f'{line}_exports', f'{line}_{q}_SGT.txt')    # v19: exports folder
+    return dict(line=line, out_dir=out_dir, pkl=stem + '_picks.pkl', sgt=sgt,
+                record=stem + '_import.json', exports=os.path.join(out_dir, f'{line}_exports'))
+
+
+def _rel(path, start):
+    """Path relative to start when it lies inside it (v19), else the absolute path."""
+    try:
+        r = os.path.relpath(path, start or '.')
+        return path if r.startswith('..') else r
+    except ValueError:                                  # other drive (Windows)
+        return path
 
 
 def picks_file_info(pkl_path):
@@ -2290,6 +2300,7 @@ if _HAVE_QT:
             scr = QApplication.primaryScreen()
             dpi = scr.logicalDotsPerInch() if scr is not None else 96
             self.fig = Figure(dpi=dpi, constrained_layout=True)
+            self.fig._export_tag, self.fig._export_subdir = 'import_geometry', 'import'
             self.canvas = FigureCanvas(self.fig)
             gsp = self.fig.add_gridspec(1, 2, width_ratios=[2.2, 1])
             self.ax_prof = self.fig.add_subplot(gsp[0, 0])
@@ -2534,6 +2545,7 @@ if _HAVE_QT:
             hint.setStyleSheet('color: #555;')
             l.addWidget(hint)
             self.fig_sp = Figure(dpi=dpi, constrained_layout=True)
+            self.fig_sp._export_tag, self.fig_sp._export_subdir = 'import_spectra', 'import'
             self.canvas_sp = FigureCanvas(self.fig_sp)
             g2 = self.fig_sp.add_gridspec(2, 1, height_ratios=[1.6, 1])
             self.ax_sp = self.fig_sp.add_subplot(g2[0])
@@ -2709,14 +2721,17 @@ if _HAVE_QT:
         def existing_source(self):
             return self.cb_existing.currentData() if self.rb_cont.isChecked() else ''
 
-        @staticmethod
-        def _pair_paths(src):
+        def _pair_paths(self, src):
             """Pick file and SGT file that go with an existing source (.pkl or .txt)."""
             stem = os.path.splitext(src)[0]
             if src.lower().endswith('.pkl'):
                 base = stem[:-6] if stem.endswith('_picks') else stem
                 cands = [base + '_SGT.txt', base + '_sgt.txt', base + '.txt']
-                sgt = next((c for c in cands if os.path.isfile(c)), base + '_SGT.txt')
+                d, b = os.path.split(base)                 # v19: new SGT files go to <line>_exports
+                line = line_name_from_files([r.path for r in self.records if r.ok]) \
+                    if any(r.ok for r in self.records) else b
+                exp = os.path.join(d, f'{line}_exports', b + '_SGT.txt')
+                sgt = next((c for c in cands + [exp] if os.path.isfile(c)), exp)
                 return src, sgt
             base = re.sub(r'(_SGT|_sgt)$', '', stem)
             return base + '_picks.pkl', src
@@ -2726,8 +2741,14 @@ if _HAVE_QT:
             q = self.quantity()
             if good and not self._pkl_user:
                 names = output_names([r.path for r in good], q or 'data', self.ed_out.text().strip() or None)
+                try:                                   # v19: figure exports from this window
+                    import figure_export as _fx
+                    if not _fx.CONTEXT['folder']:
+                        _fx.set_context(names['line'], names['exports'])
+                except Exception:
+                    pass
                 self.ed_pkl.setText(os.path.basename(names['pkl']))
-                self.ed_sgt.setText(os.path.basename(names['sgt']))
+                self.ed_sgt.setText(_rel(names['sgt'], names['out_dir']))
             if self.rb_cont.isChecked():
                 src = self.existing_source()
                 if not src:
@@ -2805,7 +2826,8 @@ if _HAVE_QT:
                 self.ed_pkl.setText(os.path.basename(r['pkl']))
                 self._out_dir_user = self._pkl_user = True
             if r.get('sgt'):
-                self.ed_sgt.setText(os.path.basename(r['sgt']))
+                self.ed_sgt.setText(_rel(r['sgt'], os.path.dirname(r['pkl'])) if r.get('pkl')
+                                    else os.path.basename(r['sgt']))
             self._set_quantity(r.get('quantity'))
             self.add_files([f for f in r['files'] if os.path.isfile(f)], replace=True)
             if r.get('pkl') and os.path.isfile(r['pkl']):          # continue the record's picks
@@ -2848,21 +2870,6 @@ if _HAVE_QT:
                 QMessageBox.warning(self, 'Existing picks', 'Choose the pick file to continue (Browse…), '
                                     'or select "Start a new pick file".')
                 return
-            if self.rb_new.isChecked() and self._pkl_path() and os.path.isfile(self._pkl_path()):
-                box = QMessageBox(self)
-                box.setWindowTitle('Pick file exists')
-                box.setText(f'{os.path.basename(self._pkl_path())} already exists '
-                            f'({pick_file_summary(self._pkl_path())}).')
-                b_cont = box.addButton('Continue those picks', QMessageBox.AcceptRole)
-                b_over = box.addButton('Start over (overwrite at first save)', QMessageBox.DestructiveRole)
-                box.addButton(QMessageBox.Cancel)
-                box.setDefaultButton(b_cont)
-                box.exec_()
-                if box.clickedButton() is b_cont:
-                    self.rb_cont.setChecked(True)
-                    self._refresh_existing(select=os.path.normpath(self._pkl_path()))
-                elif box.clickedButton() is not b_over:
-                    return
             bad = [r.name for r in self.records if not r.ok]
             if bad and QMessageBox.question(
                     self, 'Unreadable files', f'{len(bad)} file(s) could not be read and will be '
@@ -2872,6 +2879,8 @@ if _HAVE_QT:
                 sv = self._assemble()
             except Exception as e:
                 QMessageBox.critical(self, 'Import failed', str(e))
+                return
+            if not self._ask_session(sv):              # v19: continue which session?
                 return
             try:
                 os.makedirs(sv.out_dir if os.path.dirname(sv.pkl_path) == '' else os.path.dirname(sv.pkl_path),
@@ -2891,6 +2900,34 @@ if _HAVE_QT:
             self.survey = sv
             self._closing_ok = True
             self.accept()
+
+        def _ask_session(self, sv):
+            """v19: the pick file already has picks (or session backups): continue the latest,
+            an earlier session, or start new picks. Changes sv; False = cancelled."""
+            import session_store as ss
+            pkl = sv.pkl_path
+            src = sv.picks_source or ''
+            cont = self.rb_cont.isChecked()
+            if cont and not src.lower().endswith('.pkl'):
+                return True                            # SGT text source: nothing to choose
+            if not (os.path.isfile(pkl) or ss.list_sessions(pkl)):
+                return True
+            if cont and not ss.list_sessions(pkl) and os.path.abspath(src) == os.path.abspath(pkl):
+                return True                            # continuing the only state there is
+            try:
+                act, path = ss.ask_session(pkl, sv.dt / 10, sv.shot_pos, allow_new=not cont, parent=self)
+            except Exception as e:                     # never block an import on this window
+                print(f'Session window failed ({e}); continuing {src or "with new picks"}')
+                return True
+            if act is None:
+                return False
+            if act == 'continue':
+                sv.picks_source = path
+                sv.load_existing_picks = True
+            else:                                      # new picks; the old file is backed up at start
+                sv.picks_source = ''
+                sv.load_existing_picks = False
+            return True
 
         def _write_headers(self, sv):
             """v17: back up the files, then write the geometry into their headers."""
@@ -2976,6 +3013,7 @@ if _HAVE_QT:
             scr = QApplication.primaryScreen()
             dpi = scr.logicalDotsPerInch() if scr is not None else 96
             self.fig = Figure(dpi=dpi, constrained_layout=True)
+            self.fig._export_tag, self.fig._export_subdir = 'geometry', 'geometry'
             self.canvas = FigureCanvas(self.fig)
             gsp = self.fig.add_gridspec(2, 1, height_ratios=[1.4, 1])
             self.axp = self.fig.add_subplot(gsp[0])
@@ -3004,6 +3042,7 @@ if _HAVE_QT:
             row.addWidget(self.ed_shots, 1)
             sl.addLayout(row)
             self.fig_sp = Figure(dpi=dpi, constrained_layout=True)
+            self.fig_sp._export_tag, self.fig_sp._export_subdir = 'geometry_spectra', 'geometry'
             self.canvas_sp = FigureCanvas(self.fig_sp)
             g2 = self.fig_sp.add_gridspec(2, 1, height_ratios=[1.6, 1])
             self.ax_sp = self.fig_sp.add_subplot(g2[0])

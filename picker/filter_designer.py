@@ -911,11 +911,20 @@ if _HAVE_QT:
             self.ax_resp = self.fig_resp.add_subplot(2, 2, (1, 2))
             self.ax_imp = self.fig_resp.add_subplot(2, 2, 3)
             self.ax_spec = self.fig_resp.add_subplot(2, 2, 4)
-            self.tabs.addTab(self.canvas_resp, 'Response')
+            self.fig_resp._export_tag, self.fig_resp._export_subdir = 'filter_response', 'filters'
+            resp_tab = QWidget()                       # v19: toolbar (zoom + Export) on the response
+            rl_ = QVBoxLayout(resp_tab)
+            rl_.setContentsMargins(2, 2, 2, 2)
+            rl_.addWidget(NavigationToolbar(self.canvas_resp, resp_tab))
+            rl_.addWidget(self.canvas_resp, 1)
+            self.tabs.addTab(resp_tab, 'Response')
 
             self.fig_data = Figure(dpi=dpi, constrained_layout=True)
             self.canvas_data = FigureCanvas(self.fig_data)
             # Two rows (Before above After) with shared axes: zoom one, both follow
+            self.fig_data._export_tag = lambda: f'filter_before_after_{self.shot_label}' if self.shot_label \
+                else 'filter_before_after'
+            self.fig_data._export_subdir = 'filters'
             self.ax_before = self.fig_data.add_subplot(2, 1, 1)
             self.ax_after = self.fig_data.add_subplot(2, 1, 2, sharex=self.ax_before,
                                                       sharey=self.ax_before)
