@@ -23,7 +23,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, 'first_arrival_picker.py')
-__version__ = '19'
+__version__ = '20'
 
 # (import name, pip / conda name, required?, what for)
 LIBRARIES = [
@@ -72,7 +72,7 @@ Then, every time:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description='Seismic first-arrival picker (v19)')
+    ap = argparse.ArgumentParser(description='Seismic first-arrival picker (v20)')
     ap.add_argument('folder', nargs='?', default='', help='folder the import window opens in')
     ap.add_argument('--record', default='', help='repeat an earlier import (its *_import.json), no dialog')
     ap.add_argument('--quantity', choices=['acceleration', 'velocity', 'displacement'], default=None,

@@ -2821,10 +2821,10 @@ def open_pdf_manual():
 
 def show_about():
     QMessageBox.about(None, 'About the first-arrival picker',
-                      '<b>First-arrival picker</b> for refraction tomography (v19)<br><br>'
+                      '<b>First-arrival picker</b> for refraction tomography (v20)<br><br>'
                       'Manual and automatic first-break picking of SEG-Y and SU shot gathers, with '
-                      'preprocessing, filtering, reciprocity QC, figure export and export to S G T '
-                      'or pyGIMLi files for travel-time tomography.<br><br>'
+                      'preprocessing, filtering, reciprocity QC, figure export, export to S G T '
+                      'or pyGIMLi files and travel-time inversion with pyGIMLi.<br><br>'
                       'Help &gt; User manual (F1) explains every window.')
 
 
@@ -3025,6 +3025,7 @@ SHORTCUTS_TEXT = """Picking canvas keys
   f   filter designer
   x   x axis: receiver index <-> offset (distance along the line)
   Ctrl+E   export picks for inversion (SGT / x positions / pyGIMLi)
+  Ctrl+I   travel-time inversion with pyGIMLi (v20)
   Ctrl+S   save the canvas as an image
   Ctrl+O   import SEG-Y data (File menu)
   Ctrl+D   plotted traces, time axis and gain
@@ -3352,6 +3353,72 @@ def open_export_ui():
                                   parent=parent)
 
 
+_INVERSION_WINDOWS = []
+
+
+def _inversion_data_from_picks():
+    """v20: write the current picks to a pyGIMLi file in the exports folder (the export
+    window's last pyGIMLi settings, topography and line ends) for the inversion window."""
+    global final_picks_dict
+    try:
+        finalize_and_process_picks()
+    except Exception:
+        pass
+    if final_pick_gather_multi_seed is not None and shot_no is not None:
+        final_picks_dict[f'final_picks_for_shot_no_{shot_no}'] = final_pick_gather_multi_seed
+    geom = pex.geometry_from_survey(SURVEY, recv_pos=recv_pos, shot_pos=shot_pos,
+                                    pick_dt_s=1.0 / (_samples_per_ms() * 1e3))
+    last = pex.LAST_SETTINGS if pex.LAST_SETTINGS is not None and pex.LAST_SETTINGS.fmt == 'pygimli' else None
+    st = last.copy(path='') if last is not None else pex.ExportSettings(fmt='pygimli')
+    st.write_topo, st.write_line_ends = True, True
+    path = os.path.join(EXPORTS_DIR or reciprocity_report_directory, f'{SURVEY.line}_pygimli_for_inversion.txt')
+    p, res = pex.write_export(final_picks_dict, geom, st, path)
+    print(f"Picks written for the inversion: {p}")
+    return p
+
+
+def _line_ends_of(path):
+    """SoL / EoL from the companion <name>_line_ends.txt of a pyGIMLi export."""
+    lp = os.path.splitext(path)[0] + '_line_ends.txt'
+    sol = eol = None
+    try:
+        for ln in open(lp):
+            pr = ln.split()
+            if pr and pr[0] == 'SoL':
+                sol = [float(pr[1]), float(pr[2])]
+            elif pr and pr[0] == 'EoL':
+                eol = [float(pr[1]), float(pr[2])]
+    except Exception:
+        pass
+    return sol, eol
+
+
+def open_inversion_ui():
+    """Inversion > Travel-time inversion (pyGIMLi)... (v20)."""
+    try:
+        import inversion_window as invw
+    except Exception as e:
+        QMessageBox.critical(None, 'Inversion', f'The inversion needs pyGIMLi ({type(e).__name__}: {e}).\n'
+                             'Install it as in the manual, section 2.')
+        return None
+    folder = EXPORTS_DIR or reciprocity_report_directory or os.getcwd()
+    cands = []
+    try:
+        cands = sorted((os.path.join(folder, n) for n in os.listdir(folder)
+                        if 'pygimli' in n.lower() and n.lower().endswith(('.txt', '.dat'))
+                        and not n.lower().endswith(('_topo.txt', '_line_ends.txt'))),
+                       key=os.path.getmtime, reverse=True)
+    except Exception:
+        pass
+    data_file = cands[0] if cands else ''
+    sol, eol = _line_ends_of(data_file) if data_file else (None, None)
+    base = os.path.join(reciprocity_report_directory or folder, f'{SURVEY.line}_inversion')
+    w = invw.open_inversion_window(data_file, SURVEY.line, base, make_data=_inversion_data_from_picks,
+                                   sol=sol, eol=eol)
+    _INVERSION_WINDOWS.append(w)
+    return w
+
+
 def install_app_menus(fig):
     """Add menus and a tools toolbar to the picker's Qt window (no-op on other backends)."""
     global _quantity_actions
@@ -3450,6 +3517,9 @@ def install_app_menus(fig):
     m_view.addAction('Go to the plotted window (h)', lambda: (reset_to_full_view()))
     m_qc = mb.addMenu('&QC')
     m_qc.addAction('Reciprocity and pick QC...', open_reciprocity_window)
+    m_inv = mb.addMenu('&Inversion')                   # v20: pyGIMLi travel-time inversion
+    a = m_inv.addAction('Travel-time inversion (pyGIMLi)...', open_inversion_ui)
+    a.setShortcut(QKeySequence('Ctrl+I'))
 
     m_help = mb.addMenu('&Help')                        # v13: the user manual
     a = m_help.addAction('User manual', lambda: show_manual(None, toggle=True))
@@ -3478,6 +3548,7 @@ def install_app_menus(fig):
                         ('Preprocessing...', _run_from_menu(open_preprocessing_ui)),
                         ('Filter designer...', _run_from_menu(open_filter_designer_ui)),
                         ('Reciprocity and pick QC...', open_reciprocity_window),
+                        ('Travel-time inversion (pyGIMLi)...  (Ctrl+I)', open_inversion_ui),
                         ('Plotted traces, time axis and gain...', open_display_settings),
                         ('Delete picks on one receiver...', _run_from_menu(open_delete_picks_ui)),
                         ('Delete picks in a receiver range...',
@@ -3497,6 +3568,7 @@ def install_app_menus(fig):
     tb.addAction('\u2699 Preprocessing', _run_from_menu(open_preprocessing_ui))
     tb.addAction('\u224b Filter', _run_from_menu(open_filter_designer_ui))
     tb.addAction('\u21c4 Reciprocity && pick QC', open_reciprocity_window)
+    tb.addAction('\u25e2 Inversion', open_inversion_ui)          # v20
     del_btn = QToolButton(tb)                 # v15/v16: delete picks drop-down
     del_btn.setText('\u2702 Delete picks \u25be')
     del_btn.setPopupMode(QToolButton.InstantPopup)

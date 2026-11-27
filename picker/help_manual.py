@@ -36,6 +36,7 @@ SECTION_TITLES = {
     'autopick': 'Automatic picking', 'qc': 'Reciprocity and pick QC', 'geometry': 'Survey geometry',
     'spectra': 'Spectra and the sensor response', 'files': 'Files and saving',
     'export': 'Exporting picks for inversion', 'figures': 'Figures for papers and slides',
+    'inversion': 'Travel-time inversion (pyGIMLi)',
     'shortcuts': 'Keyboard and mouse', 'troubleshooting': 'Troubleshooting', 'history': 'Version history',
 }
 
