@@ -3396,10 +3396,18 @@ def _line_ends_of(path):
 def open_inversion_ui():
     """Inversion > Travel-time inversion (pyGIMLi)... (v20)."""
     try:
+        import pygimli  # noqa: F401
+    except ImportError as e:
+        QMessageBox.critical(None, 'Inversion', f'The inversion needs pyGIMLi ({e}).\n'
+                             'Start the picker in the environment with pyGIMLi (manual, section 2).')
+        return None
+    try:
         import inversion_window as invw
     except Exception as e:
-        QMessageBox.critical(None, 'Inversion', f'The inversion needs pyGIMLi ({type(e).__name__}: {e}).\n'
-                             'Install it as in the manual, section 2.')
+        import traceback
+        traceback.print_exc()
+        QMessageBox.critical(None, 'Inversion', f'The inversion window could not be loaded:\n'
+                             f'{type(e).__name__}: {e}\n\nThe console shows the details.')
         return None
     folder = EXPORTS_DIR or reciprocity_report_directory or os.getcwd()
     cands = []

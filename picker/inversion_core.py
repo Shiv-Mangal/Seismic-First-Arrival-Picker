@@ -258,7 +258,8 @@ class StopRequested(Exception):
 
 def new_run_dir(base, label=''):
     os.makedirs(base, exist_ok=True)
-    name = RUN_PREFIX + time.strftime('%Y%m%d_%H%M%S') + (f'_{re.sub(r"[^\w.-]+", "_", label)}' if label else '')
+    safe = re.sub(r'[^\w.-]+', '_', label) if label else ''      # (no backslash inside an f-string: Python < 3.12)
+    name = RUN_PREFIX + time.strftime('%Y%m%d_%H%M%S') + ('_' + safe if safe else '')
     p = os.path.join(base, name)
     k = 2
     while os.path.exists(p):
