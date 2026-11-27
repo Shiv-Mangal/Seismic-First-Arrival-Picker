@@ -16,9 +16,11 @@ closed, and live results while it runs.
     4  Model             the final model; Open model viewer (separate window with every
                          display setting); result files
 
-Runs go to <picks>/<line>_inversion/run_<date>_<time>/ (inversion_core.py lists the files).
-A Monte Carlo tab (initial-model and pick perturbations, parallel runs, bootstrap
-statistics) follows in v21 on the same core.
+    5  Monte Carlo       (v21, mc_panel.py) many runs with other starting models and perturbed
+                         picks, in parallel on several cores, and their bootstrap statistics
+
+Runs go to <picks>/<line>_inversion/run_<date>_<time>/ (inversion_core.py lists the files),
+Monte Carlo sets to <picks>/<line>_monte_carlo/<set>/ (mc_core.py).
 """
 import os
 import sys
@@ -159,6 +161,9 @@ class InversionWindow(QMainWindow):
         self.tabs.addTab(self._tab_run(), '2  Inversion')
         self.tabs.addTab(self._tab_stats(), '3  Inversion stats')
         self.tabs.addTab(self._tab_model(), '4  Model')
+        import mc_panel                                   # v21
+        self.p_mc = mc_panel.MonteCarloPanel(self)
+        self.tabs.addTab(self.p_mc, '5  Monte Carlo')
         self.tabs.currentChanged.connect(self._tab_changed)
         v.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
@@ -953,6 +958,8 @@ class InversionWindow(QMainWindow):
             self._draw_stats()
         elif i == 4:
             self._draw_final()
+        elif i == 5:
+            self.p_mc._pert_changed()
 
     def _open_folder(self, path):
         import figure_export as fx

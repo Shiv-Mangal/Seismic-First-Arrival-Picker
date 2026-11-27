@@ -76,6 +76,7 @@ class InvSettings:
     para_boundary: float = 2.0          # m beyond the first / last sensor
     quality: float = 32.0               # minimum triangle angle (degrees)
     sec_nodes: int = 2                  # secondary nodes for the forward calculation
+    mesh_file: str = ''                 # v21: use this saved mesh (Monte Carlo: one mesh for every run)
     # inversion
     lam: float = 30.0
     z_weight: float = 0.1
@@ -306,7 +307,10 @@ def run(s, run_dir, log=print):
                  started=t0, pid=os.getpid())
     data, rep = prepare_data(s)
     data.save(os.path.join(run_dir, 'data_used.dat'), 's g t err')
-    mesh = make_mesh(data, s)
+    if s.mesh_file and os.path.isfile(s.mesh_file):
+        mesh = pg.load(s.mesh_file)
+    else:
+        mesh = make_mesh(data, s)
     mesh.save(os.path.join(run_dir, 'mesh.bms'))
     log(f"Data: {rep['n_data']} travel times, {rep['n_sensors']} sensors, {rep['n_shots']} shots"
         f" ({rep['n_removed']} with t <= 0 removed); errors {rep['err_ms'][0]:.2f}-{rep['err_ms'][1]:.2f} ms")

@@ -99,7 +99,7 @@ intro_m = re.search(r'<p>This manual explains.*?</p>', body, re.S)
 intro = intro_m.group(0) if intro_m else ''
 body_print = body.replace(intro, '', 1)
 cover = f"""<section class="cover">
-<div class="kicker">User manual · version 20</div>
+<div class="kicker">User manual · version 21</div>
 <h1>First-Arrival Picker<br>for Refraction Tomography</h1>
 <div class="lead">Manual and automatic first-break picking of SEG-Y shot gathers, with preprocessing,
 filtering, reciprocity QC and export of S&nbsp;G&nbsp;T travel times.</div>
@@ -141,7 +141,7 @@ print('toc pages', pages)
 render(pages)
 rd = PdfReader(pdf); wr = PdfWriter(clone_from=rd)
 wr.add_metadata({'/Title': 'First-Arrival Picker for Refraction Tomography - User Manual',
-                 '/Subject': 'User manual, version 20', '/Creator': 'first_arrival_picker'})
+                 '/Subject': 'User manual, version 21', '/Creator': 'first_arrival_picker'})
 with open(pdf, 'wb') as fh:
     wr.write(fh)
 print('pages', len(rd.pages), 'size', os.path.getsize(pdf) // 1024, 'kB')

@@ -21,7 +21,7 @@ a { color: #1f618d; }
 
 <p>This manual explains every window of the picker, in the order you use them. Every figure was made with the picker itself on a synthetic survey (<a href="#example-data">About the example data</a>), so the numbers in the figures can be checked against known true travel times. Inside the picker, <b>Help &gt; User manual</b> (F1) opens this manual beside the canvas. F1 in any window opens the section for that window. <b>Help &gt; Open the PDF manual</b> opens this same text as a PDF.</p>
 
-<h3 id="contents">Contents</h3><ol><li><a href="#workflow">Overview and workflow</a></li><li><a href="#starting">Installing and starting</a></li><li><a href="#import">Importing SEG-Y and SU data</a></li><li><a href="#topography">Topography and the x origin</a></li><li><a href="#canvas">The picking canvas</a></li><li><a href="#menus">Menus and toolbar</a></li><li><a href="#picking">Picking by hand</a></li><li><a href="#traces-axes-gain">Traces, axes and gain</a></li><li><a href="#preprocessing">Preprocessing</a></li><li><a href="#filter">Filter designer</a></li><li><a href="#delete-picks">Deleting picks and undo</a></li><li><a href="#autopick">Automatic picking</a></li><li><a href="#qc">Reciprocity and pick QC</a></li><li><a href="#geometry">Survey geometry</a></li><li><a href="#spectra">Spectra and the sensor response</a></li><li><a href="#files">Files and saving</a></li><li><a href="#export">Exporting picks for inversion</a></li><li><a href="#figures">Figures for papers and slides</a></li><li><a href="#inversion">Travel-time inversion (pyGIMLi)</a></li><li><a href="#shortcuts">Keyboard and mouse</a></li><li><a href="#troubleshooting">Troubleshooting</a></li><li><a href="#history">Version history</a></li></ol>
+<h3 id="contents">Contents</h3><ol><li><a href="#workflow">Overview and workflow</a></li><li><a href="#starting">Installing and starting</a></li><li><a href="#import">Importing SEG-Y and SU data</a></li><li><a href="#topography">Topography and the x origin</a></li><li><a href="#canvas">The picking canvas</a></li><li><a href="#menus">Menus and toolbar</a></li><li><a href="#picking">Picking by hand</a></li><li><a href="#traces-axes-gain">Traces, axes and gain</a></li><li><a href="#preprocessing">Preprocessing</a></li><li><a href="#filter">Filter designer</a></li><li><a href="#delete-picks">Deleting picks and undo</a></li><li><a href="#autopick">Automatic picking</a></li><li><a href="#qc">Reciprocity and pick QC</a></li><li><a href="#geometry">Survey geometry</a></li><li><a href="#spectra">Spectra and the sensor response</a></li><li><a href="#files">Files and saving</a></li><li><a href="#export">Exporting picks for inversion</a></li><li><a href="#figures">Figures for papers and slides</a></li><li><a href="#inversion">Travel-time inversion (pyGIMLi)</a></li><li><a href="#monte-carlo">Monte Carlo uncertainty</a></li><li><a href="#shortcuts">Keyboard and mouse</a></li><li><a href="#troubleshooting">Troubleshooting</a></li><li><a href="#history">Version history</a></li></ol>
 <h2 id="workflow">1. Overview and workflow</h2>
 <p>The picker turns a set of SEG-Y or Seismic Unix (SU) shot gathers into first-arrival travel times for refraction (travel-time) tomography. The end product is a travel-time file for the inversion: an <b>S G T file</b> (three columns: shot, geophone, first-arrival time of every picked shot–receiver pair), with the shot and geophone given as station numbers or as x positions along the line, or a <b>pyGIMLi data file</b> with the sensor coordinates and elevations (<a href="#export">section 17</a>).</p>
 <p class="fig"><img src="images/workflow.png" data-w="1386" alt="Workflow"><br><span class="cap">Figure 1. The workflow. Quality control (QC) feeds back into picking until the reciprocal errors are small.</span></p>
@@ -638,7 +638,49 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 </table>
 <p>Without a window, e.g. on a cluster: <code>python inversion_runner.py --data SLF_101_pygimli.txt --out runs --lam 30 --max-iter 20</code> makes the same run folder.</p>
 
-<h2 id="shortcuts">20. Keyboard and mouse</h2>
+<h2 id="monte-carlo">20. Monte Carlo uncertainty</h2>
+<p>Tab <b>5 Monte Carlo</b> of the inversion window repeats the inversion of tabs 0–2 many times, each time with a different starting model (vTop, vBottom) and, if you want, with randomly perturbed picks. The runs share one mesh, so they can be compared cell by cell, and they run in parallel on several CPU cores. Afterwards the ensemble and bootstrap statistics show how much of the model depends on the starting model and the picks, and how well the mean model is determined. The workflow is that of <code>monte_carlo_inversion_SLF_Line_101_*_ARC.py</code> and <code>MC_inversions_post_processing_SLF_line_101.ipynb</code>.</p>
+<h3 id="mc-setup">a: Setup</h3>
+<ul>
+<li><b>Starting models</b>: a table of vTop and vBottom that you can type into, with <b>+ Row</b>, <b>− Selected</b> and <b>Clear</b>. <b>Load csv / txt…</b> reads a table with any delimiter (comma, semicolon, tab, spaces), with or without a header; columns named like <code>Vp_top</code> / <code>Vp_bottom</code> are found, otherwise the first two numeric columns are used. Your <code>initial_model_perturbations.csv</code> (46 models) loads as it is. <b>Save…</b> writes the table.</li>
+<li><b>Generate</b>: a <i>grid</i> (every vTop with every vBottom, n values each) or a <i>Latin hypercube</i> (n models spread evenly over both ranges, repeatable with a seed), optionally only with vBottom &gt; vTop; replace or add to the table.</li>
+<li><b>Pick perturbations</b>: none, Gaussian with sigma = scale × the pick error, Gaussian with sigma in ms, or uniform ± ms, and the number of realizations per starting model. The errors stay those of the original picks. Each run draws its own noise from the seed and its model and realization numbers, so a set can be repeated exactly.</li>
+<li><b>Worker processes</b>: how many inversions run at once (default: the number of CPU cores less one). Each pyGIMLi inversion is serial; the worker processes use one thread each, so the cores are not oversubscribed.</li>
+<li><b>Sets go in</b> and <b>Set name</b>: the folder of the set, by default <code>&lt;picks&gt;/&lt;line&gt;_monte_carlo/mc_&lt;date&gt;_&lt;time&gt;</code>.</li>
+</ul>
+<p>The plot shows the starting models in the vTop–vBottom plane with the deterministic one of tab 2. The text gives the number of inversions and an estimate of the time from the last deterministic run.</p>
+<p class="fig"><img src="images/mc_setup.png" data-w="1550" alt="Monte Carlo setup"><br><span class="cap">Figure 20a. Setup: four starting models, Gaussian pick noise with two realizations each.</span></p>
+<h3 id="mc-models">b: Initial models</h3>
+<p>Every starting model on the mesh (the gradient from vTop at the surface to vBottom at the bottom), side by side with one colour scale, 24 per page, laid out for the largest panels.</p>
+<p class="fig"><img src="images/mc_initial_models.png" data-w="1550" alt="Initial models"><br><span class="cap">Figure 20b. The starting models of the set.</span></p>
+<h3 id="mc-run">c: Run</h3>
+<p><b>▶ Run the set</b> starts it in a process of its own, which hands the inversions to the worker processes; the window stays responsive and the set goes on when it is closed. The table shows every run with its state, iterations, chi² and RMS (double-click: that run in the model viewer), the plots show the chi² of each finished starting model and the RMS of the runs, and the log follows <code>mc.log</code>. <b>■ Stop</b> cancels the waiting runs; running ones stop after their iteration. Choosing an unfinished set in the <b>Set</b> list and pressing Run carries on with the runs that are not done. Sets can also run without a window, e.g. as a cluster job: <code>python mc_runner.py --mc &lt;set folder&gt; --workers 32</code>.</p>
+<p class="fig"><img src="images/mc_run.png" data-w="1550" alt="Monte Carlo run"><br><span class="cap">Figure 20c. A set running on two worker processes.</span></p>
+<h3 id="mc-stats">d: Bootstrap and statistics</h3>
+<p>For the finished runs (optionally only those with chi² and RMS below limits, i.e. models that fit the data), per cell:</p>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td>Mean, median</td><td>The average model (coverage-weighted if chosen).</td></tr>
+<tr><td>Spread of the models (std), CV, percentile interval</td><td>How different the models are: the uncertainty of the velocity model due to the starting model and the picks. This is the number to report.</td></tr>
+<tr><td>Bootstrap standard error of the mean</td><td>The spread of the mean over bootstrap resamples of the models (with replacement): how well the mean model is determined. It shrinks like 1/√N with more runs.</td></tr>
+<tr><td>Mean coverage</td><td>Mean standardized coverage of the runs.</td></tr>
+<tr><td>Sensitivity to vTop / vBottom, R²</td><td>A linear fit v = c0 + c1 vTop + c2 vBottom per cell: the change of the velocity per 100 m/s of the starting velocities, and how much of the differences the starting model explains.</td></tr>
+<tr><td>Run closest to the mean</td><td>The run with the smallest RMS difference to the mean where the rays reach (the notebook's optimal initial model).</td></tr>
+</table>
+<table class="note" width="100%" cellpadding="8"><tr><td><b>Corrected here.</b> The notebook's <code>bootstrap_mc_analysis</code> reported the standard deviation of the bootstrap <i>means</i> as the model uncertainty. With N runs that is the spread of the models divided by about √N (46 runs: about 6.8 times smaller). Both are shown here, labelled; the summary gives their ratio. The per-point Python loops are vectorised (a second instead of minutes).</td></tr></table>
+<p><b>Compute and save statistics</b> writes <code>analysis/uncertainty_results.csv</code> (x, y and every field per cell), <code>analysis/summary_statistics.json</code> (the summary and every run with its use) and <code>analysis/ensemble.npz</code> (all models). The diagnostics show the chi² of the runs (used and left out), chi² over the starting models, and the spread and the standard error with depth. <b>Open in the model viewer…</b> offers every statistic as a field of the model viewer (<a href="#inv-model">section 19</a>): smoothing, mask, colours, axes, legend and export.</p>
+<p class="fig"><img src="images/mc_stats.png" data-w="1550" alt="Monte Carlo statistics"><br><span class="cap">Figure 20d. Statistics of a set: the spread of the models below the depth of investigation, and the diagnostics.</span></p>
+<h3 id="mc-files">Set folders</h3>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>File</th><th>Contents</th></tr>
+<tr><td><code>mc_settings.json</code>, <code>perturbations.csv</code></td><td>Every setting of the set and its starting models.</td></tr>
+<tr><td><code>mesh.bms</code>, <code>data_original.dat</code></td><td>The shared mesh and the data with their errors.</td></tr>
+<tr><td><code>mc_status.json</code>, <code>mc.log</code>, <code>runs_summary.csv</code></td><td>Progress, log, and one row per run (vTop, vBottom, realization, state, iterations, chi², RMS, time).</td></tr>
+<tr><td><code>runs/model_001_vtop_300_vbottom_1500[_r01]/</code></td><td>An ordinary run folder each (<a href="#inv-files">section 19</a>), plus <code>data_input.dat</code> and <code>pick_noise.npy</code> with perturbed picks.</td></tr>
+<tr><td><code>analysis/</code></td><td>The statistics.</td></tr>
+</table>
+
+<h2 id="shortcuts">21. Keyboard and mouse</h2>
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Key / mouse</th><th>Action</th></tr>
 <tr><td>m</td><td>Manual Pick (click / drag)</td></tr>
@@ -665,7 +707,7 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <tr><td>Ctrl+Z / Ctrl+Y (QC window)</td><td>Undo / redo deletes</td></tr>
 </table>
 
-<h2 id="troubleshooting">21. Troubleshooting</h2>
+<h2 id="troubleshooting">22. Troubleshooting</h2>
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Symptom</th><th>Cause and fix</th></tr>
 <tr><td>The canvas does not react to clicks; a warning about the inline backend.</td><td>Set Spyder's graphics backend to Qt and restart the kernel (<a href="#starting">section 2</a>).</td></tr>
@@ -680,10 +722,12 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <tr><td>pyGIMLi complains about sensors at the same position.</td><td>Two sensors share an x (the export summary warns). Check the topography, or use <i>At the geophone of the shot position</i>.</td></tr>
 <tr><td>The Inversion menu says pyGIMLi is missing.</td><td>Start the picker in the environment with pyGIMLi (<code>conda activate pg</code>; <a href="#install">section 2</a>).</td></tr>
 <tr><td>An inversion runs very slowly.</td><td>Time per iteration grows with cells × rays: use a larger <i>Largest cell</i>, a larger <i>Surface spacing</i>, fewer secondary nodes, or more threads.</td></tr>
+<tr><td>A Monte Carlo set refuses to start: starting models outside the allowed velocities.</td><td>pyGIMLi cannot start outside its limits; accept the wider range offered, or change the models.</td></tr>
+<tr><td>The computer is slow during a Monte Carlo set.</td><td>Use fewer worker processes (one per core is the most that helps); runs that are done are not repeated when you carry on.</td></tr>
 <tr><td>Help says the manual was not found.</td><td>Keep the <code>manual</code> folder (manual.html, images, PDF) next to the .py files.</td></tr>
 </table>
 
-<h2 id="history">22. Version history</h2>
+<h2 id="history">23. Version history</h2>
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Version</th><th>Main changes</th></tr>
 <tr><td>v1–v4</td><td>Filters merged (minimum-phase FIR, zero-phase FIR, IIR), balanced wiggles, filter designer with live preview, resampling ×10 for picking.</td></tr>
@@ -694,6 +738,7 @@ python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import
 <tr><td>v11</td><td>Automatic picking (STA/LTA, MER, original routine; AIC; post-processing) with live preview; shot spectra.</td></tr>
 <tr><td>v12</td><td>File menu with import from the picker; trace ranges; gain in every preview; spectra corrected for the sensor response.</td></tr>
 <tr><td>v13</td><td>This manual: built into the picker (Help menu, F1, side panel) and as a PDF.</td></tr>
+<tr><td>v21</td><td>Monte Carlo uncertainty (Inversion window, tab 5): starting models typed, generated (grid or Latin hypercube) or read from csv / txt with any delimiter; pick perturbations; a chart of every starting model; parallel runs on a chosen number of worker processes in their own process, with stop and carry on; ensemble and bootstrap statistics (mean, median, spread, CV, percentile interval, bootstrap standard error of the mean, coverage, sensitivity to vTop / vBottom, run closest to the mean) with acceptance by chi² / RMS, saved to the set's analysis folder and shown in the model viewer. Corrected from the post-processing notebook: the bootstrap standard error is no longer reported as the model uncertainty; vectorised statistics. v20.1: the Inversion menu works on Python 3.10 and 3.11.</td></tr>
 <tr><td>v20</td><td>Travel-time inversion with pyGIMLi (Inversion menu, Ctrl+I; <code>run_inversion.py</code>): data and error model, live mesh with boundary markers, sensors and starting model, the scripts' parameters, runs in their own process with live misfit and the model of every iteration, inversion stats (convergence, dPhi, misfit per shot, data fit), and a model viewer window (rays, coverage mask / depth of investigation, regridding and smoothing, gradients, contours, colour bar, axes, legend, markers). Result files as the scripts, plus history and every iteration. Corrected from the scripts: error offsets (0-based sensors), line length, iterations in the summary. GitHub: automatic tests on every push; SGT files with station numbers read back on any receiver spacing; <code>environment.yml</code>.</td></tr>
 <tr><td>v19</td><td>⤓ Export on every plot (FWI Studio's export window: prefix, sizes in cm, dpi, font and line scale, png / tiff / pdf / svg / eps, main plot only). One exports folder per line (<code>&lt;line&gt;_exports</code>) for figures, the export window's files, reports and the SGT file. Session backups of the pick file and the <i>Continue a picking session?</i> window with all picks of each session. Start from a terminal or the Anaconda Prompt (<code>python run_picker.py</code>); pyGIMLi is required; segypy and bruges optional.</td></tr>
 <tr><td>v18</td><td>Topography at any time (File &gt; Topography, Ctrl+T; Data; Tools) without moving picks, with preview and restore. Station tables: one row per tape station, shots and receivers together (recognised automatically). x = 0 at tape position 0 m (the first shot) in the offset view and the export. Export: companion topography and line-end files; err line length = shot span and t ≤ 0 left out, as in <code>convertPicks2Gimli</code>; checked against that script. Reciprocity: station match tolerance in the QC window, shared with the canvas guider; the guider uses the pick at the shot, not the first within 1 m; shots without a receiver are hatched on the checkerboard.</td></tr>

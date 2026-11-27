@@ -157,8 +157,10 @@ def field_values(res, key, iteration=None):
     return -g[:, 1] if key == 'vgrad' else g[:, 0]
 
 
-def draw_model(fig, res, opts=None, iteration=None):
-    """Draw the model of run `res` (ic.RunResult) into `fig`. Returns the main axes."""
+def draw_model(fig, res, opts=None, iteration=None, values=None, label=None, title=None, stdcov=None):
+    """Draw the model of run `res` (ic.RunResult) into `fig`. Returns the main axes.
+    v21: values / label / title / stdcov draw another cell field on the same mesh (Monte Carlo
+    statistics), with stdcov for the coverage masks."""
     import matplotlib
     from matplotlib.collections import LineCollection
     from matplotlib.tri import Triangulation
@@ -172,21 +174,23 @@ def draw_model(fig, res, opts=None, iteration=None):
         ax.text(0.5, 0.5, 'no model yet', ha='center', va='center', transform=ax.transAxes)
         return ax
     fs = o.fontsize
-    vals = field_values(res, o.field, iteration)
+    vals = np.asarray(values, float) if values is not None else field_values(res, o.field, iteration)
     cc = np.array(mesh.cellCenters())[:, :2]
     topo = res.topography()
     tab = res.model_table()
-    stdcov = np.asarray(tab['coverage'], float) if tab is not None else None
+    stdcov = np.asarray(stdcov, float) if stdcov is not None else (
+        np.asarray(tab['coverage'], float) if tab is not None else None)
     bottom = None
     if stdcov is not None and (o.mask == 'doi' or o.show_doi):
         bottom = ic.coverage_bottom(cc[:, 0], cc[:, 1], stdcov, topo, o.doi_bin, o.doi_smooth)
-    label = dict((k, l) for k, _, l in FIELDS)[o.field]
+    label = label or dict((k, l) for k, _, l in FIELDS).get(o.field, '')
+    ftitle = title or dict((k, t) for k, t, _ in FIELDS).get(o.field, '')
     cmap = matplotlib.colormaps[o.cmap].copy()
     cmap.set_bad('white')
     finite = vals[np.isfinite(vals)]
     vmin = o.vmin if o.vmin not in (None, '') else (float(np.percentile(finite, 1)) if finite.size else 0)
     vmax = o.vmax if o.vmax not in (None, '') else (float(np.percentile(finite, 99)) if finite.size else 1)
-    if o.field in ('vgrad', 'hgrad') and o.vmin in (None, '') and o.vmax in (None, '') and finite.size:
+    if (o.field in ('vgrad', 'hgrad') or (values is not None and o.field.startswith('sens'))) and o.vmin in (None, '') and o.vmax in (None, '') and finite.size:
         a_ = float(np.percentile(np.abs(finite), 98))           # gradients: centred on zero
         vmin, vmax = -a_, a_
     if vmax <= vmin:
@@ -270,7 +274,7 @@ def draw_model(fig, res, opts=None, iteration=None):
     ax.set_ylabel(o.ylabel, fontsize=fs)
     ax.tick_params(labelsize=fs * 0.9)
     it_txt = '' if iteration is None else f' (iteration {iteration})'
-    ax.set_title((o.title or dict((k, t) for k, t, _ in FIELDS)[o.field]) + it_txt, fontsize=fs * 1.1)
+    ax.set_title((o.title or ftitle) + it_txt, fontsize=fs * 1.1)
     ax.set_aspect(float(o.vexag) if o.vexag else 'auto')
     xl = list(ax.get_xlim())
     yl = list(ax.get_ylim())
@@ -301,8 +305,7 @@ def draw_model(fig, res, opts=None, iteration=None):
             cax.xaxis.set_ticks_position('top')
             cax.xaxis.set_label_position('top')
             ax.set_title('')                                # the colour bar takes the title's place
-            cax.set_title(ax.get_title() if False else ((o.title or dict((k, t) for k, t, _ in FIELDS)[o.field])
-                                                        + it_txt), fontsize=fs * 1.1, pad=fs * 1.6)
+            cax.set_title((o.title or ftitle) + it_txt, fontsize=fs * 1.1, pad=fs * 1.6)
     fig._model_grid = (GX, GY, G)
     return ax
 
@@ -354,11 +357,16 @@ if _HAVE_QT:
     class ModelViewer(QMainWindow):
         """The model of one run, with every display control."""
 
-        def __init__(self, run_dir, parent=None, opts=None):
+        def __init__(self, run_dir, parent=None, opts=None, extra=None, stdcov=None, title=''):
             super().__init__(parent)
             self.res = ic.RunResult(run_dir)
-            self.setWindowTitle(f'Model viewer - {self.res.settings.line} - {self.res.name}')
+            # v21: extra cell fields on the same mesh (Monte Carlo statistics): [(key, title, label, values)]
+            self.extra = {k: (t, l, v) for k, t, l, v in (extra or [])}
+            self.extra_stdcov = stdcov
+            self.setWindowTitle(title or f'Model viewer - {self.res.settings.line} - {self.res.name}')
             self.opts = opts or ViewOptions()
+            if self.extra and self.opts.field not in self.extra:
+                self.opts.field = next(iter(self.extra))
             self._w = {}
             self._timer = QTimer(self)
             self._timer.setSingleShot(True)
@@ -391,6 +399,9 @@ if _HAVE_QT:
             self.fig._export_subdir = 'inversion'
             self.fig._export_tag = lambda: f"{self.res.name}_{self.opts.field}" + (
                 '' if self._iteration() is None else f'_iter{self._iteration():02d}')
+            if self.extra:
+                self.fig._export_subdir = 'monte_carlo'
+                self.fig._export_tag = lambda: f"{self.windowTitle().split(' - ')[-1]}_{self.opts.field}"
             self.canvas = FigureCanvas(self.fig)
             self.toolbar = Toolbar(self.canvas, right)
             rl.addWidget(self.toolbar)
@@ -455,7 +466,8 @@ if _HAVE_QT:
 
         def _build_controls(self):
             f = self._group('Model')
-            self._add(f, 'field', 'Field', 'combo', [(k, t) for k, t, _ in FIELDS])
+            self._add(f, 'field', 'Field', 'combo', [(k, t) for k, (t, _, _) in self.extra.items()]
+                      + [(k, t) for k, t, _ in FIELDS])
             self._add(f, 'mode', 'Display', 'combo', [('grid', 'regridded + smoothed'), ('cells', 'mesh cells')])
             self._add(f, 'dx', 'Grid dx', 'float', 0.02, 20, 0.05, 2, tip='Grid cell width (m)')
             self._add(f, 'dy', 'Grid dy', 'float', 0.02, 20, 0.05, 2, tip='Grid cell height (m)')
@@ -569,7 +581,12 @@ if _HAVE_QT:
             it = self._iteration()
             self.lbl_it.setText('final' if it is None else f'{it} of {its[-1]}')
             try:
-                draw_model(self.fig, self.res, self.opts, it)
+                if self.opts.field in self.extra:
+                    t_, l_, v_ = self.extra[self.opts.field]
+                    draw_model(self.fig, self.res, self.opts, None, values=v_, label=l_, title=t_,
+                               stdcov=self.extra_stdcov)
+                else:
+                    draw_model(self.fig, self.res, self.opts, it)
                 try:
                     self.fig.tight_layout()
                 except Exception:
@@ -619,7 +636,7 @@ if _HAVE_QT:
                 w.blockSignals(False)
             self.redraw()
 
-    def open_model_viewer(run_dir, parent=None):
-        w = ModelViewer(run_dir, parent)
+    def open_model_viewer(run_dir, parent=None, **kw):
+        w = ModelViewer(run_dir, parent, **kw)
         w.show()
         return w

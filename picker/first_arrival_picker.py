@@ -2821,10 +2821,10 @@ def open_pdf_manual():
 
 def show_about():
     QMessageBox.about(None, 'About the first-arrival picker',
-                      '<b>First-arrival picker</b> for refraction tomography (v20)<br><br>'
+                      '<b>First-arrival picker</b> for refraction tomography (v21)<br><br>'
                       'Manual and automatic first-break picking of SEG-Y and SU shot gathers, with '
                       'preprocessing, filtering, reciprocity QC, figure export, export to S G T '
-                      'or pyGIMLi files and travel-time inversion with pyGIMLi.<br><br>'
+                      'or pyGIMLi files, travel-time inversion with pyGIMLi and Monte Carlo uncertainty.<br><br>'
                       'Help &gt; User manual (F1) explains every window.')
 
 

@@ -14,6 +14,7 @@ An interactive first-arrival (first-break) picker for refraction travel-time tom
 - **Topography** at any time, including station tables (one row per tape station, shots and receivers together); optional writing of the geometry into the trace headers after a backup.
 - **Export for inversion**: S G T (station numbers or x positions, any delimiter) or the pyGIMLi unified data format with an error model, plus companion topography and line-end files; every file is read back after writing.
 - **Travel-time inversion with pyGIMLi** (Inversion menu, Ctrl+I, or `python picker/run_inversion.py data.txt`): error model, live mesh, runs in their own process with the misfit and model of every iteration, inversion statistics (convergence, misfit per shot, data fit) and a model viewer (rays, coverage mask, smoothing, gradients, contours, publication layout).
+- **Monte Carlo uncertainty**: many inversions with other starting models (typed, generated or read from a csv / txt) and perturbed picks, in parallel on a chosen number of CPU cores (also as a cluster job: `python picker/mc_runner.py --mc <set>`), with ensemble and bootstrap statistics (mean, spread, CV, intervals, standard error of the mean, sensitivity to the starting model).
 - **Figures for papers and slides**: an Export button on every plot (size in cm, dpi, font scale, png / tiff / pdf / svg / eps, main plot only), into one exports folder per line.
 - **Session backups** of the pick file, with a window to continue the latest or an earlier session, showing all its picks.
 - **User manual** inside the program (Help, F1 in every window) and as a PDF.
@@ -48,11 +49,11 @@ Python 3 with Qt 5. In Spyder, set *Preferences > IPython console > Graphics > B
 | `example_data/` | synthetic SEG-Y survey (11 shots, 96 receivers) with true first-arrival times and a demo topography file |
 | `legacy/` | the earlier Manual Picker version 1.3.1 scripts |
 
-The commit history follows the development versions v2 to v20; each commit message lists that version's changes.
+The commit history follows the development versions v2 to v21; each commit message lists that version's changes.
 
 ## Tests
 
-`pytest` runs the automatic tests in `tests/` on the synthetic survey (import, pyGIMLi and S G T export read back, session backups, figure export, launcher, a short pyGIMLi inversion with its result files). GitHub runs them on every push (badge above).
+`pytest` runs the automatic tests in `tests/` on the synthetic survey (import, pyGIMLi and S G T export read back, session backups, figure export, launcher, a short pyGIMLi inversion with its result files, a small parallel Monte Carlo set and its statistics). GitHub runs them on every push (badge above).
 
 ## Data
 
