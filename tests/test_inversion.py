@@ -33,7 +33,9 @@ def test_short_inversion_and_outputs(survey, true_picks, tmp_path):
     assert st['state'] == 'done'
     res = ic.RunResult(run)
     h = res.history()
-    assert len(h) == len(res.iterations()) >= 2 and h[-1, 1] < h[0, 1]
+    assert len(h) >= 2 and h[-1, 1] < h[0, 1]
+    assert res.iterations() == [int(h[-1, 0])]                    # v22: only the final model is kept
+    assert st.get('stop_reason')
     tab = pd.read_csv(os.path.join(run, 'SYN_Inverted_Model.csv'))
     assert len(tab) == res.mesh().cellCount()
     assert {'velocity', 'Vertical_vel_gradient', 'Horizontal_vel_gradient', 'coverage'} <= set(tab.columns)

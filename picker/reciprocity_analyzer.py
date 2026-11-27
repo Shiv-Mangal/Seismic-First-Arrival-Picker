@@ -1030,8 +1030,8 @@ if _HAVE_QT:
             self._cbar.ax.axhline(r.threshold_ms, color='k', lw=1.5)   # threshold on the colour bar
             ax.set_xlabel('Shot no. (partner)')
             ax.set_ylabel('Shot no.')
-            ax.set_title(f'Absolute reciprocity error (grey = no pair; '
-                         f'black line on colour bar = {r.threshold_ms:g} ms)')
+            ax.set_title(f'Absolute reciprocity error\n(grey = no pair; black line on colour bar = '
+                         f'{r.threshold_ms:g} ms)')
             step = max(1, n // 20)
             ticks = np.arange(1, n + 1, step)
             ax.set_xticks(ticks)
@@ -1058,7 +1058,7 @@ if _HAVE_QT:
             axb.set_yticks(ticks)
             axb.set_xlabel('Median |Δt| per shot (ms)')
             axb.set_ylabel('Shot no.')
-            axb.set_title('Per-shot error (red = flagged, grey = no pairs)')
+            axb.set_title('Per-shot error\n(red = flagged, grey = no pairs)')
             axb.grid(alpha=0.3, axis='x')
             axb.legend(loc='lower right', fontsize='small')
             self.canvas.draw_idle()

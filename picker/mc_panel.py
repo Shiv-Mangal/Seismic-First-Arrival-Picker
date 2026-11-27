@@ -35,6 +35,16 @@ import mc_core as mc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MC_RUNNER = os.path.join(HERE, 'mc_runner.py')
+def _styled(func):
+    import functools
+
+    @functools.wraps(func)
+    def wrap(*a, **k):
+        from inversion_window import styled
+        return styled(func)(*a, **k)
+    return wrap
+
+
 PAGE = 24                                  # starting models per page of the initial-model chart
 
 
@@ -178,6 +188,10 @@ class MonteCarloPanel(QWidget):
         f.addRow('Sets go in', r5)
         self.ed_name = QLineEdit(time.strftime('mc_%Y%m%d_%H%M'))
         f.addRow('Set name', self.ed_name)
+        self.chk_mc_rays = QCheckBox('keep ray paths and VTK of every run (a few MB each)')
+        self.chk_mc_rays.setToolTip('Off: each run keeps its model table, misfit tables and summary (all the '
+                                    'statistics need); no files per iteration in either case')
+        f.addRow(self.chk_mc_rays)
         lv.addWidget(g)
         self.lbl_setup = QLabel()
         self.lbl_setup.setWordWrap(True)
@@ -276,6 +290,7 @@ class MonteCarloPanel(QWidget):
                 return float(st['elapsed_s']), os.path.basename(r)
         return None, None
 
+    @_styled
     def _pert_changed(self):
         P = np.array(self.perturbations(), float).reshape(-1, 2)
         n = self.n_runs()
@@ -297,14 +312,14 @@ class MonteCarloPanel(QWidget):
         if len(P):
             ax.scatter(P[:, 0], P[:, 1], s=36, c=np.arange(len(P)), cmap='viridis', edgecolors='k', linewidths=0.4)
             for k, (t_, b_) in enumerate(P[:60]):
-                ax.annotate(str(k + 1), (t_, b_), fontsize=7, xytext=(3, 3), textcoords='offset points')
+                ax.annotate(str(k + 1), (t_, b_), fontsize=9, xytext=(3, 3), textcoords='offset points')
             s = self.win.read_settings()
             ax.scatter([s.v_top], [s.v_bottom], marker='*', s=200, c='r', edgecolors='k', zorder=5,
                        label='tab 2 (deterministic)')
             lo = min(P.min(), s.v_top)
             hi = max(P.max(), s.v_bottom)
-            ax.plot([lo, hi], [lo, hi], 'k:', lw=0.8, label='vBottom = vTop')
-            ax.legend(fontsize=8)
+            ax.plot([lo, hi], [lo, hi], 'k:', lw=1.2, label='vBottom = vTop')
+            ax.legend(fontsize=9.5)
         ax.set_xlabel('vTop (m/s)')
         ax.set_ylabel('vBottom (m/s)')
         ax.set_title(f'{len(P)} starting models', fontsize='medium')
@@ -333,6 +348,7 @@ class MonteCarloPanel(QWidget):
         v.addWidget(self.p_models, 1)
         return w
 
+    @_styled
     def draw_models(self):
         from matplotlib.tri import Triangulation
         fig = self.p_models.fig
@@ -376,14 +392,14 @@ class MonteCarloPanel(QWidget):
             im = ax.tripcolor(T, facecolors=v, cmap='jet_r', vmin=vmin, vmax=vmax,
                               edgecolors='0.3' if self.chk_models_edges.isChecked() else 'none', linewidth=0.05)
             ax.plot(sx[np.argsort(sx[:, 0]), 0], sx[np.argsort(sx[:, 0]), 1], 'k-', lw=0.6)
-            ax.plot(sx[si, 0], sx[si, 1], 'r*', ms=3)
+            ax.plot(sx[si, 0], sx[si, 1], 'r*', ms=5)
             ax.set_aspect('equal')
-            ax.set_title(f'#{pg_ * PAGE + k + 1}: {t:g} -> {b:g} m/s', fontsize=8)
-            ax.tick_params(labelsize=7)
+            ax.set_title(f'#{pg_ * PAGE + k + 1}: {t:g} -> {b:g} m/s', fontsize=9.5)
+            ax.tick_params(labelsize=9)
         for ax in axs[-1, :]:
-            ax.set_xlabel('x (m)', fontsize=8)
+            ax.set_xlabel('x (m)', fontsize=9.5)
         for ax in axs[:, 0]:
-            ax.set_ylabel('Elev. (m)', fontsize=8)
+            ax.set_ylabel('Elev. (m)', fontsize=9.5)
         if im is not None:
             fig.colorbar(im, ax=axs.ravel().tolist(), shrink=0.8, pad=0.01, label='Starting velocity (m/s)')
         fig.suptitle(f'Starting models (gradient vTop -> vBottom below the surface), page {pg_ + 1} of {npg}',
@@ -530,7 +546,8 @@ class MonteCarloPanel(QWidget):
             m = mc.MCSettings(inv=d, perturbations=[list(map(float, p)) for p in P],
                               pick_noise=self.cb_noise.currentData(), noise_scale=self.sp_noise.value(),
                               realizations=self.sp_real.value(), seed=self.sp_seed.value(),
-                              workers=self.sp_workers.value(), name=name)
+                              workers=self.sp_workers.value(), name=name,
+                              write_rays=self.chk_mc_rays.isChecked(), write_vtk=self.chk_mc_rays.isChecked())
             m.save(os.path.join(folder, 'mc_settings.json'))
             self.folder = folder
             self.ed_name.setText(time.strftime('mc_%Y%m%d_%H%M_2') if name.startswith('mc_') else name + '_2')
@@ -609,6 +626,7 @@ class MonteCarloPanel(QWidget):
                 if j == 4:
                     it.setForeground(QColor(colors.get(v, '#555')))
 
+    @_styled
     def _draw_runs(self, rows):
         fig = self.p_runs.fig
         fig.clear()
@@ -628,7 +646,7 @@ class MonteCarloPanel(QWidget):
         if waiting:
             ax1.scatter([r['vtop'] for r in waiting], [r['vbottom'] for r in waiting], s=30, facecolors='none',
                         edgecolors='0.6', label='waiting / running')
-            ax1.legend(fontsize=8)
+            ax1.legend(fontsize=9.5)
         ax1.set_xlabel('vTop (m/s)')
         ax1.set_ylabel('vBottom (m/s)')
         ax1.set_title('chi² of each starting model', fontsize='medium')
@@ -697,7 +715,7 @@ class MonteCarloPanel(QWidget):
         scroll.setWidget(left)
         w.addWidget(scroll)
         right = QSplitter(Qt.Vertical)
-        self.p_stat = self.Plot('mc_statistic', (10, 4.5))
+        self.p_stat = self.Plot('mc_statistic', (10, 4.5), layout=False)
         self.p_stat.fig._export_subdir = 'monte_carlo'
         right.addWidget(self.p_stat)
         self.p_diag = self.Plot('mc_diagnostics', (10, 3.5))
@@ -751,6 +769,7 @@ class MonteCarloPanel(QWidget):
         t, l = next((t, l) for kk, t, l in ma.FIELDS if kk == k)
         return k, t, l
 
+    @_styled
     def draw_stats(self):
         import model_viewer as mv
         fig = self.p_stat.fig
@@ -774,6 +793,7 @@ class MonteCarloPanel(QWidget):
         self.p_stat.draw()
         self._draw_diag()
 
+    @_styled
     def _draw_diag(self):
         fig = self.p_diag.fig
         fig.clear()
@@ -783,16 +803,16 @@ class MonteCarloPanel(QWidget):
         ax1.hist(e.chi2[ok], bins=max(5, min(30, ok.sum() // 2)), color='#2e86c1', edgecolor='k', label='used')
         if (~ok).any():
             ax1.hist(e.chi2[~ok], bins=10, color='0.8', edgecolor='k', label='left out')
-            ax1.legend(fontsize=7)
+            ax1.legend(fontsize=9)
         ax1.set_xlabel('chi²')
         ax1.set_ylabel('Runs')
-        ax1.set_title('Fit of the runs', fontsize=9)
+        ax1.set_title('Fit of the runs', fontsize=11)
         sc = ax2.scatter(e.vtop, e.vbottom, c=e.chi2, cmap='viridis_r', s=30, edgecolors=np.where(ok, 'k', 'r'),
                          linewidths=0.6)
         fig.colorbar(sc, ax=ax2, label='chi²', pad=0.01)
         ax2.set_xlabel('vTop (m/s)')
         ax2.set_ylabel('vBottom (m/s)')
-        ax2.set_title('chi² over the starting models', fontsize=9)
+        ax2.set_title('chi² over the starting models', fontsize=11)
         # spread with depth below the surface (covered cells)
         topo = e.ref.topography()
         depth = ic.surface_on(e.x, topo) - e.y if topo is not None else -e.y
@@ -806,13 +826,13 @@ class MonteCarloPanel(QWidget):
             ax3.plot(sd, dm, 'o-', color='#c0392b', label='spread (std)')
             ax3.plot(se, dm, 's--', color='#1f618d', ms=4, label='SE of the mean')
             ax3.invert_yaxis()
-            ax3.legend(fontsize=7)
+            ax3.legend(fontsize=9)
         ax3.set_xlabel('m/s')
         ax3.set_ylabel('Depth below surface (m)')
-        ax3.set_title('Uncertainty with depth (covered cells)', fontsize=9)
+        ax3.set_title('Uncertainty with depth (covered cells)', fontsize=11)
         for ax in (ax1, ax2, ax3):
             ax.grid(alpha=0.3)
-            ax.tick_params(labelsize=8)
+            ax.tick_params(labelsize=10)
         self.p_diag.fig._export_tag = f'{os.path.basename(self.folder)}_diagnostics'
         self.p_diag.draw()
 

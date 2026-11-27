@@ -92,3 +92,35 @@ def test_launcher_check():
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     assert 'pygimli' in r.stdout
+
+
+def test_export_fits_layout_to_the_page(tmp_path):
+    """v22: long titles wrapped and crowded tick labels thinned in a single-column export."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import figure_export as fx
+    fig = plt.figure(figsize=(20, 7), layout='constrained')
+    a1, a2 = fig.subplots(1, 2)
+    a1.imshow(np.random.rand(18, 18), extent=(0.5, 18.5, 18.5, 0.5))
+    a1.set_xticks(range(1, 19))
+    a1.tick_params(labelsize=13)
+    a1.set_title('Absolute reciprocity error (grey = no pair; black line on colour bar = 2 ms)', fontsize=14)
+    a2.set_title('Per-shot error (red = flagged, grey = no pairs)', fontsize=14)
+    seen = {}
+    orig = fx.tidy_for_page
+
+    def spy(f):
+        undo = orig(f)
+        r = f.canvas.get_renderer()
+        f.draw_without_rendering()
+        seen['titles_ok'] = (a1.title.get_window_extent(r).x1 <= a2.get_window_extent(r).x0 + 2)
+        seen['ticks'] = len(a1.get_xticks())
+        return undo
+    fx.tidy_for_page = spy
+    try:
+        fx.save_figure(fig, str(tmp_path / 'r.png'), fx.ExportOptions(size='single column (8.5 cm)'))
+    finally:
+        fx.tidy_for_page = orig
+    assert seen['titles_ok'] and seen['ticks'] < 18
+    assert '\n' not in a1.get_title() and len(a1.get_xticks()) == 18      # the window is unchanged

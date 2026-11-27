@@ -85,12 +85,17 @@ class InvSettings:
     v_min: float = 100.0
     v_max: float = 3000.0
     max_iter: int = 20
-    stop_at_chi1: bool = False          # stop once chi^2 <= 1
+    stop_at_chi1: bool = True           # stop once chi^2 <= 1 (pyGIMLi's default)
+    min_dphi_pct: float = 1.0           # v22: stop when the objective function changes less than this (%)
+    rms_goal_ms: float = 2.0            # v22: RMS misfit aimed at (shown in the plots and the summary)
+    keep_iterations: bool = False       # v22: keep the model of every iteration (for the slider); otherwise
+    #                                     only the latest (live view) and the final model are written
     robust_data: bool = False           # L1-like data weighting (outliers)
     blocky_model: bool = False          # L1 model roughness (sharper contrasts)
     threads: int = 0                    # 0 = pyGIMLi's default
     # outputs
     write_vtk: bool = True
+    write_rays: bool = True             # v22: ray paths (.pkl, a few MB); off for Monte Carlo sets
     sol: list = field(default_factory=list)     # start of line [easting, northing] for the UTM VTK
     eol: list = field(default_factory=list)     # end of line
     note: str = ''
@@ -266,7 +271,7 @@ def new_run_dir(base, label=''):
     while os.path.exists(p):
         p = os.path.join(base, f'{name}_{k}')
         k += 1
-    os.makedirs(os.path.join(p, 'iterations'))
+    os.makedirs(p)
     return p
 
 
@@ -300,7 +305,8 @@ def run(s, run_dir, log=print):
             pg.setThreadCount(int(s.threads))
         except Exception:
             pass
-    os.makedirs(os.path.join(run_dir, 'iterations'), exist_ok=True)
+    if s.keep_iterations:
+        os.makedirs(os.path.join(run_dir, 'iterations'), exist_ok=True)
     s.save(os.path.join(run_dir, 'settings.json'))
     t0 = time.time()
     write_status(run_dir, state='preparing', iteration=-1, message='reading data and building the mesh',
@@ -324,22 +330,34 @@ def run(s, run_dir, log=print):
         r = np.asarray(inv.response, float)
         rms = float(np.sqrt(np.mean((r - t_obs) ** 2)) * 1e3)
         chi2 = float(inv.chi2())
-        dphi = (1 - chi2 / hist[-1]['chi2']) * 100 if hist else 0.0
+        try:                                   # pyGIMLi's objective function (data + regularization)
+            phi = float(inv.phi())
+        except Exception:
+            phi = chi2
+        dphi = (1 - phi / hist[-1]['phi']) * 100 if hist and hist[-1]['phi'] > 0 else 0.0
         try:
             lam = float(inv.inv.getLambda())
         except Exception:
             lam = float(s.lam)
         hist.append(dict(iteration=int(i), chi2=chi2, rms_ms=rms, dphi_pct=float(dphi), lam=lam,
-                         time_s=time.time() - t0))
-        np.savez_compressed(os.path.join(run_dir, 'iterations', f'iter_{i:03d}.npz'),
-                            velocity=(1.0 / m).astype(np.float32), response=r.astype(np.float32))
+                         time_s=time.time() - t0, phi=phi))
+        z = dict(velocity=(1.0 / m).astype(np.float32), response=r.astype(np.float32), iteration=int(i))
+        np.savez(os.path.join(run_dir, 'latest.npz.tmp.npz'), **z)          # live view: only the latest
+        for _k in range(20):                     # (Windows: the window may be reading the old one)
+            try:
+                os.replace(os.path.join(run_dir, 'latest.npz.tmp.npz'), os.path.join(run_dir, 'latest.npz'))
+                break
+            except OSError:
+                time.sleep(0.1)
+        if s.keep_iterations:
+            np.savez_compressed(os.path.join(run_dir, 'iterations', f'iter_{i:03d}.npz'), **z)
         with open(os.path.join(run_dir, 'history.csv'), 'w') as f:
-            f.write('iteration,chi2,rms_ms,dphi_pct,lambda,time_s\n')
+            f.write('iteration,chi2,rms_ms,dphi_pct,lambda,time_s,phi\n')
             for h in hist:
                 f.write(f"{h['iteration']},{h['chi2']:.6g},{h['rms_ms']:.6g},{h['dphi_pct']:.4g},"
-                        f"{h['lam']:.6g},{h['time_s']:.2f}\n")
+                        f"{h['lam']:.6g},{h['time_s']:.2f},{h['phi']:.6g}\n")
         write_status(run_dir, state='running', iteration=int(i), chi2=chi2, rms_ms=rms, dphi_pct=float(dphi),
-                     message=f'iteration {i}: chi2 = {chi2:.3f}, RMS = {rms:.3f} ms')
+                     message=f'iteration {i}: chi2 = {chi2:.3f}, RMS = {rms:.3f} ms, dPhi = {dphi:.2f} %')
         log(f'iteration {i:2d}: chi2 = {chi2:9.3f}  RMS = {rms:7.3f} ms  dPhi = {dphi:6.2f} %')
         if os.path.exists(os.path.join(run_dir, STOP_FILE)):
             raise StopRequested()
@@ -352,7 +370,8 @@ def run(s, run_dir, log=print):
     write_status(run_dir, state='running', message='starting model and first forward calculation')
     stopped = False
     kw = dict(lam=s.lam, zWeight=s.z_weight, useGradient=True, vTop=s.v_top, vBottom=s.v_bottom,
-              limits=[s.v_min, s.v_max], maxIter=int(s.max_iter), verbose=False, secNodes=int(s.sec_nodes))
+              limits=[s.v_min, s.v_max], maxIter=int(s.max_iter), verbose=False, secNodes=int(s.sec_nodes),
+              dPhi=float(s.min_dphi_pct))
     if s.robust_data:
         kw['robustData'] = True
     if s.blocky_model:
@@ -365,14 +384,31 @@ def run(s, run_dir, log=print):
     if not hist:
         write_status(run_dir, state='failed', message='no iteration was completed')
         return read_status(run_dir)
-    write_status(run_dir, state='writing', message='writing the result files')
-    write_results(s, run_dir, mgr, data, mesh, hist, time.time() - t0, stopped)
     final = hist[-1]
+    reason = stop_reason(s, hist, stopped)
+    log(f'Stopped: {reason}')
+    write_status(run_dir, state='writing', message='writing the result files', stop_reason=reason)
+    write_results(s, run_dir, mgr, data, mesh, hist, time.time() - t0, stopped, reason)
+    goal = '' if not s.rms_goal_ms else (f" (goal {s.rms_goal_ms:g} ms: {'met' if final['rms_ms'] <= s.rms_goal_ms else 'not met'})")
     write_status(run_dir, state='stopped' if stopped else 'done', iteration=final['iteration'],
-                 chi2=final['chi2'], rms_ms=final['rms_ms'], elapsed_s=time.time() - t0,
-                 message=('stopped' if stopped else 'finished') + f" after {final['iteration']} iteration(s): "
-                 f"chi2 = {final['chi2']:.3f}, RMS = {final['rms_ms']:.3f} ms")
+                 chi2=final['chi2'], rms_ms=final['rms_ms'], elapsed_s=time.time() - t0, stop_reason=reason,
+                 message=f"{reason} after {final['iteration']} iteration(s): chi2 = {final['chi2']:.3f}, "
+                 f"RMS = {final['rms_ms']:.3f} ms{goal}")
     return read_status(run_dir)
+
+
+def stop_reason(s, hist, stopped=False):
+    """Why the inversion ended, by pyGIMLi's criteria."""
+    if stopped:
+        return 'stopped by the user'
+    last = hist[-1]
+    if s.stop_at_chi1 and last['chi2'] <= 1:
+        return 'converged: chi² <= 1'
+    if last['iteration'] < int(s.max_iter) and last['iteration'] > 2 and last['dphi_pct'] < s.min_dphi_pct:
+        return f'converged: dPhi < {s.min_dphi_pct:g} %'
+    if last['iteration'] >= int(s.max_iter):
+        return 'reached the maximum number of iterations'
+    return 'ended by pyGIMLi'
 
 
 def shot_misfit(data, response):
@@ -387,14 +423,20 @@ def shot_misfit(data, response):
     return x[us], rms, n
 
 
-def write_results(s, run_dir, mgr, data, mesh, hist, elapsed, stopped=False):
+def write_results(s, run_dir, mgr, data, mesh, hist, elapsed, stopped=False, reason=''):
     import pandas as pd
     pg, tt = _pg()
     ln = s.line or 'line'
     # the last recorded model (also when stopped early)
-    last = np.load(os.path.join(run_dir, 'iterations', f"iter_{hist[-1]['iteration']:03d}.npz"))
-    vel = np.asarray(last['velocity'], float)
-    resp = np.asarray(last['response'], float)
+    with np.load(os.path.join(run_dir, 'latest.npz')) as last:
+        vel = np.array(last['velocity'], float)
+        resp = np.array(last['response'], float)
+    np.savez_compressed(os.path.join(run_dir, 'final.npz'), velocity=vel.astype(np.float32),
+                        response=resp.astype(np.float32), iteration=int(hist[-1]['iteration']))
+    try:
+        os.remove(os.path.join(run_dir, 'latest.npz'))
+    except OSError:
+        pass
     pd_mesh = mgr.paraDomain if mgr.paraDomain is not None and mgr.paraDomain.cellCount() == len(vel) else mesh
     grad = np.asarray(pg.solver.grad(pd_mesh, vel))
     try:
@@ -419,12 +461,13 @@ def write_results(s, run_dir, mgr, data, mesh, hist, elapsed, stopped=False):
     sx, srms, sn = shot_misfit(data, resp)
     pd.DataFrame({'shot_x': sx, 'rms_ms': srms, 'n_picks': sn}).to_csv(
         os.path.join(run_dir, f'{ln}_shot_misfit.csv'), index=False)
-    try:
-        rays = [np.asarray(r)[:, :2] for r in mgr.getRayPaths()]
-        with open(os.path.join(run_dir, f'{ln}_ray_paths.pkl'), 'wb') as f:
-            pickle.dump(rays, f)
-    except Exception:
-        pass
+    if s.write_rays:
+        try:
+            rays = [np.asarray(r)[:, :2].astype(np.float32) for r in mgr.getRayPaths()]
+            with open(os.path.join(run_dir, f'{ln}_ray_paths.pkl'), 'wb') as f:
+                pickle.dump(rays, f)
+        except Exception:
+            pass
     if s.write_vtk:
         try:
             m2 = pg.Mesh(pd_mesh)
@@ -445,7 +488,10 @@ def write_results(s, run_dir, mgr, data, mesh, hist, elapsed, stopped=False):
              f'Time Elapse (min): {elapsed / 60:.2f} min',
              f"Chi2 = {hist[-1]['chi2']:.4f}",
              f'RMS = {rms:.4f} ms',
-             f'Total Iterations = {n_it} (max {s.max_iter}){" - stopped by the user" if stopped else ""}',
+             f'Total Iterations = {n_it} (max {s.max_iter})',
+             f'Stopped: {reason or stop_reason(s, hist, stopped)} (criteria: chi2 <= 1 '
+             f'{"on" if s.stop_at_chi1 else "off"}, dPhi < {s.min_dphi_pct:g} %)',
+             f'RMS goal {s.rms_goal_ms:g} ms: {"met" if rms <= s.rms_goal_ms else "not met"}',
              f'Minimum and Maximum Velocities present in the model: {vel.min():.1f} m/s and {vel.max():.1f} m/s',
              f' Maximum depth allowed in the model: {s.para_depth} m',
              f'lam = {s.lam}, zWeight = {s.z_weight}, vTop = {s.v_top}, vBottom = {s.v_bottom}, '
@@ -512,15 +558,38 @@ class RunResult:
             return np.zeros((0, 6))
         return a
 
+    def _single(self):
+        """final.npz (finished run) or latest.npz (running)."""
+        for n in ('final.npz', 'latest.npz'):
+            p = os.path.join(self.dir, n)
+            if os.path.isfile(p):
+                try:
+                    with np.load(p) as z:
+                        return int(z['iteration']), p
+                except Exception:
+                    pass
+        return None, None
+
     def iterations(self):
+        """Iterations with a stored model: every one if kept, else only the latest / final."""
         d = os.path.join(self.dir, 'iterations')
-        if not os.path.isdir(d):
-            return []
-        return sorted(int(m.group(1)) for m in (re.match(r'iter_(\d+)\.npz$', n) for n in os.listdir(d)) if m)
+        its = []
+        if os.path.isdir(d):
+            its = sorted(int(m.group(1)) for m in (re.match(r'iter_(\d+)\.npz$', n) for n in os.listdir(d)) if m)
+        i, _ = self._single()
+        if i is not None and i not in its:
+            its.append(i)
+        return sorted(its)
 
     def iteration(self, i):
-        z = np.load(os.path.join(self.dir, 'iterations', f'iter_{i:03d}.npz'))
-        return np.asarray(z['velocity'], float), np.asarray(z['response'], float)
+        p = os.path.join(self.dir, 'iterations', f'iter_{i:03d}.npz')
+        if not os.path.isfile(p):
+            j, p2 = self._single()
+            if j != i or p2 is None:
+                raise FileNotFoundError(f'iteration {i} was not kept')
+            p = p2
+        with np.load(p) as z:
+            return np.array(z['velocity'], float), np.array(z['response'], float)
 
     def mesh(self):
         if self._mesh is None and os.path.isfile(os.path.join(self.dir, 'mesh.bms')):

@@ -53,12 +53,39 @@ MONO = QFont('Monospace')
 MONO.setStyleHint(QFont.TypeWriter)
 
 
+STYLE = {'font.size': 11, 'axes.titlesize': 12, 'axes.labelsize': 11, 'xtick.labelsize': 10,
+         'ytick.labelsize': 10, 'legend.fontsize': 9.5, 'lines.linewidth': 1.8, 'lines.markersize': 6,
+         'axes.linewidth': 1.0, 'grid.alpha': 0.3, 'figure.titlesize': 12.5}
+
+
+def screen_dpi():
+    """v22: the screen's logical dpi, so text has its real point size on high-resolution screens."""
+    try:
+        from PyQt5.QtWidgets import QApplication
+        scr = QApplication.primaryScreen()
+        return max(72.0, float(scr.logicalDotsPerInch())) if scr is not None else 96.0
+    except Exception:
+        return 96.0
+
+
+def styled(func):
+    """Draw with readable fonts and lines (v22)."""
+    import functools
+    import matplotlib
+
+    @functools.wraps(func)
+    def wrap(*a, **k):
+        with matplotlib.rc_context(STYLE):
+            return func(*a, **k)
+    return wrap
+
+
 class Plot(QWidget):
     """Figure + toolbar (with the Export button); tag and folder for the file names."""
 
-    def __init__(self, tag, figsize=(8, 5), parent=None):
+    def __init__(self, tag, figsize=(8, 5), parent=None, layout=True):
         super().__init__(parent)
-        self.fig = Figure(figsize=figsize, dpi=100)
+        self.fig = Figure(figsize=figsize, dpi=screen_dpi(), layout='constrained' if layout else None)
         self.fig._export_tag = tag
         self.fig._export_subdir = 'inversion'
         self.canvas = FigureCanvas(self.fig)
@@ -68,10 +95,11 @@ class Plot(QWidget):
         lay.addWidget(self.canvas, 1)
 
     def draw(self):
-        try:
-            self.fig.tight_layout()
-        except Exception:
-            pass
+        if self.fig.get_layout_engine() is None:
+            try:
+                self.fig.tight_layout()
+            except Exception:
+                pass
         self.canvas.draw_idle()
 
 
@@ -165,6 +193,10 @@ class InversionWindow(QMainWindow):
         self.p_mc = mc_panel.MonteCarloPanel(self)
         self.tabs.addTab(self.p_mc, '5  Monte Carlo')
         self.tabs.currentChanged.connect(self._tab_changed)
+        self._mesh_redraw_timer = QTimer(self)
+        self._mesh_redraw_timer.setSingleShot(True)
+        self._mesh_redraw_timer.timeout.connect(lambda: self.mesh is not None and self._draw_mesh())
+        self._link_velocities()
         v.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self.statusBar().showMessage(f'Runs are saved in {self.base_dir}')
@@ -213,6 +245,10 @@ class InversionWindow(QMainWindow):
         s.v_max = self.sp_vmax.value()
         s.max_iter = self.sp_iter.value()
         s.stop_at_chi1 = self.chk_chi1.isChecked()
+        s.min_dphi_pct = self.sp_dphi.value()
+        s.rms_goal_ms = self.sp_goal.value()
+        s.keep_iterations = self.chk_keepit.isChecked()
+        s.write_rays = self.chk_rays.isChecked()
         s.robust_data = self.chk_robust.isChecked()
         s.blocky_model = self.chk_blocky.isChecked()
         s.threads = self.sp_threads.value()
@@ -318,6 +354,7 @@ class InversionWindow(QMainWindow):
         self._draw_data()
         self._mesh_timer.start(200)
 
+    @styled
     def _draw_data(self):
         import matplotlib
         fig = self.p_data.fig
@@ -340,8 +377,8 @@ class InversionWindow(QMainWindow):
         for k in us:
             m = s == k
             o = np.argsort(xy[g[m], 0])
-            ax1.plot(xy[g[m], 0][o], t[m][o], '.-', ms=3, lw=0.8, color=cmap(norm(xy[k, 0])))
-        ax1.scatter(xs, np.zeros_like(xs), marker='*', s=60, c=[cmap(norm(x)) for x in xs], edgecolors='k',
+            ax1.plot(xy[g[m], 0][o], t[m][o], '.-', ms=5, lw=1.3, color=cmap(norm(xy[k, 0])))
+        ax1.scatter(xs, np.zeros_like(xs), marker='*', s=110, c=[cmap(norm(x)) for x in xs], edgecolors='k',
                     linewidths=0.4, zorder=5, clip_on=False)
         ax1.set_ylim(max(t.max() * 1.05, 1), 0)
         ax1.set_xlabel('x (m)')
@@ -349,7 +386,7 @@ class InversionWindow(QMainWindow):
         ax1.set_title(f'{len(t)} travel times on {len(us)} shots (coloured by shot position)', fontsize='medium')
         ax1.grid(alpha=0.3)
         off = ic.offsets(d)
-        ax2.scatter(off, e, s=6, c=xy[s, 0], cmap='turbo', norm=norm)
+        ax2.scatter(off, e, s=12, c=xy[s, 0], cmap='turbo', norm=norm)
         ax2.set_xlabel('Offset (m)')
         ax2.set_ylabel('Error (ms)')
         ax2.set_title(f'Error model: {self.settings.error_mode}', fontsize='medium')
@@ -379,6 +416,15 @@ class InversionWindow(QMainWindow):
         f.addRow('Margin (paraBoundary)', self.sp_bound)
         f.addRow('Quality', self.sp_qual)
         f.addRow('Secondary nodes', self.sp_sec)
+        # v22: the starting model and the allowed velocities here too (the same values as tab 2)
+        self.m_vtop = _dspin(10, 20000, s.v_top, 50, 0, ' m/s', 'vTop: starting velocity at the surface')
+        self.m_vbot = _dspin(10, 20000, s.v_bottom, 50, 0, ' m/s', 'vBottom: starting velocity at the bottom')
+        self.m_vmin = _dspin(1, 20000, s.v_min, 50, 0, ' m/s', 'limits: lowest velocity allowed')
+        self.m_vmax = _dspin(1, 50000, s.v_max, 50, 0, ' m/s', 'limits: highest velocity allowed')
+        f.addRow('Start: v at the top', self.m_vtop)
+        f.addRow('Start: v at the bottom', self.m_vbot)
+        f.addRow('Lowest v allowed', self.m_vmin)
+        f.addRow('Highest v allowed', self.m_vmax)
         self.cb_meshcol = QComboBox()
         for d, t in (('start', 'starting model (vTop to vBottom)'), ('area', 'cell size'),
                      ('marker', 'cell markers'), ('none', 'outline only')):
@@ -389,7 +435,9 @@ class InversionWindow(QMainWindow):
         self.chk_edges.setChecked(True)
         self.chk_edges.toggled.connect(lambda *_: self._draw_mesh())
         f.addRow(self.chk_edges)
-        self.sp_mesh_ve = _dspin(0.2, 20, 1.0, 0.5, 1, ' x', 'Vertical exaggeration of the plot only')
+        self.sp_mesh_ve = _dspin(0.0, 20, 0.0, 0.5, 1, ' x', 'Vertical exaggeration of the plot only '
+                                 '(0 = fill the window, 1 = true scale)')
+        self.sp_mesh_ve.setSpecialValueText('fill the window')
         self.sp_mesh_ve.valueChanged.connect(lambda *_: self._draw_mesh())
         f.addRow('Vertical exaggeration', self.sp_mesh_ve)
         self.chk_auto_mesh = QCheckBox('rebuild while I change a value')
@@ -405,10 +453,24 @@ class InversionWindow(QMainWindow):
         for wd in (self.sp_depth, self.sp_pdx, self.sp_cell, self.sp_bound, self.sp_qual):
             wd.valueChanged.connect(lambda *_: self.chk_auto_mesh.isChecked() and self._mesh_timer.start(700))
         w.addWidget(left)
-        self.p_mesh = Plot('mesh', (10, 6))
+        self.p_mesh = Plot('mesh', (10, 6), layout=False)
         w.addWidget(self.p_mesh)
         w.setSizes([380, 1150])
         return w
+
+    def _link_velocities(self):
+        """Mesh tab and tab 2 show the same four velocities (v22)."""
+        pairs = ((self.m_vtop, self.sp_vtop), (self.m_vbot, self.sp_vbot), (self.m_vmin, self.sp_vmin),
+                 (self.m_vmax, self.sp_vmax))
+        for a, b in pairs:
+            def sync(val, other=None):
+                if abs(other.value() - val) > 1e-9:
+                    other.blockSignals(True)
+                    other.setValue(val)
+                    other.blockSignals(False)
+                self._mesh_redraw_timer.start(400)
+            a.valueChanged.connect(lambda v, o=b: sync(v, o))
+            b.valueChanged.connect(lambda v, o=a: sync(v, o))
 
     def build_mesh(self):
         if self.data is None:
@@ -433,6 +495,7 @@ class InversionWindow(QMainWindow):
             f"{info['n_cells'] / 1000:.0f} thousand cells x {len(np.asarray(self.data['t']))} rays.")
         self._draw_mesh()
 
+    @styled
     def _draw_mesh(self):
         from matplotlib.collections import LineCollection
         from matplotlib.tri import Triangulation
@@ -450,8 +513,10 @@ class InversionWindow(QMainWindow):
             s = self.read_settings()
             try:
                 v = ic.gradient_start_model(self.data, self.mesh, s.v_top, s.v_bottom)
-                im = ax.tripcolor(T, facecolors=v, cmap='jet_r')
+                im = ax.tripcolor(T, facecolors=v, cmap='jet_r', vmin=s.v_min, vmax=s.v_max)
                 lab = 'Starting velocity (m/s)'
+                self._mesh_title_extra = (f'; start {s.v_top:g} -> {s.v_bottom:g} m/s, '
+                                          f'allowed {s.v_min:g}-{s.v_max:g} m/s')
             except Exception:
                 mode = 'area'
         if mode == 'area':
@@ -478,12 +543,12 @@ class InversionWindow(QMainWindow):
                                       linewidths=0.4, zorder=7, label='shots'))
         if im is not None:
             fig.colorbar(im, ax=ax, label=lab, pad=0.01, fraction=0.03)
-        ax.set_aspect(self.sp_mesh_ve.value())
+        ax.set_aspect(self.sp_mesh_ve.value() or 'auto')
         ax.set_xlabel('x (m)')
         ax.set_ylabel('Elevation (m)')
-        ax.set_title(f'Parameter mesh: {self.mesh.cellCount()} cells', fontsize='medium')
-        ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=4, fontsize=8,
-                  frameon=False)
+        ax.set_title(f'Parameter mesh: {self.mesh.cellCount()} cells'
+                     + (getattr(self, '_mesh_title_extra', '') if mode == 'start' else ''))
+        ax.legend(handles=handles, loc='lower right', fontsize=9.5, framealpha=0.9)
         self.p_mesh.draw()
 
     # ------------------------------------------------------------------ tab 2
@@ -511,11 +576,24 @@ class InversionWindow(QMainWindow):
             f.addRow(lab, wd)
         self.chk_chi1 = QCheckBox('stop at chi² <= 1 (data fitted within their errors)')
         self.chk_chi1.setChecked(s.stop_at_chi1)
+        f.addRow(self.chk_chi1)
+        self.sp_dphi = _dspin(0.0, 50.0, s.min_dphi_pct, 0.5, 2, ' %', 'Stop when the objective function '
+                              'Phi (data misfit + regularization) changes less than this between iterations '
+                              '(pyGIMLi checks it from iteration 3; its default is 2 %)')
+        f.addRow('Stop when dPhi <', self.sp_dphi)
+        self.sp_goal = _dspin(0.0, 100.0, s.rms_goal_ms, 0.5, 2, ' ms', 'RMS misfit aimed at: drawn in the '
+                              'plots and checked in the summary (does not stop the inversion)')
+        f.addRow('RMS goal', self.sp_goal)
+        crit = QLabel('The inversion ends at the first of: chi² <= 1 (if ticked), dPhi below the limit, or maxIter '
+                      '- pyGIMLi\'s own criteria. The summary and the stats say which one stopped it.')
+        crit.setWordWrap(True)
+        crit.setStyleSheet('color:#555;')
         self.chk_robust = QCheckBox('robust data weighting (outlier picks count less)')
         self.chk_robust.setChecked(s.robust_data)
         self.chk_blocky = QCheckBox('blocky model (L1 roughness: sharper interfaces)')
         self.chk_blocky.setChecked(s.blocky_model)
-        for c in (self.chk_chi1, self.chk_robust, self.chk_blocky):
+        f.addRow(crit)
+        for c in (self.chk_robust, self.chk_blocky):
             f.addRow(c)
         self.sp_threads = _ispin(0, 256, s.threads, 'Threads for the forward calculation (0 = pyGIMLi default)')
         f.addRow('Threads', self.sp_threads)
@@ -528,6 +606,14 @@ class InversionWindow(QMainWindow):
         self.chk_vtk = QCheckBox('VTK files (ParaView); with the line ends also in UTM')
         self.chk_vtk.setChecked(s.write_vtk)
         f.addRow(self.chk_vtk)
+        self.chk_rays = QCheckBox('ray paths (for the model viewer; a few MB)')
+        self.chk_rays.setChecked(s.write_rays)
+        f.addRow(self.chk_rays)
+        self.chk_keepit = QCheckBox('keep the model of every iteration (slider after the run)')
+        self.chk_keepit.setToolTip('Off: only the latest model is kept while it runs (live view) and the final '
+                                   'one afterwards; pyGIMLi itself needs no files per iteration')
+        self.chk_keepit.setChecked(s.keep_iterations)
+        f.addRow(self.chk_keepit)
         self.ed_sol = QLineEdit(', '.join(f'{v:.3f}' for v in s.sol))
         self.ed_eol = QLineEdit(', '.join(f'{v:.3f}' for v in s.eol))
         self.ed_sol.setPlaceholderText('easting, northing')
@@ -579,7 +665,7 @@ class InversionWindow(QMainWindow):
         self.chk_follow.setChecked(True)
         row.addWidget(self.chk_follow)
         ml.addLayout(row)
-        self.p_itmodel = Plot('model_iterations', (9, 4))
+        self.p_itmodel = Plot('model_iterations', (9, 4), layout=False)
         ml.addWidget(self.p_itmodel, 1)
         spl.addWidget(mw)
         spl.setSizes([320, 560])
@@ -695,6 +781,7 @@ class InversionWindow(QMainWindow):
             self._proc_finished()
 
     # ------------------------------------------------------------------ drawing a run
+    @styled
     def _draw_misfit(self, fig, live=False):
         fig.clear()
         h = self.res.history() if self.res else np.zeros((0, 6))
@@ -703,21 +790,31 @@ class InversionWindow(QMainWindow):
             ax.text(0.5, 0.5, 'waiting for the first iteration…' if live else 'no iterations',
                     ha='center', va='center', transform=ax.transAxes, color='#888')
             return
+        st_ = self.res.settings
         ax.semilogy(h[:, 0], h[:, 1], 'o-', color='#1f4e79', label='chi²')
-        ax.axhline(1, color='#1f4e79', ls=':', lw=0.8)
+        ax.axhline(1, color='#1f4e79', ls=':', lw=1.2, label='chi² = 1')
         ax.set_xlabel('Iteration')
         ax.set_ylabel('chi²', color='#1f4e79')
         ax2 = ax.twinx()
-        ax2.plot(h[:, 0], h[:, 2], 's--', color='#c0392b', ms=4, label='RMS')
+        ax2.plot(h[:, 0], h[:, 2], 's--', color='#c0392b', label='RMS')
+        if st_.rms_goal_ms:
+            ax2.axhline(st_.rms_goal_ms, color='#c0392b', ls=':', lw=1.2, label=f'RMS goal {st_.rms_goal_ms:g} ms')
         ax2.set_ylabel('RMS misfit (ms)', color='#c0392b')
+        ax2.set_ylim(0, max(h[:, 2].max(), st_.rms_goal_ms or 0) * 1.08)
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, loc='upper right', fontsize=9)
         ax.grid(alpha=0.3)
         from matplotlib.ticker import MaxNLocator
         n_max = max(int(h[-1, 0]), self.res.settings.max_iter if live else int(h[-1, 0]), 1)
         ax.set_xlim(-0.3, n_max + 0.3)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        ax.set_title(f'iteration {int(h[-1, 0])}: chi² = {h[-1, 1]:.3f}, RMS = {h[-1, 2]:.3f} ms', fontsize='medium')
+        why = self.res.status().get('stop_reason', '') if not live or self.res.status().get('state') != 'running' else ''
+        ax.set_title(f'iteration {int(h[-1, 0])}: chi² = {h[-1, 1]:.3f}, RMS = {h[-1, 2]:.3f} ms'
+                     + (f', dPhi = {h[-1, 3]:.1f} %' if len(h) > 1 else '') + (f'  -  {why}' if why else ''))
         fig._export_main_axes = [ax, ax2]
 
+    @styled
     def _draw_iter_model(self):
         fig = self.p_itmodel.fig
         if self.res is None:
@@ -728,16 +825,18 @@ class InversionWindow(QMainWindow):
             self.p_itmodel.draw()
             return
         i = its[min(self.sl_iter.value(), len(its) - 1)]
-        self.lbl_iter.setText(f'{i} of {its[-1]}')
+        kept = len(its) > 1 or self.res.settings.keep_iterations
+        self.lbl_iter.setText(f'{i} of {its[-1]}' if kept else f'latest ({i})')
+        self.sl_iter.setEnabled(kept)
         import model_viewer as mv
-        o = mv.ViewOptions(mode='cells', mask='none', cbar_size=2.0, legend=False, fontsize=9,
-                           vmin=self.settings.v_min, vmax=None, recv_size=8, shot_size=30)
+        o = mv.ViewOptions(mode='cells', mask='none', cbar_size=2.0, legend=False, fontsize=11,
+                           vmin=self.settings.v_min, vmax=None, recv_size=14, shot_size=50, vexag=0)
         try:
             v, _ = self.res.iteration(i)
             o.vmax = float(np.percentile(v, 99.5))
             o.vmin = float(np.percentile(v, 0.5))
             mv.draw_model(fig, self.res, o, i)
-            fig.axes[0].set_title(f'Velocity, iteration {i}', fontsize=10)
+            fig.axes[0].set_title(f'Velocity, iteration {i}', fontsize=12)
         except Exception as e:                       # noqa: BLE001
             fig.clear()
             fig.text(0.5, 0.5, f'{type(e).__name__}: {e}', ha='center')
@@ -762,6 +861,7 @@ class InversionWindow(QMainWindow):
         v.addWidget(self.p_stats, 1)
         return w
 
+    @styled
     def _draw_stats(self):
         fig = self.p_stats.fig
         fig.clear()
@@ -783,39 +883,45 @@ class InversionWindow(QMainWindow):
         axs = fig.subplots(2, 3)
         ax = axs[0, 0]
         ax.semilogy(h[:, 0], h[:, 1], 'o-', color='#1f4e79')
-        ax.axhline(1, color='k', ls=':', lw=0.8)
+        ax.axhline(1, color='k', ls=':', lw=1.2)
         ax.set_xlabel('Iteration')
         ax.set_ylabel('chi²')
         ax2 = ax.twinx()
-        ax2.plot(h[:, 0], h[:, 2], 's--', color='#c0392b', ms=4)
+        ax2.plot(h[:, 0], h[:, 2], 's--', color='#c0392b')
         ax2.set_ylabel('RMS (ms)', color='#c0392b')
         ax.set_title('Misfit evolution', fontsize='medium')
         ax.grid(alpha=0.3)
         ax = axs[0, 1]
         if len(h) > 1:
             ax.bar(h[1:, 0], h[1:, 3], color='#2e86c1')
+            ax.axhline(res.settings.min_dphi_pct, color='k', ls='--', lw=1.2,
+                       label=f'stop below {res.settings.min_dphi_pct:g} % (from iteration 3)')
+            ax.legend(fontsize=9)
         ax.set_xlabel('Iteration')
         ax.set_ylabel('dPhi (%)')
-        ax.set_title('Relative chi² decrease per iteration', fontsize='medium')
+        ax.set_title('Change of the objective function Phi per iteration', fontsize='medium')
         ax.grid(alpha=0.3, axis='y')
         ax = axs[0, 2]
         sx, srms, sn = ic.shot_misfit(d, resp)
         bars = ax.bar(sx, srms, width=max(np.min(np.diff(np.sort(sx))) * 0.7 if len(sx) > 1 else 1, 0.5),
                       color='#7d3c98')
         tot = float(np.sqrt(np.mean(res_ms ** 2)))
-        ax.axhline(tot, color='k', ls='--', lw=0.9, label=f'all: {tot:.2f} ms')
+        ax.axhline(tot, color='k', ls='--', lw=1.2, label=f'all: {tot:.2f} ms')
+        if res.settings.rms_goal_ms:
+            ax.axhline(res.settings.rms_goal_ms, color='#c0392b', ls=':', lw=1.4,
+                       label=f'goal {res.settings.rms_goal_ms:g} ms')
         worst = np.argsort(srms)[::-1][:3]
         for k in worst:
-            ax.text(sx[k], srms[k], f' {sx[k]:g}', fontsize=7, rotation=90, va='bottom', ha='center')
+            ax.text(sx[k], srms[k], f' {sx[k]:g}', fontsize=9, rotation=90, va='bottom', ha='center')
         ax.set_xlabel('Shot x (m)')
         ax.set_ylabel('RMS misfit (ms)')
         ax.set_title('Misfit per shot (largest labelled: reprocess?)', fontsize='medium')
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=9)
         ax.grid(alpha=0.3, axis='y')
         ax = axs[1, 0]
-        sc = ax.scatter(t, r, s=5, c=xy[s, 0], cmap='turbo')
+        sc = ax.scatter(t, r, s=12, c=xy[s, 0], cmap='turbo')
         lim = [0, max(t.max(), r.max()) * 1.03]
-        ax.plot(lim, lim, 'k-', lw=0.8)
+        ax.plot(lim, lim, 'k-', lw=1.2)
         ax.set_xlim(lim)
         ax.set_ylim(lim)
         ax.set_aspect('equal')
@@ -824,7 +930,7 @@ class InversionWindow(QMainWindow):
         ax.set_title('Observed vs modelled (colour: shot x)', fontsize='medium')
         ax.grid(alpha=0.3)
         ax = axs[1, 1]
-        ax.scatter(off, res_ms, s=5, c=xy[s, 0], cmap='turbo')
+        ax.scatter(off, res_ms, s=12, c=xy[s, 0], cmap='turbo')
         e = np.asarray(d['err']) * 1e3
         o = np.argsort(off)
         ax.plot(off[o], e[o], 'k:', lw=0.9, label='± error')
@@ -833,7 +939,7 @@ class InversionWindow(QMainWindow):
         ax.set_xlabel('Offset (m)')
         ax.set_ylabel('Observed - modelled (ms)')
         ax.set_title(f'Residuals: mean {res_ms.mean():.2f} ms, std {res_ms.std():.2f} ms', fontsize='medium')
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=9)
         ax.grid(alpha=0.3)
         ax = axs[1, 2]
         us = np.unique(s)
@@ -847,19 +953,20 @@ class InversionWindow(QMainWindow):
         k = self.cb_shot.currentData()
         m = s == k
         oo = np.argsort(xy[g[m], 0])
-        ax.plot(xy[g[m], 0][oo], t[m][oo], 'o', ms=3, color='k', label='observed')
+        ax.plot(xy[g[m], 0][oo], t[m][oo], 'o', ms=5, color='k', label='observed')
         ax.plot(xy[g[m], 0][oo], r[m][oo], '-', color='#c0392b', label='modelled')
         ax.fill_between(xy[g[m], 0][oo], (t[m] - e[m])[oo], (t[m] + e[m])[oo], color='0.8', alpha=0.6,
                         label='± error')
-        ax.axvline(xy[k, 0], color='r', ls=':', lw=0.8)
+        ax.axvline(xy[k, 0], color='r', ls=':', lw=1.2)
         ax.invert_yaxis()
         ax.set_xlabel('x (m)')
         ax.set_ylabel('Time (ms)')
         ax.set_title(f'Fit of the shot at x = {xy[k, 0]:.1f} m', fontsize='medium')
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=9)
         ax.grid(alpha=0.3)
+        why = res.status().get('stop_reason', '')
         fig.suptitle(f'{res.name}: chi² = {h[-1, 1]:.3f}, RMS = {h[-1, 2]:.3f} ms after {int(h[-1, 0])} '
-                     f'iterations', fontsize='medium')
+                     f'iterations' + (f' ({why})' if why else ''))
         self.p_stats.fig._export_tag = f'{res.name}_stats'
         self.p_stats.draw()
 
@@ -884,10 +991,11 @@ class InversionWindow(QMainWindow):
         self.lbl_model.setTextFormat(Qt.RichText)
         self.lbl_model.setTextInteractionFlags(Qt.TextSelectableByMouse)
         v.addWidget(self.lbl_model)
-        self.p_model = Plot('model_final', (12, 5))
+        self.p_model = Plot('model_final', (12, 5), layout=False)
         v.addWidget(self.p_model, 1)
         return w
 
+    @styled
     def _draw_final(self):
         import model_viewer as mv
         fig = self.p_model.fig
@@ -896,7 +1004,7 @@ class InversionWindow(QMainWindow):
             self.p_model.draw()
             return
         try:
-            mv.draw_model(fig, self.res, mv.ViewOptions(show_doi=True))
+            mv.draw_model(fig, self.res, mv.ViewOptions(show_doi=True, vexag=0, fontsize=11))
         except Exception as e:                       # noqa: BLE001
             fig.clear()
             fig.text(0.5, 0.5, f'{type(e).__name__}: {e}', ha='center')

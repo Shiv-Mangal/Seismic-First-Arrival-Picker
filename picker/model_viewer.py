@@ -72,12 +72,12 @@ class ViewOptions:
     topo_label: str = 'Topography'
     show_recv: bool = True
     recv_marker: str = 'v'
-    recv_size: float = 18.0
+    recv_size: float = 24.0
     recv_color: str = 'k'
     recv_label: str = 'Receivers'
     show_shots: bool = True
     shot_marker: str = '*'
-    shot_size: float = 60.0
+    shot_size: float = 80.0
     shot_color: str = 'r'
     shot_label: str = 'Shots'
     markers: str = ''                  # lines "x, depth below surface, label"
@@ -97,9 +97,9 @@ class ViewOptions:
     xmax: object = None
     ymin: object = None
     ymax: object = None
-    vexag: float = 1.0
+    vexag: float = 0.0                 # 0 = fill the window; 1 = true scale (paper), 2 = exaggerated twice
     grid: bool = False
-    fontsize: float = 10.0
+    fontsize: float = 11.0
 
     def save(self, path):
         with open(path, 'w') as f:
@@ -324,10 +324,10 @@ def export_grid_csv(path, grid):
 # =====================================================================
 try:
     from PyQt5.QtCore import Qt, QTimer
-    from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
+    from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
                                  QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QLineEdit, QPushButton,
                                  QLabel, QSlider, QScrollArea, QSplitter, QPlainTextEdit, QFileDialog,
-                                 QMessageBox)
+                                 QMessageBox, QToolBox)
     _HAVE_QT = True
 except Exception:                                   # pragma: no cover
     _HAVE_QT = False
@@ -372,15 +372,18 @@ if _HAVE_QT:
             self._timer.setSingleShot(True)
             self._timer.timeout.connect(self.redraw)
             split = QSplitter(Qt.Horizontal)
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
             panel = QWidget()
             self.form_lay = QVBoxLayout(panel)
+            self.form_lay.setContentsMargins(4, 4, 4, 4)
+            # v22: the settings in sections whose titles are always visible (click one to open it)
+            hint = QLabel('<b>Settings</b> - click a section to open it:')
+            hint.setTextFormat(Qt.RichText)
+            self.form_lay.addWidget(hint)
+            self.toolbox = QToolBox()
+            self.form_lay.addWidget(self.toolbox, 1)
             self._build_controls()
-            self.form_lay.addStretch(1)
-            scroll.setWidget(panel)
-            scroll.setMinimumWidth(360)
-            split.addWidget(scroll)
+            panel.setMinimumWidth(420)
+            split.addWidget(panel)
             right = QWidget()
             rl = QVBoxLayout(right)
             rl.setContentsMargins(0, 0, 0, 0)
@@ -395,7 +398,12 @@ if _HAVE_QT:
             row.addWidget(self.sl_it, 1)
             row.addWidget(self.lbl_it)
             rl.addLayout(row)
-            self.fig = Figure(figsize=(11, 5.5), dpi=100)
+            try:
+                from inversion_window import screen_dpi
+                _dpi = screen_dpi()
+            except Exception:
+                _dpi = 100
+            self.fig = Figure(figsize=(11, 5.5), dpi=_dpi)
             self.fig._export_subdir = 'inversion'
             self.fig._export_tag = lambda: f"{self.res.name}_{self.opts.field}" + (
                 '' if self._iteration() is None else f'_iter{self._iteration():02d}')
@@ -407,17 +415,21 @@ if _HAVE_QT:
             rl.addWidget(self.toolbar)
             rl.addWidget(self.canvas, 1)
             split.addWidget(right)
-            split.setSizes([380, 1100])
+            split.setSizes([440, 1100])
             self.setCentralWidget(split)
             self.resize(1500, 860)
             self.redraw()
 
         # ---------- controls ----------
         def _group(self, title):
-            g = QGroupBox(title)
-            f = QFormLayout(g)
+            page = QWidget()
+            f = QFormLayout(page)
             f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-            self.form_lay.addWidget(g)
+            sc = QScrollArea()
+            sc.setWidgetResizable(True)
+            sc.setFrameShape(QScrollArea.NoFrame)
+            sc.setWidget(page)
+            self.toolbox.addItem(sc, title)
             return f
 
         def _add(self, form, key, label, kind, *args, tip=''):
@@ -465,7 +477,7 @@ if _HAVE_QT:
             return w
 
         def _build_controls(self):
-            f = self._group('Model')
+            f = self._group('1  Field, iteration display, smoothing')
             self._add(f, 'field', 'Field', 'combo', [(k, t) for k, (t, _, _) in self.extra.items()]
                       + [(k, t) for k, t, _ in FIELDS])
             self._add(f, 'mode', 'Display', 'combo', [('grid', 'regridded + smoothed'), ('cells', 'mesh cells')])
@@ -478,14 +490,14 @@ if _HAVE_QT:
                                                               ('cubic', 'cubic')])
             self._add(f, 'filled_levels', 'Colour levels', 'int', 0, 400,
                       tip='Filled contour levels; 0 = continuous colours')
-            f = self._group('Colours and contours')
+            f = self._group('2  Colours and contour lines')
             self._add(f, 'cmap', 'Colour map', 'combo', [(c, c) for c in CMAPS])
             self._add(f, 'vmin', 'Minimum', 'opt')
             self._add(f, 'vmax', 'Maximum', 'opt')
             self._add(f, 'contours', 'Contour lines at', 'text', tip='Values, e.g. 500, 1000, 1500')
             self._add(f, 'contour_labels', 'label the contours', 'check')
             self._add(f, 'contour_color', 'Contour colour', 'text')
-            f = self._group('Coverage mask')
+            f = self._group('3  Coverage mask / depth of investigation')
             self._add(f, 'mask', 'Mask', 'combo', [('none', 'none'), ('doi', 'depth of investigation'),
                                                    ('stdcov', 'standardized coverage = 1'),
                                                    ('threshold', 'log10 coverage >= threshold')])
@@ -495,13 +507,13 @@ if _HAVE_QT:
             self._add(f, 'doi_smooth', 'DOI smoothing', 'float', 0, 50, 0.5, 2)
             self._add(f, 'cov_threshold', 'Threshold (log10)', 'float', -20, 20, 0.5, 2)
             self._add(f, 'show_doi', 'draw the depth of investigation', 'check')
-            f = self._group('Ray paths')
+            f = self._group('4  Ray paths')
             self._add(f, 'show_rays', 'show ray paths', 'check')
             self._add(f, 'ray_color', 'Colour', 'text')
             self._add(f, 'ray_lw', 'Line width', 'float', 0.01, 5, 0.05, 2)
             self._add(f, 'ray_alpha', 'Opacity', 'float', 0.01, 1, 0.05, 2)
             self._add(f, 'ray_every', 'Every n-th ray', 'int', 1, 1000)
-            f = self._group('Topography, receivers, shots, legend')
+            f = self._group('5  Topography, receivers, shots, legend, markers')
             self._add(f, 'show_topo', 'topography line', 'check')
             self._add(f, 'topo_color', 'Line colour', 'text')
             self._add(f, 'topo_lw', 'Line width', 'float', 0.1, 10, 0.1, 1)
@@ -524,13 +536,13 @@ if _HAVE_QT:
             self._add(f, 'markers', 'Markers', 'multiline',
                       tip='One per line: x, depth below the surface, label - e.g. "144, 13.4, well (13.4 m)"')
             self._add(f, 'marker_color', 'Marker line colour', 'text')
-            f = self._group('Colour bar')
+            f = self._group('6  Colour bar: position, size, label')
             self._add(f, 'cbar_pos', 'Position', 'combo', [(p, p) for p in ('right', 'left', 'top', 'bottom', 'none')])
             self._add(f, 'cbar_size', 'Size (% of the plot)', 'float', 0.5, 30, 0.5, 1)
             self._add(f, 'cbar_pad', 'Gap (in)', 'float', 0, 2, 0.05, 2)
             self._add(f, 'cbar_label', 'Label', 'text')
             self._add(f, 'cbar_extend', 'Arrows', 'combo', [(p, p) for p in ('neither', 'both', 'min', 'max')])
-            f = self._group('Axes')
+            f = self._group('7  Axes: labels, limits, exaggeration, fonts')
             self._add(f, 'title', 'Title', 'text')
             self._add(f, 'xlabel', 'x label', 'text')
             self._add(f, 'ylabel', 'y label', 'text')
@@ -538,7 +550,9 @@ if _HAVE_QT:
             self._add(f, 'xmax', 'x to', 'opt')
             self._add(f, 'ymin', 'y from', 'opt')
             self._add(f, 'ymax', 'y to', 'opt')
-            self._add(f, 'vexag', 'Vertical exaggeration', 'float', 0.1, 20, 0.1, 2)
+            w_ve = self._add(f, 'vexag', 'Vertical exaggeration', 'float', 0.0, 20, 0.1, 2,
+                             tip='0 = fill the window; 1 = true scale (usual for a paper); 2 = depth x 2')
+            w_ve.setSpecialValueText('fill the window')
             self._add(f, 'grid', 'grid lines', 'check')
             self._add(f, 'fontsize', 'Font size', 'float', 4, 30, 0.5, 1)
             row = QHBoxLayout()

@@ -49,7 +49,7 @@ Python 3 with Qt 5. In Spyder, set *Preferences > IPython console > Graphics > B
 | `example_data/` | synthetic SEG-Y survey (11 shots, 96 receivers) with true first-arrival times and a demo topography file |
 | `legacy/` | the earlier Manual Picker version 1.3.1 scripts |
 
-The commit history follows the development versions v2 to v21; each commit message lists that version's changes.
+The commit history follows the development versions v2 to v22; each commit message lists that version's changes.
 
 ## Tests
 

@@ -49,6 +49,8 @@ class MCSettings:
     seed: int = 12345
     workers: int = 2
     name: str = ''
+    write_rays: bool = False        # v22: per run (a few MB each); the statistics do not need them
+    write_vtk: bool = False
 
     def save(self, path):
         with open(path, 'w') as f:
@@ -219,13 +221,15 @@ def run_one(folder, name, vt, vb, real, seed):
     import pygimli.physics.traveltime as tt
     m = MCSettings.load(os.path.join(folder, 'mc_settings.json'))
     rd = os.path.join(folder, 'runs', name)
-    os.makedirs(os.path.join(rd, 'iterations'), exist_ok=True)
+    os.makedirs(rd, exist_ok=True)
     s = m.base()
     s.line = s.line or 'line'
     s.v_top, s.v_bottom = vt, vb
     s.mesh_file = os.path.join(folder, 'mesh.bms')
     s.threads = 1
-    s.write_vtk = bool(s.write_vtk)
+    s.write_vtk = bool(m.write_vtk)          # v22: Monte Carlo runs keep only what the statistics need
+    s.write_rays = bool(m.write_rays)
+    s.keep_iterations = False
     d = tt.load(os.path.join(folder, 'data_original.dat'))
     if m.pick_noise != 'none':
         t, noise = perturb_times(np.asarray(d['t'], float), np.asarray(d['err'], float), m.pick_noise,

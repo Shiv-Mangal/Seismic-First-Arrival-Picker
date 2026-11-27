@@ -56,9 +56,12 @@ def load_settings():
     o = ExportOptions()
     try:
         with open(os.path.join(CONTEXT['folder'], SETTINGS_FILE)) as f:
-            for k, v in json.load(f).items():
-                if hasattr(o, k):
-                    setattr(o, k, v)
+            d = json.load(f)
+        if 'tidy' not in d:                 # settings of v19-v21: start with the v22 automatic text size
+            d.pop('font_scale', None)
+        for k, v in d.items():
+            if hasattr(o, k):
+                setattr(o, k, v)
     except Exception:
         pass
     return o
@@ -137,8 +140,8 @@ SUBDIRS = [                                    # window-title words -> sub-folde
 
 class ExportOptions:
     def __init__(self, prefix=None, fmt='png', dpi=300, size='double column (17.5 cm)', width_cm=17.5,
-                 height_cm=10.0, keep_aspect=True, font_scale=1.0, line_scale=1.0, transparent=False,
-                 tight=False, main_only=False, also_pdf=False, open_after=False):
+                 height_cm=10.0, keep_aspect=True, font_scale=0.0, line_scale=1.0, transparent=False,
+                 tight=False, main_only=False, also_pdf=False, open_after=False, tidy=True):
         self.prefix = prefix            # None = the line name
         self.fmt = fmt
         self.dpi = dpi
@@ -146,10 +149,11 @@ class ExportOptions:
         self.width_cm = width_cm
         self.height_cm = height_cm
         self.keep_aspect = keep_aspect
-        self.font_scale = font_scale
+        self.font_scale = font_scale    # v22: 0 = automatic (text scaled with the page, at least 7 pt)
         self.line_scale = line_scale
         self.transparent = transparent
         self.tight = tight
+        self.tidy = tidy                # v22: wrap long titles, thin crowded tick labels, re-layout for the page
         self.main_only = main_only
         self.also_pdf = also_pdf
         self.open_after = open_after
@@ -192,7 +196,8 @@ def save_figure(fig, path, opt=None):
     W, H = output_size_cm(fig, opt)
     texts, ticks, lines, hidden = [], [], [], []
     try:
-        if abs(opt.font_scale - 1) > 1e-6:
+        fscale = opt.font_scale if opt.font_scale and opt.font_scale > 0 else auto_font_scale(fig, W)
+        if abs(fscale - 1) > 1e-6:
             # tick labels via tick_params, so ticks created at the new size get the font too
             for ax in fig.axes:
                 for axis, name in ((ax.xaxis, 'x'), (ax.yaxis, 'y')):
@@ -200,13 +205,13 @@ def save_figure(fig, path, opt=None):
                     if labs:
                         fs = labs[0].get_fontsize()
                         ticks.append((ax, name, fs))
-                        ax.tick_params(axis=name, which='both', labelsize=fs * opt.font_scale)
+                        ax.tick_params(axis=name, which='both', labelsize=fs * fscale)
             seen = set()
             for t in fig.findobj(Text):
                 if id(t) not in seen:
                     seen.add(id(t))
                     texts.append((t, t.get_fontsize()))
-                    t.set_fontsize(t.get_fontsize() * opt.font_scale)
+                    t.set_fontsize(t.get_fontsize() * fscale)
         if abs(opt.line_scale - 1) > 1e-6:
             for ln in fig.findobj(Line2D):
                 lines.append((ln, ln.get_linewidth(), ln.get_markersize()))
@@ -230,6 +235,7 @@ def save_figure(fig, path, opt=None):
                 except Exception:
                     pass
         fig.set_size_inches(W * CM, H * CM, forward=False)
+        undo_tidy = tidy_for_page(fig) if getattr(opt, 'tidy', True) else None
         kw = dict(dpi=opt.dpi, transparent=opt.transparent, facecolor='none' if opt.transparent else 'white')
         kw.update(bbox_inches='tight', pad_inches=0.04) if opt.tight else kw.update(bbox_inches=None)
         if ext in ('tif', 'tiff'):
@@ -241,6 +247,11 @@ def save_figure(fig, path, opt=None):
             fig.savefig(p2, **{k: v for k, v in kw.items() if k != 'pil_kwargs'})
             saved.append(p2)
     finally:
+        try:
+            if 'undo_tidy' in locals() and undo_tidy:
+                undo_tidy()
+        except Exception:
+            pass
         fig.set_size_inches(w0, h0, forward=False)
         for t, fs in texts:
             t.set_fontsize(fs)
@@ -257,6 +268,119 @@ def save_figure(fig, path, opt=None):
         except Exception:
             pass
     return saved
+
+
+MIN_PT = 7.0                    # smallest text at the final size (journals ask for 6-8 pt at least)
+
+
+def auto_font_scale(fig, width_cm):
+    """v22: text scaled with the page (a figure exported smaller than on screen keeps its look),
+    but no text smaller than MIN_PT and none larger than on screen."""
+    from matplotlib.text import Text
+    w0 = fig.get_size_inches()[0] / CM
+    s = min(1.0, width_cm / w0) if w0 > 0 else 1.0
+    sizes = [t.get_fontsize() for t in fig.findobj(Text) if t.get_visible() and t.get_text()]
+    for ax in fig.axes:
+        for lab in ax.xaxis.get_ticklabels()[:1] + ax.yaxis.get_ticklabels()[:1]:
+            sizes.append(lab.get_fontsize())
+    if sizes:
+        s = max(s, min(1.0, MIN_PT / min(sizes)))
+    return s
+
+
+def tidy_for_page(fig):
+    """
+    v22: make a figure drawn for the screen fit the page it is exported to:
+      * titles (axes and figure) wider than their axes are wrapped onto more lines;
+      * tick labels that overlap are thinned (every 2nd, 3rd, ... label kept);
+      * the layout is computed again for the page size (tight layout when the figure has no
+        layout engine of its own).
+    Returns a function that puts everything back.
+    """
+    import textwrap
+    import warnings
+    from matplotlib.ticker import FixedLocator, FixedFormatter
+    undo = []
+    try:
+        fig.draw_without_rendering()
+        r = fig.canvas.get_renderer()
+    except Exception:
+        return None
+
+    def wrap_text(t, avail):
+        txt = t.get_text()
+        if not txt or avail <= 20:
+            return
+        tw = t.get_window_extent(r).width
+        if tw <= avail * 1.01:
+            return
+        lines = txt.split('\n')
+        longest = max(len(l) for l in lines) or 1
+        n = max(22, int(longest * avail / tw * 0.95))
+        new = '\n'.join(textwrap.fill(l, n, break_long_words=False) for l in lines)
+        if new != txt:
+            undo.append(lambda t=t, txt=txt: t.set_text(txt))
+            t.set_text(new)
+
+    axes = [a for a in fig.axes if a.get_visible()]
+    for ax in axes:
+        aw = ax.get_window_extent(r).width
+        for t in (ax.title, getattr(ax, '_left_title', None), getattr(ax, '_right_title', None)):
+            if t is not None:
+                wrap_text(t, aw)
+    st = getattr(fig, '_suptitle', None)
+    if st is not None:
+        wrap_text(st, fig.bbox.width * 0.98)
+    # crowded tick labels
+    for ax in axes:
+        for axis, horiz in ((ax.xaxis, True), (ax.yaxis, False)):
+            try:
+                labels = axis.get_majorticklabels()
+                locs = list(axis.get_majorticklocs())
+                if len(labels) != len(locs) or len(labels) < 4:
+                    continue
+                lo, hi = sorted(axis.get_view_interval())
+                keep = [(l, t) for l, t in zip(locs, labels) if lo - 1e-9 <= l <= hi + 1e-9 and t.get_text()]
+                if len(keep) < 4:
+                    continue
+                boxes = [t.get_window_extent(r).expanded(1.08, 1.0) if horiz else
+                         t.get_window_extent(r).expanded(1.0, 1.15) for _, t in keep]
+
+                def crowded(step):
+                    bs = boxes[::step]
+                    return any(bs[i].overlaps(bs[i + 1]) for i in range(len(bs) - 1))
+
+                if not crowded(1):
+                    continue
+                step = 2
+                while step < len(keep) and crowded(step):
+                    step += 1
+                old_loc, old_fmt = axis.get_major_locator(), axis.get_major_formatter()
+                sel = keep[::step]
+                axis.set_major_locator(FixedLocator([l for l, _ in sel]))
+                axis.set_major_formatter(FixedFormatter([t.get_text() for _, t in sel]))
+                undo.append(lambda axis=axis, a=old_loc, b=old_fmt: (axis.set_major_locator(a),
+                                                                       axis.set_major_formatter(b)))
+            except Exception:
+                continue
+    if fig.get_layout_engine() is None and not getattr(fig, '_export_no_layout', False):
+        sp = fig.subplotpars
+        old = dict(left=sp.left, right=sp.right, bottom=sp.bottom, top=sp.top, wspace=sp.wspace, hspace=sp.hspace)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                fig.tight_layout()
+            undo.append(lambda old=old: fig.subplots_adjust(**old))
+        except Exception:
+            pass
+
+    def restore():
+        for f in reversed(undo):
+            try:
+                f()
+            except Exception:
+                pass
+    return restore
 
 
 def _attr(fig, name):
@@ -359,10 +483,12 @@ if _HAVE_QT:
             self.chk_keep = QCheckBox('height follows the on-screen shape')
             self.chk_keep.setChecked(bool(o.keep_aspect))
             self.sp_font = QDoubleSpinBox()
-            self.sp_font.setRange(0.3, 4.0)
+            self.sp_font.setRange(0.0, 4.0)
             self.sp_font.setSingleStep(0.1)
+            self.sp_font.setSpecialValueText('automatic (scaled with the page, at least 7 pt)')
             self.sp_font.setValue(float(o.font_scale))
-            self.sp_font.setToolTip('All text x this factor (titles, labels, ticks, legends, colour bars)')
+            self.sp_font.setToolTip('All text x this factor (titles, labels, ticks, legends, colour bars); '
+                                    'automatic = the screen look scaled to the page, no text below 7 pt')
             self.sp_line = QDoubleSpinBox()
             self.sp_line.setRange(0.2, 5.0)
             self.sp_line.setSingleStep(0.1)
@@ -376,6 +502,8 @@ if _HAVE_QT:
             has_main = bool(getattr(fig, '_export_main_axes', None))
             self.chk_main.setVisible(has_main)
             self.chk_main.setChecked(has_main)
+            self.chk_tidy = QCheckBox('fit the layout to the page (wrap long titles, thin crowded tick labels)')
+            self.chk_tidy.setChecked(bool(getattr(o, 'tidy', True)))
             self.chk_pdf = QCheckBox('also save a PDF copy (vector)')
             self.chk_pdf.setChecked(bool(o.also_pdf))
             self.lbl_file = QLabel()
@@ -398,7 +526,7 @@ if _HAVE_QT:
             f.addRow('', self.chk_keep)
             f.addRow('Font scale', self.sp_font)
             f.addRow('Line width', self.sp_line)
-            for c in (self.chk_transp, self.chk_tight, self.chk_main, self.chk_pdf):
+            for c in (self.chk_tidy, self.chk_transp, self.chk_tight, self.chk_main, self.chk_pdf):
                 f.addRow('', c)
             f.addRow('File', self.lbl_file)
             self.chk_open = QCheckBox('open the folder afterwards')
@@ -430,7 +558,8 @@ if _HAVE_QT:
                                  line_scale=self.sp_line.value(), transparent=self.chk_transp.isChecked(),
                                  tight=self.chk_tight.isChecked(),
                                  main_only=self.chk_main.isChecked() and self.chk_main.isVisible(),
-                                 also_pdf=self.chk_pdf.isChecked(), open_after=self.chk_open.isChecked())
+                                 also_pdf=self.chk_pdf.isChecked(), open_after=self.chk_open.isChecked(),
+                                 tidy=self.chk_tidy.isChecked())
 
         def path(self):
             return file_path(self.subdir, self.ed_stem.text(), self.cb_fmt.currentText(),
@@ -459,12 +588,12 @@ if _HAVE_QT:
             self.lbl_file.setText(f'{self.path()}\n{W:.1f} × {H:.1f} cm at {o.dpi} dpi{px}')
             from matplotlib import rcParams
             w0 = self.fig.get_size_inches()[0] / CM
-            pt = rcParams['font.size'] * o.font_scale
+            fsc = o.font_scale if o.font_scale > 0 else auto_font_scale(self.fig, W)
+            pt = rcParams['font.size'] * fsc
             self.lbl_info.setText(
-                f'Text keeps its point size ({pt:.0f} pt by default x font scale) while the page is '
-                f'{"smaller" if W < w0 else "larger"} than on screen ({w0:.0f} cm), so it fills '
-                f'{w0 / W:.1f}x the share of the page. Journals usually ask for 7-10 pt at the final size; '
-                f'for a single column try a font scale of 0.6-0.8, for slides 1.2-1.6.')
+                f'Text x {fsc:.2f}{" (automatic)" if o.font_scale <= 0 else ""}: default text {pt:.1f} pt at the '
+                f'final size (screen figure {w0:.0f} cm wide, page {W:.1f} cm). Journals usually ask for 7-10 pt; '
+                f'with "fit the layout to the page" long titles are wrapped and crowded tick labels thinned.')
 
         def _save(self):
             global LAST

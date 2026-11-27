@@ -2084,6 +2084,7 @@ def plot_shot():
 
     _status_texts()                  # v15: MODE / GAIN boxes
     fig._export_main_axes = [ax]     # v19: 'Main plot only' in the figure export
+    fig._export_no_layout = True     # v22: keep the canvas layout (buttons, sliders) in exports
     fig._export_hide_artists = [globals().get('mode_text'), globals().get('gain_text')]
     fig._export_tag = _canvas_export_tag
     fig._export_subdir = _canvas_export_subdir
@@ -2821,7 +2822,7 @@ def open_pdf_manual():
 
 def show_about():
     QMessageBox.about(None, 'About the first-arrival picker',
-                      '<b>First-arrival picker</b> for refraction tomography (v21)<br><br>'
+                      '<b>First-arrival picker</b> for refraction tomography (v22)<br><br>'
                       'Manual and automatic first-break picking of SEG-Y and SU shot gathers, with '
                       'preprocessing, filtering, reciprocity QC, figure export, export to S G T '
                       'or pyGIMLi files, travel-time inversion with pyGIMLi and Monte Carlo uncertainty.<br><br>'
