@@ -2,9 +2,9 @@
 import os, re, subprocess, datetime
 from PIL import Image
 
-SRC = '/home/claude/manual/manual_body.html'
-V = '/home/claude/v18'
-MAN = os.path.join(V, 'manual')
+HERE = os.path.dirname(os.path.abspath(__file__))          # manual/source
+SRC = os.path.join(HERE, 'manual_body.html')
+MAN = os.path.dirname(HERE)                                # manual/ (html, pdf, images)
 IMG = os.path.join(MAN, 'images')
 body = open(SRC, encoding='utf-8').read()
 
@@ -99,7 +99,7 @@ intro_m = re.search(r'<p>This manual explains.*?</p>', body, re.S)
 intro = intro_m.group(0) if intro_m else ''
 body_print = body.replace(intro, '', 1)
 cover = f"""<section class="cover">
-<div class="kicker">User manual · version 16</div>
+<div class="kicker">User manual · version 19</div>
 <h1>First-Arrival Picker<br>for Refraction Tomography</h1>
 <div class="lead">Manual and automatic first-break picking of SEG-Y shot gathers, with preprocessing,
 filtering, reciprocity QC and export of S&nbsp;G&nbsp;T travel times.</div>
@@ -141,7 +141,7 @@ print('toc pages', pages)
 render(pages)
 rd = PdfReader(pdf); wr = PdfWriter(clone_from=rd)
 wr.add_metadata({'/Title': 'First-Arrival Picker for Refraction Tomography - User Manual',
-                 '/Subject': 'User manual, version 16', '/Creator': 'first_arrival_picker'})
+                 '/Subject': 'User manual, version 19', '/Creator': 'first_arrival_picker'})
 with open(pdf, 'wb') as fh:
     wr.write(fh)
 print('pages', len(rd.pages), 'size', os.path.getsize(pdf) // 1024, 'kB')

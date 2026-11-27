@@ -631,6 +631,7 @@ if _HAVE_QT:
             self.ax_spec = self.fig_spec.add_subplot(gs[0, :])
             self.ax_lc = self.fig_spec.add_subplot(gs[1, 0])
             self.ax_lcimp = self.fig_spec.add_subplot(gs[1, 1])
+            self.fig_spec._export_tag, self.fig_spec._export_subdir = 'preprocessing_spectra', 'preprocessing'
             spec_tab = QWidget()
             sl = QVBoxLayout(spec_tab)
             sl.setContentsMargins(2, 2, 2, 2)
@@ -640,6 +641,7 @@ if _HAVE_QT:
 
             self.fig_data = Figure(dpi=dpi, constrained_layout=True)
             self.canvas_data = FigureCanvas(self.fig_data)
+            self.fig_data._export_tag, self.fig_data._export_subdir = 'preprocessing_preview', 'preprocessing'
             data_tab = QWidget()
             dl = QVBoxLayout(data_tab)
             dl.setContentsMargins(2, 2, 2, 2)

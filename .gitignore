@@ -24,3 +24,7 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 Thumbs.db
+# v19: exports folders, session backups and export settings
+*_exports/
+*_sessions/
+.export_settings.json

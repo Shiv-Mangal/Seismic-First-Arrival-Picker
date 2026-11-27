@@ -21,7 +21,7 @@ a { color: #1f618d; }
 
 <p>This manual explains every window of the picker, in the order you use them. Every figure was made with the picker itself on a synthetic survey (<a href="#example-data">About the example data</a>), so the numbers in the figures can be checked against known true travel times. Inside the picker, <b>Help &gt; User manual</b> (F1) opens this manual beside the canvas. F1 in any window opens the section for that window. <b>Help &gt; Open the PDF manual</b> opens this same text as a PDF.</p>
 
-<h3 id="contents">Contents</h3><ol><li><a href="#workflow">Overview and workflow</a></li><li><a href="#starting">Installing and starting</a></li><li><a href="#import">Importing SEG-Y and SU data</a></li><li><a href="#topography">Topography and the x origin</a></li><li><a href="#canvas">The picking canvas</a></li><li><a href="#menus">Menus and toolbar</a></li><li><a href="#picking">Picking by hand</a></li><li><a href="#traces-axes-gain">Traces, axes and gain</a></li><li><a href="#preprocessing">Preprocessing</a></li><li><a href="#filter">Filter designer</a></li><li><a href="#delete-picks">Deleting picks and undo</a></li><li><a href="#autopick">Automatic picking</a></li><li><a href="#qc">Reciprocity and pick QC</a></li><li><a href="#geometry">Survey geometry</a></li><li><a href="#spectra">Spectra and the sensor response</a></li><li><a href="#files">Files and saving</a></li><li><a href="#export">Exporting picks for inversion</a></li><li><a href="#shortcuts">Keyboard and mouse</a></li><li><a href="#troubleshooting">Troubleshooting</a></li><li><a href="#history">Version history</a></li></ol>
+<h3 id="contents">Contents</h3><ol><li><a href="#workflow">Overview and workflow</a></li><li><a href="#starting">Installing and starting</a></li><li><a href="#import">Importing SEG-Y and SU data</a></li><li><a href="#topography">Topography and the x origin</a></li><li><a href="#canvas">The picking canvas</a></li><li><a href="#menus">Menus and toolbar</a></li><li><a href="#picking">Picking by hand</a></li><li><a href="#traces-axes-gain">Traces, axes and gain</a></li><li><a href="#preprocessing">Preprocessing</a></li><li><a href="#filter">Filter designer</a></li><li><a href="#delete-picks">Deleting picks and undo</a></li><li><a href="#autopick">Automatic picking</a></li><li><a href="#qc">Reciprocity and pick QC</a></li><li><a href="#geometry">Survey geometry</a></li><li><a href="#spectra">Spectra and the sensor response</a></li><li><a href="#files">Files and saving</a></li><li><a href="#export">Exporting picks for inversion</a></li><li><a href="#figures">Figures for papers and slides</a></li><li><a href="#shortcuts">Keyboard and mouse</a></li><li><a href="#troubleshooting">Troubleshooting</a></li><li><a href="#history">Version history</a></li></ol>
 <h2 id="workflow">1. Overview and workflow</h2>
 <p>The picker turns a set of SEG-Y or Seismic Unix (SU) shot gathers into first-arrival travel times for refraction (travel-time) tomography. The end product is a travel-time file for the inversion: an <b>S G T file</b> (three columns: shot, geophone, first-arrival time of every picked shot–receiver pair), with the shot and geophone given as station numbers or as x positions along the line, or a <b>pyGIMLi data file</b> with the sensor coordinates and elevations (<a href="#export">section 17</a>).</p>
 <p class="fig"><img src="images/workflow.png" data-w="1386" alt="Workflow"><br><span class="cap">Figure 1. The workflow. Quality control (QC) feeds back into picking until the reciprocal errors are small.</span></p>
@@ -64,9 +64,24 @@ a { color: #1f618d; }
 
 <h2 id="starting">2. Installing and starting</h2>
 <h3 id="requirements">Requirements</h3>
-<p>Python 3 with <code>numpy</code>, <code>scipy</code>, <code>pandas</code>, <code>matplotlib</code>, <code>PyQt5</code>, <code>obspy</code>, <code>segypy</code> and <code>bruges</code> (the last two are imported by the script). Excel topography files need <code>openpyxl</code> (.xlsx) or <code>xlrd</code> (.xls). If <code>pygimli</code> is installed, the export checks pyGIMLi files by reading them with pyGIMLi; it is not needed otherwise. Spyder is the intended environment.</p>
+<p>Python 3 with <code>numpy</code>, <code>scipy</code>, <code>pandas</code>, <code>matplotlib</code>, <code>PyQt5</code>, <code>obspy</code> and <code>pygimli</code>. From v19 pyGIMLi is required: the export checks pyGIMLi files with it, and the inversion tools that follow build on it. Excel topography files need <code>openpyxl</code> (.xlsx) or <code>xlrd</code> (.xls). <code>segypy</code> and <code>bruges</code> are optional (only the legacy cells at the end of the script use them). The picker runs in Spyder or from a terminal.</p>
+<h3 id="install">Installing (Anaconda, once)</h3>
+<p>pyGIMLi installs most reliably with conda into an environment of its own. In the <b>Anaconda Prompt</b> (Windows) or a terminal (Linux, macOS):</p>
+<pre>conda create -n pg -c gimli -c conda-forge "pygimli&gt;=1.5"
+conda activate pg
+conda install -c conda-forge pyqt obspy pandas openpyxl xlrd
+pip install segypy bruges        (optional)</pre>
+<p>Check the environment with <code>python run_picker.py --check</code>: it lists every library with its version and whether it is required. To use the same environment in Spyder, install <code>spyder-kernels</code> into it (<code>conda install -c conda-forge spyder-kernels</code>) and choose it under <i>Preferences &gt; Python interpreter</i>.</p>
 <table class="note" width="100%" cellpadding="8"><tr><td><b>Spyder setting.</b> The canvas must be interactive: <i>Preferences &gt; IPython console &gt; Graphics &gt; Backend = Qt</i> (or run <code>%matplotlib qt</code>), then restart the kernel. With the inline backend the picker prints a warning and cannot take clicks.</td></tr></table>
-<h3 id="running">Running the picker</h3>
+<h3 id="terminal">Starting from a terminal or the Anaconda Prompt</h3>
+<p>Spyder is not needed. In the folder of the program:</p>
+<pre>conda activate pg
+python run_picker.py                          (import window in the current folder)
+python run_picker.py D:\Line_101              (... in the folder of the data)
+python run_picker.py --quantity displacement D:\Line_101
+python run_picker.py --record D:\Line_101\picks\S_STACK_0101_displacement_import.json</pre>
+<p>The import window, shot dialog, picker and every tool window work as in Spyder, and the terminal shows the messages of Spyder's console. <code>--record</code> repeats an earlier import without the window. The program ends when its last window is closed; the picks are saved as you go. The full path also works from any folder: <code>python C:\...\picker\run_picker.py</code>.</p>
+<h3 id="running">Running the picker in Spyder</h3>
 <ul>
 <li><b>Run file (F5)</b> runs the import window, then preprocessing and filtering, and opens the shot dialog. The run stops there, at the cell <i>End of the picking session</i>, so nothing below it runs on unfinished picks.</li>
 <li><b>Run only the import cell (Ctrl+Enter)</b> does the same: it carries on through preprocessing and filtering to the shot dialog (<code>AUTO_CONTINUE_TO_PICKER = True</code>).</li>
@@ -199,7 +214,7 @@ a { color: #1f618d; }
 <p class="fig"><img src="images/menus.png" data-w="1410" alt="Menus"><br><span class="cap">Figure 13. Every menu and the two toolbar drop-downs.</span></p>
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Menu</th><th>Contents</th></tr>
-<tr><td>File</td><td>Import SEG-Y / SU data (Ctrl+O), Repeat an import record, Save picks, Topography (Ctrl+T), Export picks for inversion (Ctrl+E), Save canvas image (PNG/PDF/SVG), Close picker.</td></tr>
+<tr><td>File</td><td>Import SEG-Y / SU data (Ctrl+O), Repeat an import record, Save picks, Topography (Ctrl+T), Export picks for inversion (Ctrl+E), Save canvas image (the export window, section 18), Open the exports folder, Close picker.</td></tr>
 <tr><td>Data</td><td>Survey geometry / topography, Preprocessing, Show quantity.</td></tr>
 <tr><td>Processing</td><td>Filter designer (f).</td></tr>
 <tr><td>Picks</td><td>Undo pick edit (u, Ctrl+Z), Redo pick edit (Ctrl+Y), Delete picks on one receiver, Delete picks in a receiver range, Save picks, Export picks for inversion, Automatic picking (STA/LTA, Undo).</td></tr>
@@ -428,12 +443,35 @@ a { color: #1f618d; }
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>File</th><th>Contents</th></tr>
 <tr><td><code>&lt;line&gt;_&lt;type&gt;_picks.pkl</code></td><td>The picks: <code>final_picks</code> (per shot, an array of [receiver position, time sample at 0.1 ms]), the clicked points, and <code>metadata</code> (data type, preprocessing, filter, geometry, import record, last auto-pick settings). Written by <b>s</b>, Save picks, Prev/Next, every QC edit and every auto-pick.</td></tr>
-<tr><td><code>&lt;line&gt;_&lt;type&gt;_SGT.txt</code></td><td>The classic export: one row per pick, <code>S G T</code>, written by the end-of-session cells.</td></tr>
-<tr><td><code>&lt;line&gt;_SGT_stations.txt</code>, <code>&lt;line&gt;_SGT_xpositions.csv</code>, <code>&lt;line&gt;_pygimli.txt</code></td><td>Default names of the export window (<a href="#export">section 17</a>); you choose the name and folder.</td></tr>
+<tr><td><code>&lt;line&gt;_&lt;type&gt;_sessions/</code></td><td>Session backups of the pick file (see below).</td></tr>
+<tr><td><code>&lt;line&gt;_exports/</code></td><td>Everything the program exports for this line (v19): figures in sub-folders, the export window's files, the reciprocity reports and the classic SGT file.</td></tr>
+<tr><td><code>&lt;line&gt;_exports/&lt;line&gt;_&lt;type&gt;_SGT.txt</code></td><td>The classic export: one row per pick, <code>S G T</code>, written by the end-of-session cells.</td></tr>
+<tr><td><code>&lt;line&gt;_exports/&lt;line&gt;_SGT_stations.txt</code>, <code>…_SGT_xpositions.csv</code>, <code>…_pygimli.txt</code></td><td>Default names of the export window (<a href="#export">section 17</a>), with the companion topography and line-end files.</td></tr>
 <tr><td><code>original_headers_backup_&lt;date&gt;_&lt;time&gt;/</code></td><td>Copies of the data files made before the geometry is written into their headers (<a href="#import-headers">section 3c</a>).</td></tr>
 <tr><td><code>&lt;line&gt;_&lt;type&gt;_import.json</code></td><td>The import record (files, data type, geometry, outputs).</td></tr>
-<tr><td><code>shot_&lt;n&gt;_plot.png</code></td><td>Canvas images (Ctrl+S; File &gt; Save canvas image chooses the name and format).</td></tr>
+<tr><td><code>&lt;line&gt;_exports/shots/shot_&lt;nnn&gt;/…png</code></td><td>Canvas images (Ctrl+S, or File &gt; Save canvas image with the export window; <a href="#figures">section 18</a>).</td></tr>
 </table>
+<p>A typical picks folder after a few sessions:</p>
+<pre>picks/
+  SLF_101_displacement_picks.pkl            the picks (working file)
+  SLF_101_displacement_import.json          the import record
+  SLF_101_displacement_sessions/            one backup per session
+    SLF_101_displacement_session_20261124_093015.pkl
+    SLF_101_displacement_session_20261126_141002.pkl
+  SLF_101_exports/
+    SLF_101_SGT_xpositions.csv  SLF_101_pygimli.txt  SLF_101_pygimli_topo.txt ...
+    shots/shot_012/  reciprocity/  filters/  preprocessing/  sessions/ ...
+    reciprocity_analysis/</pre>
+<h3 id="sessions">Session backups and continuing a session</h3>
+<p>Every picking session leaves one backup of the pick file in <code>&lt;line&gt;_&lt;type&gt;_sessions/</code>, named by the time the session started and refreshed at every save, so it always holds that session's final picks. When a session starts on a pick file whose picks are not backed up yet (for example picks made with v18), they are backed up first. The 50 most recent backups are kept.</p>
+<p>When you import data whose pick file already has picks, the window <b>Continue a picking session?</b> opens (Figure 2b):</p>
+<ul>
+<li>the table lists the working file (<i>Latest</i>) and every session backup with the time it was saved, the shots picked and the total number of picks; <i>(= latest)</i> marks a backup identical to the working file;</li>
+<li>the plot shows every pick of the selected row (travel time against receiver position, coloured by shot position, shots as squares at t = 0), and the list of picked shots is below it;</li>
+<li><b>Continue the latest picks</b>, or select an earlier session and <b>Continue from the session of …</b>: its picks are loaded and saving goes to the working file (whose current picks are backed up first);</li>
+<li><b>Start new picks</b> (only when you chose a new pick file): the current file stays in the backups.</li>
+</ul>
+<p class="fig"><img src="images/session_resume.png" data-w="1150" alt="Continue a picking session"><br><span class="cap">Figure 2b. Continue a picking session? The working file and its session backups, with all picks of the selected row.</span></p>
 <h3 id="sgt">The S G T file of the end-of-session cells</h3>
 <p>The export window (<a href="#export">section 17</a>) replaces these cells; they are kept for scripts that use them. After picking, run the cells below <i>End of the picking session</i> one at a time. They:</p>
 <ol>
@@ -511,7 +549,23 @@ a { color: #1f618d; }
 <table class="note" width="100%" cellpadding="8"><tr><td><b>Checked against the inversion script.</b> With <code>SLF_Line_101_topo_0m.txt</code> applied as a station table, the x-position export of the same picks reproduces <code>SLF_Line_101_picks_V2.txt</code> exactly (2301 rows), and the companion <code>_topo.txt</code> reproduces the topography file. The pyGIMLi export equals what <code>convertPicks2Gimli(picks, topo, 0.001, 0.003)</code> of <code>StreamLineInversion_SLF_Line_101.py</code> writes: the same sensors, s, g, t and err. From the headers alone, x agrees within 0.2 mm and the elevation of shot 1 differs by 5 cm (692.80 m in the header, 692.75 m in the file).<br><br>Two things about the script itself. <code>convertPicks2Gimli</code> writes the last pick of the file twice: the file ends with a newline, and for that empty line the check that appends a pick still runs with the previous values. Moving the <code>if tPick &gt; 0 and xPick != sPick:</code> block inside <code>if tmpString != '':</code> fixes it. And <code>np.row_stack</code> no longer exists in recent NumPy 2 releases; <code>np.vstack</code> does the same.</td></tr></table>
 <table class="note" width="100%" cellpadding="8"><tr><td><b>Earlier Line 101 pyGIMLi file.</b> Exported from the same picks, all three formats give exactly the same 2302 s–g–t rows as <code>SLF_line_101_gimliInput.txt</code>. The sensor table differs: that file gave sensor <i>k</i> the coordinates of receiver <i>k</i>, while its data used <i>k</i> = position + 1. So every sensor sat one station (about 1 m) along the line from its true place, and each elevation was paired with the neighbouring station. The offsets were nearly the same. The export writes every sensor at its own surveyed position, as <code>SLF_Line_101_topo_0m.txt</code> does.</td></tr></table>
 
-<h2 id="shortcuts">18. Keyboard and mouse</h2>
+<h2 id="figures">18. Figures for papers and slides</h2>
+<p>Every plot has <b>⤓ Export</b> at the right end of its toolbar: the picking canvas, the reciprocity map, <i>Picks (all shots)</i> and the checkerboard, the filter response and before / after preview, the preprocessing spectra and preview, the auto-pick previews, the import, geometry and spectra plots, and the session window. The export window is the same as FWI Studio's:</p>
+<table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td>Prefix</td><td>Start of every file name, by default the line name (e.g. <code>SLF_101</code>); remembered for the line.</td></tr>
+<tr><td>Name</td><td>Proposed from the window (e.g. <code>shot_012_displacement</code>, <code>reciprocity_map</code>, <code>filter_response</code>).</td></tr>
+<tr><td>Format</td><td><b>png</b>, <b>tiff</b> (LZW) or <b>jpg</b>: pixels at the chosen dpi; <b>pdf</b>, <b>svg</b> or <b>eps</b>: vector, sharp at any zoom (svg opens in Inkscape or Illustrator for labels).</td></tr>
+<tr><td>Resolution</td><td>300 dpi for journal figures, 600 dpi for line art; 150 dpi is enough for slides.</td></tr>
+<tr><td>Size</td><td>As on screen, single column (8.5 cm), 1.5 column (12 cm), double column (17.5 cm), slide (25 cm), full 16:9 slide (33.9 × 19 cm) or custom; the height follows the on-screen shape unless you untick it.</td></tr>
+<tr><td>Font scale, Line width</td><td>All text, or all lines and markers, × this factor in the file only.</td></tr>
+<tr><td>Options</td><td>Transparent background (slides with a coloured background); crop white margins; <b>main plot only</b> (the picking canvas without its buttons, sliders and MODE / GAIN boxes); also save a PDF copy.</td></tr>
+</table>
+<p>The figure is drawn again at the chosen size for the file; the window keeps its own size and look. Text keeps its point size, so on a page smaller than the screen it takes more room: for a single column use a font scale of about 0.6–0.8, for slides about 1.2–1.6. Journals usually ask for 7–10 pt at the final size.</p>
+<p>Files go to the line's exports folder, one sub-folder per kind of figure: <code>shots/shot_012/</code>, <code>reciprocity/</code>, <code>filters/</code>, <code>preprocessing/</code>, <code>autopick/</code>, <code>import/</code>, <code>geometry/</code>, <code>sessions/</code>. An existing file is replaced only after you confirm. <b>Ctrl+S</b> on the canvas saves it at once with the last settings (main plot only) into <code>shots/shot_&lt;nnn&gt;/</code>, adding a number instead of overwriting.</p>
+<p class="fig"><img src="images/figure_export_dialog.png" data-w="738" alt="Export figure"><br><span class="cap">Figure 18. The export window: double column at 300 dpi as a PDF, the picking canvas without its controls.</span></p>
+
+<h2 id="shortcuts">19. Keyboard and mouse</h2>
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Key / mouse</th><th>Action</th></tr>
 <tr><td>m</td><td>Manual Pick (click / drag)</td></tr>
@@ -527,7 +581,7 @@ a { color: #1f618d; }
 <tr><td>x</td><td>X axis: index ↔ offset (distance along the line)</td></tr>
 <tr><td>Ctrl+E</td><td>Export picks for inversion</td></tr>
 <tr><td>Ctrl+T</td><td>Topography (apply a topography file)</td></tr>
-<tr><td>Ctrl+S</td><td>Save the canvas as an image</td></tr>
+<tr><td>Ctrl+S</td><td>Save the canvas as an image into the exports folder (last export settings)</td></tr>
 <tr><td>Ctrl+O</td><td>Import SEG-Y / SU data</td></tr>
 <tr><td>Ctrl+D</td><td>Plotted traces, time axis and gain</td></tr>
 <tr><td>F1</td><td>User manual (in any window: help for that window)</td></tr>
@@ -537,7 +591,7 @@ a { color: #1f618d; }
 <tr><td>Ctrl+Z / Ctrl+Y (QC window)</td><td>Undo / redo deletes</td></tr>
 </table>
 
-<h2 id="troubleshooting">19. Troubleshooting</h2>
+<h2 id="troubleshooting">20. Troubleshooting</h2>
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Symptom</th><th>Cause and fix</th></tr>
 <tr><td>The canvas does not react to clicks; a warning about the inline backend.</td><td>Set Spyder's graphics backend to Qt and restart the kernel (<a href="#starting">section 2</a>).</td></tr>
@@ -553,7 +607,7 @@ a { color: #1f618d; }
 <tr><td>Help says the manual was not found.</td><td>Keep the <code>manual</code> folder (manual.html, images, PDF) next to the .py files.</td></tr>
 </table>
 
-<h2 id="history">20. Version history</h2>
+<h2 id="history">21. Version history</h2>
 <table class="grid" border="1" cellspacing="0" cellpadding="4" width="100%">
 <tr><th>Version</th><th>Main changes</th></tr>
 <tr><td>v1–v4</td><td>Filters merged (minimum-phase FIR, zero-phase FIR, IIR), balanced wiggles, filter designer with live preview, resampling ×10 for picking.</td></tr>
@@ -564,6 +618,7 @@ a { color: #1f618d; }
 <tr><td>v11</td><td>Automatic picking (STA/LTA, MER, original routine; AIC; post-processing) with live preview; shot spectra.</td></tr>
 <tr><td>v12</td><td>File menu with import from the picker; trace ranges; gain in every preview; spectra corrected for the sensor response.</td></tr>
 <tr><td>v13</td><td>This manual: built into the picker (Help menu, F1, side panel) and as a PDF.</td></tr>
+<tr><td>v19</td><td>⤓ Export on every plot (FWI Studio's export window: prefix, sizes in cm, dpi, font and line scale, png / tiff / pdf / svg / eps, main plot only). One exports folder per line (<code>&lt;line&gt;_exports</code>) for figures, the export window's files, reports and the SGT file. Session backups of the pick file and the <i>Continue a picking session?</i> window with all picks of each session. Start from a terminal or the Anaconda Prompt (<code>python run_picker.py</code>); pyGIMLi is required; segypy and bruges optional.</td></tr>
 <tr><td>v18</td><td>Topography at any time (File &gt; Topography, Ctrl+T; Data; Tools) without moving picks, with preview and restore. Station tables: one row per tape station, shots and receivers together (recognised automatically). x = 0 at tape position 0 m (the first shot) in the offset view and the export. Export: companion topography and line-end files; err line length = shot span and t ≤ 0 left out, as in <code>convertPicks2Gimli</code>; checked against that script. Reciprocity: station match tolerance in the QC window, shared with the canvas guider; the guider uses the pick at the shot, not the first within 1 m; shots without a receiver are hatched on the checkerboard.</td></tr>
 <tr><td>v17</td><td>Export window (S G T with station numbers or x positions, any delimiter; pyGIMLi data files with err / valid; checked after writing). Seismic Unix (.su) import. Topography files (csv, txt, xls, xlsx) for receivers and shots, or shots at the geophones. Writing the geometry into the trace headers with a backup. Index / offset x axis on the canvas.</td></tr>
 <tr><td>v16</td><td>One undo / redo history for every pick edit (u, Ctrl+Z / Ctrl+Y; unfinished strokes one at a time); no wheel zoom while dragging; “Delete picks” everywhere (was “void”); fix: a second delete range no longer fails.</td></tr>
@@ -571,5 +626,5 @@ a { color: #1f618d; }
 <tr><td>v14</td><td>Default filter back to the original configuration (minimum-phase 10–80 Hz, notch 199 Hz); 10–150 Hz kept as the <i>Wider band</i> preset.</td></tr>
 </table>
 
-<p class="sub">Built 18 November 2026. The same text is in First_Arrival_Picker_User_Manual.pdf.</p>
+<p class="sub">Built 26 November 2026. The same text is in First_Arrival_Picker_User_Manual.pdf.</p>
 </body></html>

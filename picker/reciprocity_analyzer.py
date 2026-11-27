@@ -495,6 +495,7 @@ if _HAVE_QT:
             self.canvas = FigureCanvas(self.fig)
             self.ax_map = self.fig.add_subplot(1, 2, 1)
             self.ax_bar = self.fig.add_subplot(1, 2, 2)
+            self.fig._export_tag, self.fig._export_subdir = 'reciprocity_map', 'reciprocity'
             self._cbar = None
             ml.addWidget(NavigationToolbar(self.canvas, map_tab))
             ml.addWidget(self.canvas, 1)
@@ -560,6 +561,7 @@ if _HAVE_QT:
             self.fig_p = Figure(dpi=dpi, constrained_layout=True)
             self.canvas_p = FigureCanvas(self.fig_p)
             self.ax_p = self.fig_p.add_subplot(111)
+            self.fig_p._export_tag, self.fig_p._export_subdir = 'picks_all_shots', 'reciprocity'
             self.tb_p = NavigationToolbar(self.canvas_p, left)
             ll.addWidget(self.tb_p)
             ll.addWidget(self.canvas_p, 1)
@@ -570,6 +572,9 @@ if _HAVE_QT:
             self.fig_c = Figure(dpi=dpi, constrained_layout=True)
             self.canvas_c = FigureCanvas(self.fig_c)
             self.ax_c = self.fig_c.add_subplot(111)
+            self.fig_c._export_tag, self.fig_c._export_subdir = 'reciprocal_error_checkerboard', 'reciprocity'
+            self.tb_c = NavigationToolbar(self.canvas_c, right)          # v19: zoom + Export
+            rl.addWidget(self.tb_c)
             rl.addWidget(QLabel('<b>Reciprocal error</b> (click a cell: its two picks are marked; '
                                 'double-click: open the shot)'))
             rl.addWidget(self.canvas_c, 1)
