@@ -33,6 +33,8 @@ def main(argv=None):
     app = QApplication.instance() or QApplication(sys.argv[:1])
     import figure_export as fx
     fx.install()
+    import wheel_guard as wg
+    wg.install(app)
     data = os.path.abspath(a.data) if a.data else ''
     stem = os.path.splitext(os.path.basename(data))[0] if data else 'line'
     line = a.line or re.sub(r'_(pygimli|gimliInput|sgt).*$', '', stem, flags=re.I) or stem

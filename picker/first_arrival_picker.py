@@ -45,6 +45,8 @@ from matplotlib.ticker import FuncFormatter
 import figure_export as fx
 import session_store as sstore
 fx.install()
+import wheel_guard as wg                 # v22: the wheel changes a value only after a click (as FWI Studio)
+wg.install()
 
 # seismic data reading
 try:
@@ -3458,6 +3460,13 @@ def install_app_menus(fig):
     a.setShortcut(QKeySequence('Ctrl+E'))
     m_file.addAction('Save canvas image (export figure)...', save_canvas_image)
     m_file.addAction('Open the exports folder', lambda: fx.open_folder(fx.exports_dir()))   # v19
+    m_file.addSeparator()
+    _a_wg = m_file.addAction('Scroll wheel changes a value only after clicking it')        # v22
+    _a_wg.setCheckable(True)
+    _a_wg.setChecked(wg.install().enabled)
+    _a_wg.setToolTip('On: scrolling over spin boxes (cut-offs, widths, gains), drop-downs and sliders scrolls '
+                     'the window; click a field first to change it with the wheel')
+    _a_wg.toggled.connect(wg.set_enabled)
     m_file.addSeparator()
     m_file.addAction('Close picker (saves picks)', close_picker)
 
