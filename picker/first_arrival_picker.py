@@ -876,17 +876,20 @@ if FILTER_PRESET_FILE:
     FILTER_PARAMS = fdz.FilterParams.load_json(FILTER_PRESET_FILE)
     print(f"Loaded filter preset {FILTER_PRESET_FILE}")
 
+def filter_pre_shift():
+    """Time shift already in norm_data (s). The filter undoes it, filters the record from
+    its real start (pre-trigger included) and re-applies it: filter-then-shift, like
+    Steve's picker, so a causal filter never starts cold at shot time."""
+    return PREPROC_PARAMS.delta_t_ms * 1e-3 if PREPROC_PARAMS.time_shift_on else 0.0
+
+
 if OPEN_FILTER_DESIGNER_AT_START:
     _p = fdz.open_filter_designer(FILTER_PARAMS, fs, preview=norm_data[0], x=recv_pos_index,
                                   shot_label='Shot 1', pre_shift_s=filter_pre_shift())
     if _p is not None:
         FILTER_PARAMS = _p
 
-def filter_pre_shift():
-    """Time shift already in norm_data (s). The filter undoes it, filters the record from
-    its real start (pre-trigger included) and re-applies it: filter-then-shift, like
-    Steve's picker, so a causal filter never starts cold at shot time."""
-    return PREPROC_PARAMS.delta_t_ms * 1e-3 if PREPROC_PARAMS.time_shift_on else 0.0
+
 
 
 filter_stages = fdz.build_filter_chain(FILTER_PARAMS, fs)

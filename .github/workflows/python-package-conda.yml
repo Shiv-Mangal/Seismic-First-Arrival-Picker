@@ -1,34 +1,44 @@
-name: Python Package using Conda
+name: Tests (conda + pyGIMLi)
 
-on: [push]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 
 jobs:
-  build-linux:
+  test:
     runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 5
-
+    defaults:
+      run:
+        shell: bash -el {0}          # login shell: the conda environment is active in every step
     steps:
     - uses: actions/checkout@v4
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v3
+
+    - name: System libraries for headless Qt
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y -q libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+
+    - name: Conda environment from environment.yml (pyGIMLi, PyQt5, ObsPy, ...)
+      uses: conda-incubator/setup-miniconda@v3
       with:
-        python-version: '3.10'
-    - name: Add conda to system path
+        environment-file: environment.yml
+        activate-environment: pg
+        miniforge-version: latest
+        conda-remove-defaults: true
+
+    - name: Versions
       run: |
-        # $CONDA is an environment variable pointing to the root of the miniconda directory
-        echo $CONDA/bin >> $GITHUB_PATH
-    - name: Install dependencies
+        python --version
+        python picker/run_picker.py --check
+
+    - name: Lint (syntax errors and undefined names stop the build)
       run: |
-        conda env update --file environment.yml --name base
-    - name: Lint with flake8
-      run: |
-        conda install flake8
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Test with pytest
-      run: |
-        conda install pytest
-        pytest
+        flake8 . --count --select=E9,F63,F7,F821 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics | tail -n 3
+
+    - name: Tests (synthetic data, no screen)
+      env:
+        QT_QPA_PLATFORM: offscreen
+        MPLBACKEND: Agg
+      run: pytest -v

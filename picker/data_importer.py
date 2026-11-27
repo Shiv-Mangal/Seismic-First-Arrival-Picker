@@ -1298,7 +1298,8 @@ def sgt_to_picks(path, shot_pos, recv_pos, pick_dt_s):
     Turn an SGT file back into the picker's picks:
     {'final_picks_for_shot_no_<i>': array (1, N, 2) of [receiver position, pick sample]}.
     The S/G convention is detected by matching against the imported geometry:
-    positions, positions + 1 (the old DTW export), or 1-based indices. T is in seconds
+    positions, positions + 1 (the old DTW export), 1-based indices, or the export's station
+    numbers on the receiver grid (v20; equal to positions for a 1 m grid). T is in seconds
     (ms is detected when values exceed 10). Returns (picks, report text).
     """
     a = read_sgt(path)
@@ -1309,10 +1310,16 @@ def sgt_to_picks(path, shot_pos, recv_pos, pick_dt_s):
     sp = float(np.median(np.diff(recv_pos))) if len(recv_pos) > 1 else 1.0
     tol = 0.25 * sp
 
+    origins = sorted({float(recv_pos.min()), float(min(recv_pos.min(), shot_pos.min() if len(shot_pos) else np.inf))})
+
     def match(vals, pos):
         cands = {'positions': vals, 'positions + 1': vals - 1}
         if np.all(np.abs(vals - np.round(vals)) < 1e-6) and vals.min() >= 1 and vals.max() <= len(pos):
             cands['1-based index'] = pos[np.round(vals).astype(int) - 1]
+        if np.all(np.abs(vals - np.round(vals)) < 1e-6):  # v20: the export's station numbers
+            for o in origins:                              # (receiver grid, base 1 or 0)
+                for base in (1, 0):
+                    cands[f'station numbers (base {base})'] = o + (vals - base) * sp
         best = None
         for name, v in cands.items():
             idx = np.array([int(np.argmin(np.abs(pos - x))) for x in v])

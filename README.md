@@ -1,5 +1,7 @@
 # Seismic First-Arrival Picker
 
+[![Tests](https://github.com/Shiv-Mangal/Seismic-First-Arrival-Picker/actions/workflows/python-package-conda.yml/badge.svg)](https://github.com/Shiv-Mangal/Seismic-First-Arrival-Picker/actions/workflows/python-package-conda.yml)
+
 An interactive first-arrival (first-break) picker for refraction travel-time tomography, written in Python (PyQt5 + matplotlib; run from Spyder or a terminal). It takes a set of SEG-Y or Seismic Unix shot gathers and produces travel-time files for the inversion: S G T files (station numbers or x positions) or a pyGIMLi data file.
 
 ## Features
@@ -20,9 +22,8 @@ An interactive first-arrival (first-break) picker for refraction travel-time tom
 pyGIMLi is required (from v19) and installs most reliably with conda:
 
 ```bash
-conda create -n pg -c gimli -c conda-forge "pygimli>=1.5"
+conda env create -f environment.yml      # once: pyGIMLi, PyQt5, ObsPy, ... in an environment called pg
 conda activate pg
-conda install -c conda-forge pyqt obspy pandas openpyxl xlrd
 python picker/run_picker.py --check      # lists the libraries and versions
 ```
 
@@ -46,6 +47,10 @@ Python 3 with Qt 5. In Spyder, set *Preferences > IPython console > Graphics > B
 | `legacy/` | the earlier Manual Picker version 1.3.1 scripts |
 
 The commit history follows the development versions v2 to v19; each commit message lists that version's changes.
+
+## Tests
+
+`pytest` runs the automatic tests in `tests/` on the synthetic survey (import, pyGIMLi and S G T export read back, session backups, figure export, launcher). GitHub runs them on every push (badge above).
 
 ## Data
 

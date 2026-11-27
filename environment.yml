@@ -1,0 +1,22 @@
+# conda environment for the first-arrival picker (and its pyGIMLi inversion tools)
+#   conda env create -f environment.yml
+#   conda activate pg
+#   python picker/run_picker.py
+name: pg
+channels:
+  - gimli
+  - conda-forge
+dependencies:
+  - python>=3.10,<3.13
+  - pygimli>=1.5
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - pyqt=5
+  - obspy
+  - openpyxl
+  - xlrd
+  - pillow
+  - pytest
+  - flake8
