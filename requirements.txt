@@ -4,8 +4,8 @@ pandas
 matplotlib
 PyQt5
 obspy
-segypy
-bruges
+segypy        # optional (legacy cells only)
+bruges        # optional (legacy cells only)
 openpyxl      # .xlsx topography files
 xlrd          # .xls topography files
-# optional: pygimli  (the export reads pyGIMLi files back with pyGIMLi when it is installed)
+pygimli       # required from v19: install with conda (see the manual, section 2)

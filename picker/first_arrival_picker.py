@@ -28,7 +28,10 @@ from scipy.signal import (firwin, minimum_phase, lfilter, freqz, iirnotch, filtf
                           butter, sosfilt, sosfiltfilt, sosfreqz)
 import scipy
 from scipy.integrate import cumulative_trapezoid
-import bruges
+try:                                     # v19: only the legacy cells use bruges / segypy
+    import bruges
+except ImportError:
+    bruges = None
 
 
 # Plotting Packages
@@ -38,8 +41,16 @@ from matplotlib.widgets import RadioButtons, Slider, Button
 from matplotlib.collections import PolyCollection, LineCollection
 from matplotlib.ticker import FuncFormatter
 
+# v19: export button on every figure toolbar, session backups of the pick file
+import figure_export as fx
+import session_store as sstore
+fx.install()
+
 # seismic data reading
-import segypy
+try:
+    import segypy
+except ImportError:
+    segypy = None
 from obspy.io.segy.core import _read_segy
 
 #%% File paths and names
@@ -53,6 +64,7 @@ search_string_for_segy_files = '*'   # name filter (wildcards); only .segy/.sgy 
 file_path_pkl = None                 # set by the import (script mode with AUTO_OUTPUT_NAMES = False: your path)
 file_path_sgt = None
 reciprocity_report_directory = None
+EXPORTS_DIR = None                   # v19: <picks folder>/<line>_exports (set at the import)
 
 
 #day_1
@@ -115,6 +127,12 @@ data_importer.py (import dialog or script mode). The previous loader is kept bel
 commented out, for reference.
 """
 import importlib
+
+
+# v19: the terminal launcher (run_picker.py) passes its options through the environment
+segy_data_path = os.environ.get('FAP_START_FOLDER') or segy_data_path
+IMPORT_RECORD_FILE = os.environ.get('FAP_IMPORT_RECORD') or IMPORT_RECORD_FILE
+DATA_QUANTITY = os.environ.get('FAP_QUANTITY') or DATA_QUANTITY
 
 
 def _running_single_cell():
@@ -215,6 +233,18 @@ def _adopt_survey(sv):
     file_path_sgt = SURVEY.sgt_path
     reciprocity_report_directory = os.path.dirname(os.path.abspath(file_path_pkl))
     os.makedirs(reciprocity_report_directory, exist_ok=True)
+    # v19: one exports folder per line (figures, SGT / pyGIMLi files, reports): <picks>/<line>_exports
+    global EXPORTS_DIR
+    EXPORTS_DIR = fx.exports_folder_for(reciprocity_report_directory, SURVEY.line)
+    fx.set_context(SURVEY.line, EXPORTS_DIR)
+    if file_path_sgt:
+        os.makedirs(os.path.dirname(os.path.abspath(file_path_sgt)), exist_ok=True)
+    try:                                           # v19: back up the picks this session starts from
+        _b = sstore.start_session(file_path_pkl)
+        if _b:
+            print(f"Picks backed up before this session: {_b}")
+    except Exception as _e:
+        print(f"Session backup skipped: {_e}")
     LOAD_EXISTING_PICKS = SURVEY.load_existing_picks
     recv_df_from_segy = SURVEY.recv_df()          # utmx, utmy, elevation, local_x, local_y, position
     shot_df_from_segy = SURVEY.shot_df()          # + file, offline_m, position, delay_ms
@@ -2050,6 +2080,10 @@ def plot_shot():
            lwidth=DISPLAY['line_width'])
 
     _status_texts()                  # v15: MODE / GAIN boxes
+    fig._export_main_axes = [ax]     # v19: 'Main plot only' in the figure export
+    fig._export_hide_artists = [globals().get('mode_text'), globals().get('gain_text')]
+    fig._export_tag = _canvas_export_tag
+    fig._export_subdir = _canvas_export_subdir
 
     # Ensure that event handling works properly
     fig.canvas.mpl_connect('scroll_event', on_scroll)
@@ -2784,10 +2818,10 @@ def open_pdf_manual():
 
 def show_about():
     QMessageBox.about(None, 'About the first-arrival picker',
-                      '<b>First-arrival picker</b> for refraction tomography (v16)<br><br>'
-                      'Manual and automatic first-break picking of SEG-Y shot gathers, with '
-                      'preprocessing, filtering, reciprocity QC and export to a three-column '
-                      'S G T file for travel-time tomography.<br><br>'
+                      '<b>First-arrival picker</b> for refraction tomography (v19)<br><br>'
+                      'Manual and automatic first-break picking of SEG-Y and SU shot gathers, with '
+                      'preprocessing, filtering, reciprocity QC, figure export and export to S G T '
+                      'or pyGIMLi files for travel-time tomography.<br><br>'
                       'Help &gt; User manual (F1) explains every window.')
 
 
@@ -3259,16 +3293,30 @@ def import_from_record(path=None):
 
 
 def save_canvas_image(path=None):
-    """File > Save canvas image... (Ctrl+S on the canvas saves a PNG next to the picks)."""
+    """File > Save canvas image... (v19: the export window; Ctrl+S saves at once into <line>_exports/shots)."""
     if path is None:
         from PyQt5.QtWidgets import QFileDialog
-        start = os.path.join(reciprocity_report_directory, f'shot_{(shot_no or 0) + 1}_plot.png')
-        path, _ = QFileDialog.getSaveFileName(None, 'Save canvas image', start,
-                                              'PNG (*.png);;PDF (*.pdf);;SVG (*.svg)')
+        # v19: the publication export dialog (size, dpi, fonts, main plot only) in <line>_exports
+        parent = fig.canvas.manager.window if fig is not None and plt.fignum_exists(fig.number) else None
+        w = fx.export_dialog(fig, _canvas_export_tag(), parent=parent, subdir=_canvas_export_subdir())
+        return w[0] if w else None
     if path:
         fig.savefig(path, dpi=300, bbox_inches='tight', pad_inches=0.2)
         print(f"Canvas saved to: {path}")
     return path
+
+
+def _canvas_export_tag():
+    """File name tag of the picker canvas: shot number, data shown and display domain."""
+    try:
+        q = str(globals().get('ACTIVE_QUANTITY') or DATA_QUANTITY or '')
+    except Exception:
+        q = ''
+    return f"shot_{(shot_no or 0) + 1:03d}" + (f"_{q}" if q else '')
+
+
+def _canvas_export_subdir():
+    return os.path.join('shots', f"shot_{(shot_no or 0) + 1:03d}")
 
 
 def close_picker():
@@ -3297,7 +3345,7 @@ def open_export_ui():
         parent = fig.canvas.manager.window if fig is not None and plt.fignum_exists(fig.number) else None
     except Exception:
         pass
-    return pex.open_export_dialog(final_picks_dict, geom, folder=reciprocity_report_directory,
+    return pex.open_export_dialog(final_picks_dict, geom, folder=EXPORTS_DIR or reciprocity_report_directory,
                                   parent=parent)
 
 
@@ -3329,7 +3377,8 @@ def install_app_menus(fig):
     a.setShortcut(QKeySequence('Ctrl+T'))
     a = m_file.addAction('Export picks for inversion (SGT / pyGIMLi)...', open_export_ui)    # v17
     a.setShortcut(QKeySequence('Ctrl+E'))
-    m_file.addAction('Save canvas image...', save_canvas_image)
+    m_file.addAction('Save canvas image (export figure)...', save_canvas_image)
+    m_file.addAction('Open the exports folder', lambda: fx.open_folder(fx.exports_dir()))   # v19
     m_file.addSeparator()
     m_file.addAction('Close picker (saves picks)', close_picker)
 
@@ -4066,6 +4115,10 @@ def save_picks(file_path_pkl):  # Optional: specify the file path
         pickle.dump(data_to_save, file)
 
     print(f"Data successfully saved to {file_path_pkl} for shot no {shot_no }")
+    try:                                   # v19: this session's backup follows every save
+        sstore.snapshot(file_path_pkl)
+    except Exception as _e:
+        print(f"Session backup not updated: {_e}")
     refresh_geometry_window()
     
     #following loop helps print which shot numbers are picked upto now
@@ -4239,8 +4292,11 @@ def on_key(event):
     elif event.key in ('ctrl+s', 'cmd+s'):
         reset_cursor_and_toolbar()
         try:
-            save_path = os.path.join(reciprocity_report_directory, f'shot_{shot_no}_plot.png')
-            plt.savefig(save_path, dpi=300, bbox_inches='tight', pad_inches=0.2)
+            # v19: quick save with the last export settings into <line>_exports (main plot only)
+            _o = fx.LAST.copy()
+            _o.main_only = True
+            save_path = fx.save_figure(fig, fx.default_filename(_canvas_export_tag(), '.' + _o.fmt,
+                                                                _canvas_export_subdir()), _o)[0]
             print(f"Canvas saved to: {save_path}")
         except NameError:
             print("reciprocity_report_directory is not defined. Cannot save canvas.")
@@ -5404,7 +5460,7 @@ def main():
     'C:/Workspace/onedrive_workspace/workspace/Maripos_2D_lines/line9001/inversion_sept_9_2025/reciprocity_analysis/'
     """
     # Default output directory
-    default_output_dir = os.path.join(reciprocity_report_directory, f'reciprocity_analysis')
+    default_output_dir = os.path.join(EXPORTS_DIR or reciprocity_report_directory, 'reciprocity_analysis')
     
     print("Reciprocity Analyzer")
     print("=" * 50)
@@ -5530,4 +5586,4 @@ test_segy = np.array(test_segy.traces).T
 test_segy = normalizer(test_segy)
 
 plt.figure(figsize=(16,9))
-segypy.wiggle(test_segy[51:300, :], gain = 3.5)
+segypy.wiggle(test_segy[51:300, :], gain = 3.5)

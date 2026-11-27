@@ -794,6 +794,7 @@ if _HAVE_QT:
                 l = QVBoxLayout(w)
                 l.setContentsMargins(0, 0, 0, 0)
                 fig = Figure(dpi=dpi, constrained_layout=True)
+                fig._export_tag, fig._export_subdir = f'autopick_{key}', 'autopick'
                 cv = FigureCanvas(fig)
                 l.addWidget(NavigationToolbar(cv, w))
                 l.addWidget(cv, 1)
