@@ -235,6 +235,8 @@ def save_figure(fig, path, opt=None):
                 except Exception:
                     pass
         fig.set_size_inches(W * CM, H * CM, forward=False)
+        if callable(getattr(fig, '_relayout', None)):        # figures laid out in inches (tomograms)
+            fig._relayout()
         undo_tidy = tidy_for_page(fig) if getattr(opt, 'tidy', True) else None
         kw = dict(dpi=opt.dpi, transparent=opt.transparent, facecolor='none' if opt.transparent else 'white')
         kw.update(bbox_inches='tight', pad_inches=0.04) if opt.tight else kw.update(bbox_inches=None)
@@ -262,6 +264,11 @@ def save_figure(fig, path, opt=None):
             ln.set_markersize(ms)
         for a in hidden:
             a.set_visible(True)
+        if callable(getattr(fig, '_relayout', None)):
+            try:
+                fig._relayout()
+            except Exception:
+                pass
         try:                    # redraw now (a queued redraw could reach a canvas closed meanwhile)
             if hasattr(fig.canvas, 'get_renderer'):
                 fig.canvas.draw()

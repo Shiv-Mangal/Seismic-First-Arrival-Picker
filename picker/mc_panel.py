@@ -492,7 +492,19 @@ class MonteCarloPanel(QWidget):
         st = mc.read_mc_status(f)
         if st.get('state') == 'running' and not self._running():
             self.lbl_run.setText('This set is running in its own process: following it.')
+            self._bar('running')
             self._poll.start(2000)
+        elif st.get('state') in ('done', 'done with failures', 'stopped', 'failed'):
+            self._bar('stopped')
+        elif not self._running():
+            self._bar('')
+
+    def _bar(self, state):
+        try:
+            from inversion_window import progress_state
+            progress_state(self.prog, state, 'runs')
+        except Exception:
+            pass
 
     def _running(self):
         return self.proc is not None and self.proc.poll() is None
@@ -557,6 +569,7 @@ class MonteCarloPanel(QWidget):
         else:
             kw['start_new_session'] = True
         self.proc = subprocess.Popen([sys.executable, '-u', MC_RUNNER, '--mc', self.folder], **kw)
+        self._bar('running')
         self._log_pos = 0
         self.log.clear()
         self.b_run.setEnabled(False)
@@ -605,6 +618,7 @@ class MonteCarloPanel(QWidget):
             self._poll.stop()
             self.b_run.setEnabled(True)
             self.b_stop.setEnabled(False)
+            self._bar('stopped')
             self._refresh_sets(select=f)
 
     def _fill_runs(self, rows):
@@ -782,7 +796,7 @@ class MonteCarloPanel(QWidget):
         cmap = {'std': 'magma_r', 'cv': 'magma_r', 'ci_width': 'magma_r', 'boot_se': 'magma_r',
                 'coverage_mean': 'viridis', 'sens_vtop': 'RdBu_r', 'sens_vbottom': 'RdBu_r',
                 'r2_start': 'viridis'}.get(k, 'jet_r')
-        o = mv.ViewOptions(mask=self.cb_smask.currentData(), cmap=cmap, fontsize=9, legend=False, field=k)
+        o = mv.ViewOptions(mask=self.cb_smask.currentData(), cmap=cmap, fontsize=11, legend=False, field=k)
         try:
             mv.draw_model(fig, self.ens.ref, o, values=self.out[k], label=l,
                           title=f'{t} ({self.out["n_runs"]} runs)', stdcov=self.out['coverage_mean'])

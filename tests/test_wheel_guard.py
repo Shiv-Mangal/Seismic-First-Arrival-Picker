@@ -38,3 +38,17 @@ def test_wheel_needs_a_click(qapp):
     wheel(sps[2])
     assert sps[2].value() != 80                               # clicked: the wheel changes it
     sa.close()
+
+
+def test_progress_bar_turns_red_when_stopped(qapp):
+    from PyQt5.QtWidgets import QProgressBar
+    try:
+        from inversion_window import progress_state
+    except ImportError:                     # the inversion window needs pyGIMLi's environment
+        import pytest
+        pytest.skip('inversion window not importable')
+    bar = QProgressBar()
+    progress_state(bar, 'running')
+    assert bar.property('run_state') == 'running' and 'running' in bar.format()
+    progress_state(bar, 'stopped')
+    assert bar.property('run_state') == 'stopped' and '#e0483c' in bar.styleSheet()

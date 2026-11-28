@@ -51,3 +51,13 @@ def test_short_inversion_and_outputs(survey, true_picks, tmp_path):
     for o in (mv.ViewOptions(), mv.ViewOptions(mode='cells', field='vgrad', mask='stdcov', show_rays=True)):
         mv.draw_model(fig, res, o)
     assert fig._model_grid is not None
+    # v22: the tomogram for the page - exact width, true vertical exaggeration, colour bar beside it
+    from matplotlib.figure import Figure
+    for o in (mv.ViewOptions(vexag=2, width_cm=17.5), mv.ViewOptions(vexag=3, cbar_pos='bottom', title_on=True,
+                                                                      legend_loc='outside right', render='cells')):
+        f2 = Figure(dpi=100)
+        mv.draw_model(f2, res, o, page=True)
+        assert abs(f2.get_size_inches()[0] - 17.5 / 2.54) < 1e-6
+        assert abs(f2._mv_layout['ve_shown'] - o.vexag) < 1e-6
+        a, c = f2.axes[0].get_position(), f2.axes[1].get_position()
+        assert c.x0 >= a.x1 - 1e-9 or c.y1 <= a.y0 + 1e-9          # never on top of the tomogram

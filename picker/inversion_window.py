@@ -80,6 +80,25 @@ def styled(func):
     return wrap
 
 
+PROGRESS_STYLE = {
+    'running': ('#f4f4f4', '#8ee59b'),      # light green while the inversion runs
+    'stopped': ('#f6c9c4', '#e0483c'),      # red once it has stopped (done, stopped or failed)
+}
+
+
+def progress_state(bar, state, unit='iterations'):
+    """Colour of a progress bar: 'running' (light green), 'stopped' (red) or '' (plain)."""
+    if state not in PROGRESS_STYLE:
+        bar.setStyleSheet('')
+        bar.setFormat(f'%v / %m {unit}')
+        return
+    bg, chunk = PROGRESS_STYLE[state]
+    bar.setStyleSheet(f'QProgressBar {{ border: 1px solid #888; border-radius: 3px; text-align: center; '
+                      f'background: {bg}; }} QProgressBar::chunk {{ background-color: {chunk}; }}')
+    bar.setFormat(f'%v / %m {unit}' + ('  -  stopped' if state == 'stopped' else '  -  running'))
+    bar.setProperty('run_state', state)
+
+
 class Plot(QWidget):
     """Figure + toolbar (with the Export button); tag and folder for the file names."""
 
@@ -95,7 +114,7 @@ class Plot(QWidget):
         lay.addWidget(self.canvas, 1)
 
     def draw(self):
-        if self.fig.get_layout_engine() is None:
+        if self.fig.get_layout_engine() is None and not getattr(self.fig, '_export_no_layout', False):
             try:
                 self.fig.tight_layout()
             except Exception:
@@ -698,6 +717,7 @@ class InversionWindow(QMainWindow):
         self.log.clear()
         self.prog.setRange(0, s.max_iter)
         self.prog.setValue(0)
+        progress_state(self.prog, 'running')
         # a process of its own (detached): it keeps going when this window or the picker closes
         kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, cwd=self.run_dir)
         if os.name == 'nt':
@@ -748,6 +768,7 @@ class InversionWindow(QMainWindow):
         self._poll_run()
         self.b_run.setEnabled(True)
         self.b_stop.setEnabled(False)
+        progress_state(self.prog, 'stopped')
         st = ic.read_status(self.run_dir) if self.run_dir else {}
         self.lbl_run.setText(st.get('message', 'finished'))
         if st.get('state') == 'failed':
@@ -828,14 +849,13 @@ class InversionWindow(QMainWindow):
         self.lbl_iter.setText(f'{i} of {its[-1]}' if kept else f'latest ({i})')
         self.sl_iter.setEnabled(kept)
         import model_viewer as mv
-        o = mv.ViewOptions(mode='cells', mask='none', cbar_size=2.0, legend=False, fontsize=11,
-                           vmin=self.settings.v_min, vmax=None, recv_size=14, shot_size=50, vexag=0)
+        o = mv.ViewOptions(mode='cells', mask='none', legend=False, fontsize=11, cbar_thick=0.3,
+                           vmin=self.settings.v_min, vmax=None, recv_size=3, shot_size=7, vexag=0)
         try:
             v, _ = self.res.iteration(i)
             o.vmax = float(np.percentile(v, 99.5))
             o.vmin = float(np.percentile(v, 0.5))
-            mv.draw_model(fig, self.res, o, i)
-            fig.axes[0].set_title(f'Velocity, iteration {i}', fontsize=12)
+            mv.draw_model(fig, self.res, o, i, title=f'Velocity, iteration {i}')
         except Exception as e:                       # noqa: BLE001
             fig.clear()
             fig.text(0.5, 0.5, f'{type(e).__name__}: {e}', ha='center')
@@ -1003,7 +1023,8 @@ class InversionWindow(QMainWindow):
             self.p_model.draw()
             return
         try:
-            mv.draw_model(fig, self.res, mv.ViewOptions(show_doi=True, vexag=0, fontsize=11))
+            mv.draw_model(fig, self.res, mv.ViewOptions(show_doi=True, vexag=0, fontsize=11),
+                          title='P-wave velocity')
         except Exception as e:                       # noqa: BLE001
             fig.clear()
             fig.text(0.5, 0.5, f'{type(e).__name__}: {e}', ha='center')
@@ -1058,7 +1079,15 @@ class InversionWindow(QMainWindow):
             self.log.clear()
             self.lbl_run.setText('This run is still going in its own process: following it.')
             self.prog.setRange(0, self.res.settings.max_iter)
+            progress_state(self.prog, 'running')
             self._poll.start(1500)
+        elif self._running():
+            progress_state(self.prog, 'running')
+        elif st.get('state') in ('done', 'stopped', 'failed'):
+            self.prog.setRange(0, max(1, self.res.settings.max_iter))
+            progress_state(self.prog, 'stopped')
+        else:
+            progress_state(self.prog, '')
 
     def _tab_changed(self, i):
         if i == 3:
